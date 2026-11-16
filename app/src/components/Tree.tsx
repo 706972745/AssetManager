@@ -1,0 +1,330 @@
+import { useRef, useEffect, useState, type ReactNode } from "react";
+import type { DirNode, Source } from "../types";
+import { BlinkCaretInput, Icon } from "./ui";
+
+/** 侧栏行：图标 15 + 文字，与 FontManager .nav-row 同一套内距（行内 11 起、文字 35 起）。 */
+const ROW_PAD = 11;
+const DEPTH_STEP = 14;
+/** 最多几个素材库（与 App 的 MAX_LIBS 同值；标题上的 x/3 用它） */
+const MAX_LIBS = 3;
+
+/** 展开状态持久化的 key（T14）。
+ *  存**路径**而不是目录 id：重建索引后 id 会变，存 id 就会把不相干的目录
+ *  张冠李戴地展开 —— 那种 bug 用户根本看不懂是怎么来的。 */
+const OPEN_KEY = "am.tree.open.v1";
+
+/** 返回 `null` = **从来没存过**（首次启动），空 Set = 用户手动全收起来了。
+ *  两者必须分开：否则用户收好树，重启又被"贴心"地展开一次。 */
+function loadOpenPaths(): Set<string> | null {
+  try {
+    const raw = localStorage.getItem(OPEN_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.filter((x) => typeof x === "string")) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveOpenPaths(paths: Set<string>) {
+  try {
+    localStorage.setItem(OPEN_KEY, JSON.stringify([...paths]));
+  } catch {
+    /* 存不进去就本次会话有效 */
+  }
+}
+
+interface Props {
+  source: Source;
+  selected: number | null;
+  onSelect: (n: DirNode) => void;
+  onDropTo: (target: DirNode) => void;
+  /** 侧栏 + 内联输入提交后回调：把这条路径加进库（真的会扫盘） */
+  onAddPath: (path: string) => void;
+  onOpenLibrary: () => void;
+  onTrash: () => void;
+  onAbout: () => void;
+  onShortcuts: () => void;
+  refreshKey: number;
+  /** 标签抽屉（默认收起、悬浮左缘展开）。侧栏只负责给它一块位置，内容与状态都在 App 里 */
+  tagDock?: ReactNode;
+}
+
+export function Tree({
+  source,
+  selected,
+  onSelect,
+  onDropTo,
+  onAddPath,
+  onOpenLibrary,
+  onTrash,
+  onAbout,
+  onShortcuts,
+  refreshKey,
+  tagDock,
+}: Props) {
+  const [roots, setRoots] = useState<DirNode[]>([]);
+  const [kids, setKids] = useState<Map<number, DirNode[]>>(new Map());
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  /* 展开的目录路径集合（持久化用）；id ↔ path 的映射靠 nodesRef 维护 */
+  const openPaths = useRef<Set<string> | null>(loadOpenPaths());
+  const openSet = () => {
+    if (!openPaths.current) openPaths.current = new Set();
+    return openPaths.current;
+  };
+  const nodesRef = useRef<Map<number, DirNode>>(new Map());
+  const [sectionOpen, setSectionOpen] = useState(true);
+  const [hover, setHover] = useState<number | null>(null);
+  /* 侧栏 + 的内联输入（与 FontManager 的「+ 新建分组」同一套互动：
+     原地长出一行输入框，回车提交 / Esc 取消 / 失焦提交）。 */
+  const [adding, setAdding] = useState(false);
+  const [addPath, setAddPath] = useState("");
+  const closedRef = useRef(false);
+
+  const openAdd = () => {
+    closedRef.current = false;
+    setAddPath("");
+    setAdding(true);
+  };
+  const closeAdd = () => {
+    closedRef.current = true;
+    setAdding(false);
+    setAddPath("");
+  };
+  const commitAdd = () => {
+    if (closedRef.current) return;
+    const p = addPath.trim();
+    closedRef.current = true;
+    setAdding(false);
+    setAddPath("");
+    if (p) onAddPath(p);
+  };
+
+  const remember = (list: DirNode[]) => {
+    for (const n of list) nodesRef.current.set(n.id, n);
+  };
+
+  /** 按持久化的路径把树恢复出来：逐层 load，最多 6 层（再深就让用户自己点）。 */
+  const restore = async (roots: DirNode[]) => {
+    if (openPaths.current === null) {
+      // 首次启动：只有一个库就顺手展开，别让用户对着一个折叠箭头猜
+      if (roots.length === 1) {
+        setOpen(new Set([roots[0].id]));
+        openPaths.current = new Set([roots[0].path]);
+        saveOpenPaths(openPaths.current);
+      } else {
+        openPaths.current = new Set();
+      }
+      return;
+    }
+    const want = openPaths.current;
+    if (!want.size) {
+      setOpen(new Set());
+      return;
+    }
+    const next = new Set<number>();
+    let level = roots.filter((r) => want.has(r.path));
+    for (const n of level) next.add(n.id);
+    for (let depth = 0; depth < 6 && level.length; depth++) {
+      const kidsList = await Promise.all(level.map((n) => source.children(n.id).catch(() => [])));
+      const merged = new Map<number, DirNode[]>();
+      level.forEach((n, i) => merged.set(n.id, kidsList[i]));
+      setKids((m) => {
+        const nm = new Map(m);
+        for (const [k, v] of merged) nm.set(k, v);
+        return nm;
+      });
+      const flat = kidsList.flat();
+      remember(flat);
+      level = flat.filter((c) => want.has(c.path));
+      for (const n of level) next.add(n.id);
+    }
+    setOpen(next);
+  };
+
+  useEffect(() => {
+    void source.roots().then((r) => {
+      // 库根可能变了（重建索引 / 加删库），把已经不存在的路径丢掉，
+      // 否则 localStorage 里会越攒越多死路径
+      setRoots(r);
+      remember(r);
+      void restore(r);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, refreshKey]);
+
+  const load = async (id: number) => {
+    if (kids.has(id)) return;
+    const ch = await source.children(id);
+    remember(ch);
+    setKids((m) => new Map(m).set(id, ch));
+  };
+
+  const toggle = async (n: DirNode) => {
+    const next = new Set(open);
+    const paths = openSet();
+    if (next.has(n.id)) {
+      next.delete(n.id);
+      paths.delete(n.path);
+    } else {
+      next.add(n.id);
+      paths.add(n.path);
+      await load(n.id);
+    }
+    setOpen(next);
+    saveOpenPaths(paths);
+  };
+
+  /* 点了某个目录但它是折叠的？展开它（用户预期"我点了就该看到里面"）。
+     注意不改 openPaths —— 这是被动展开，用户没做过"展开"的决定。 */
+  const selectNode = (n: DirNode) => {
+    onSelect(n);
+  };
+
+  const row = (n: DirNode, depth: number) => {
+    const isOpen = open.has(n.id);
+    const list = kids.get(n.id);
+    return (
+      <div key={n.id}>
+        <div
+          className={`tree-row ${selected === n.id ? "sel" : ""} ${hover === n.id ? "drop-hover" : ""}`}
+          data-dir-path={n.path}
+          data-dir-name={n.name}
+          /* 库根标记：右键菜单靠它决定要不要给「从素材库移除」（子目录没有这一项） */
+          data-dir-root={n.parentId === null ? "1" : undefined}
+          style={{ paddingLeft: ROW_PAD + depth * DEPTH_STEP }}
+          onClick={() => selectNode(n)}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setHover(n.id);
+          }}
+          onDragLeave={() => setHover(null)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setHover(null);
+            // 只认「应用内拖动」这个自定义类型：从资源管理器拖进来的文件
+            // 不该把当前选中的素材搬走（那是两个完全不同的意图）
+            if (!e.dataTransfer.types.includes("application/x-am-assets")) return;
+            onDropTo(n);
+          }}
+          title={n.path}
+        >
+          {/* 箭头压在左内距里（绝对定位），这样图标/文字与参照物同一列 */}
+          <span
+            className={`tree-caret ${isOpen ? "open" : ""}`}
+            style={{
+              left: depth * DEPTH_STEP,
+              visibility: n.hasChildren ? "visible" : "hidden",
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (n.hasChildren) void toggle(n);
+            }}
+          >
+            <Icon name="chevron" size={10} stroke={2} />
+          </span>
+          <span className="nav-icon">
+            <Icon name="folder" size={15} stroke={1.5} />
+          </span>
+          <span className="tree-name">{n.name}</span>
+          <span className="tree-count">{n.assetCnt > 0 ? n.assetCnt : 0}</span>
+        </div>
+        {isOpen && list?.map((c) => row(c, depth + 1))}
+      </div>
+    );
+  };
+
+  return (
+    <aside className="tree">
+      <div className="tree-scroll scroll-hot">
+        <div className="tree-section">
+          <div className="tree-heading-row">
+            <span
+              className={`caret ${sectionOpen ? "" : "closed"}`}
+              onClick={() => setSectionOpen((v) => !v)}
+              style={{ cursor: "default" }}
+            >
+              <Icon name="chevron" size={10} stroke={2} className="rot90" />
+            </span>
+            <span className="grow">素材库</span>
+            {/* 多库上限（最多 3 个）写在标题上：用户不用点开菜单就知道还能加几个 */}
+            <span className="lib-quota mono" title={`已加入 ${roots.length} / ${MAX_LIBS} 个素材库`}>
+              {roots.length}/{MAX_LIBS}
+            </span>
+            <button
+              className="side-add"
+              title="添加素材文件夹"
+              aria-label="添加素材文件夹"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (adding) closeAdd();
+                else openAdd();
+              }}
+            >
+              <Icon name="plus" size={12} stroke={1.8} />
+            </button>
+          </div>
+          {adding && (
+            <div className="tree-input-row">
+              <span className="nav-icon">
+                <Icon name="folder" size={15} stroke={1.5} />
+              </span>
+              <BlinkCaretInput
+                autoFocus
+                value={addPath}
+                onChange={setAddPath}
+                placeholder="粘贴文件夹路径，回车加入"
+                inputClassName="tree-input"
+                ariaLabel="加入素材库的文件夹路径"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitAdd();
+                  else if (e.key === "Escape") {
+                    e.stopPropagation();
+                    closeAdd();
+                  }
+                }}
+                onBlur={commitAdd}
+              />
+            </div>
+          )}
+          {sectionOpen && roots.map((r) => row(r, 0))}
+        </div>
+    </div>
+
+      {tagDock}
+
+      {/* 底栏固定四行（照 FontManager：打开库 / 回收站 / 关于 / 快捷键） */}
+      <div className="tree-foot">
+        <div
+          className="tree-row"
+          onClick={onOpenLibrary}
+          title="在资源管理器中打开库根目录"
+        >
+          <span className="nav-icon">
+            <Icon name="reveal" size={15} stroke={1.5} />
+          </span>
+          <span className="tree-name">在资源管理器中打开库</span>
+        </div>
+        <div className="tree-row" onClick={onTrash} title="打开 Windows 回收站（删除就是进这里，可还原）">
+          <span className="nav-icon">
+            <Icon name="trash" size={15} stroke={1.5} />
+          </span>
+          <span className="tree-name">回收站</span>
+        </div>
+        <div className="tree-row" onClick={onAbout} title="关于 AssetManager">
+          <span className="nav-icon">
+            <Icon name="info" size={15} stroke={1.5} />
+          </span>
+          <span className="tree-name">关于 AssetManager</span>
+        </div>
+        <div className="tree-row" onClick={onShortcuts} title="快捷键一览">
+          <span className="nav-icon">
+            <Icon name="keyboard" size={15} stroke={1.5} />
+          </span>
+          <span className="tree-name">快捷键</span>
+          <span className="side-kbd">?</span>
+        </div>
+      </div>
+    </aside>
+  );
+}

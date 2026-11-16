@@ -1,0 +1,28 @@
+[package]
+name = "assetmanager"
+version = "0.8.0"
+description = "AssetManager · 百万级素材管理器"
+authors = ["AssetManager"]
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# 生产包必须带这个：否则 exe 会去连 devUrl（localhost:1430）而不是内嵌 dist
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+am-core = { path = "../core" }
+rfd = "0.17.2"
+drag = "2.1.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

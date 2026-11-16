@@ -1,0 +1,34 @@
+# ===== 构建产物（可再生，当前合计约 5.1 GB）=====
+target/
+**/target/
+app/dist/
+app/node_modules/
+node_modules/
+
+# Tauri 生成物（capabilities schema 等，每次构建重生成）
+src-tauri/gen/
+
+# ===== 本地开发/调试，不进版本库 =====
+*.log
+_tmp/
+probes/
+.shots/
+*.tmp
+
+# ===== 运行时数据：绝不能进库 =====
+# 索引库 / 缩略图缓存 / ops 日志
+*.db
+*.db-wal
+*.db-shm
+cache/
+thumbs/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# ===== 内部过程文档（沿用 FontManager 纪律：过程留在本地）=====
+UI待定问题清单.md

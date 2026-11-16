@@ -1,0 +1,37 @@
+[package]
+name = "am-core"
+version = "0.8.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "gif", "webp", "bmp", "ico", "tiff", "tga", "dds", "hdr", "exr", "pnm", "qoi", "ff",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+trash = "3"
+webp = "0.3.1"
+notify = "8.2.2"
+# JPEG 降采样解码：`image` 走的 zune-jpeg 没有 DCT 缩放（必须全解再缩），
+# 一张 24MP 照片全解要 200–400 ms，而缩略图只要 384px。
+# jpeg-decoder 支持在 DCT 域直接出 1/2、1/4、1/8 的图，像素少 64 倍、解码十几毫秒。
+jpeg-decoder = "0.3"
+
+# 系统缩略图兜底（T10 L3）走手写 FFI（core/src/shellthumb.rs），
+# **不引 `windows` crate**：那个 crate 打开 Win32_UI_Shell 后 rustc 工作集能跑到 37 GB，
+# 编译直接卡死（2026-11-16 实测）。这里只用到 SHCreateItemFromParsingName + GetDIBits，
+# 直接 #[link] shell32/gdi32/ole32 就够，和 fsops 的剪贴板实现同一条路线。
+
+[[bin]]
+name = "am-cli"
+path = "src/bin/am_cli.rs"
+
+[[bin]]
+name = "am-bench"
+path = "src/bin/am_bench.rs"
+
+[[bin]]
+name = "am-thumbbench"
+path = "src/bin/am_thumbbench.rs"

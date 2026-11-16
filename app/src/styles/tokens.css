@@ -1,0 +1,365 @@
+/* AssetManager · 设计令牌
+   ─────────────────────────────────────────────────────────────────────────
+   全部照 FontManager 生效值重写（不 import、不写相对路径依赖 —— 两个仓各一份）。
+   对照来源：FontManager/src/design/tokens.css + src/app.css 的「视觉对齐 R4/R5」段
+   + docs/FontManager设计统一.md（2026-11-16，对齐版本 2.3.0）。
+
+   三层颜色，禁止在组件里写裸 #RRGGBB：
+     原色（本节）→ 语义令牌（--ui-* / --text-*）→ 组件样式。
+
+   默认主题是**深色**（与 FontManager 一致）；浅色走 html[data-theme="light"]。
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  --ink-rgb: 255, 255, 255;
+  --scrim-rgb: 14, 14, 14;
+
+  /* 纸/墨平色（不用渐变玻璃） */
+  --canvas: #111110;
+  --ui-bg: #111110;
+  --ui-panel: #171715;
+  --ui-menu: #1c1c1a;
+  --ui-fg: #f2f2ef;
+  --ui-fg-2: #9a9a94;
+  --ui-fg-3: #666660;
+  --ui-line: #2a2a27;
+  --ui-line-hover: #9a9a94;
+  --ui-hover: #1c1c1a;
+  --ui-accent: #5b8cff;
+
+  /* 叠加档（半透明，让底色透出来 —— 实色 hex 在浅色主题下会「糊成一片」） */
+  --e0: rgba(255, 255, 255, 0);
+  --e1: rgba(255, 255, 255, 0.04);
+  --e2: rgba(255, 255, 255, 0.07);
+  --e3: rgba(255, 255, 255, 0.1);
+  --e4: rgba(255, 255, 255, 0.12);
+
+  /* 文字：主次靠字重与颜色区分，不靠字号 */
+  --text-primary: #f2f2ef;
+  --text-secondary: #9a9a94;
+  --text-tertiary: #666660;
+  --text-disabled: rgba(242, 242, 239, 0.25);
+
+  /* 旧名别名：AssetManager 早先的组件全用 --text-1/2/3，保留避免全站改名 */
+  --text-1: var(--text-primary);
+  --text-2: var(--text-secondary);
+  --text-3: var(--text-tertiary);
+
+  --hairline: rgba(20, 20, 18, 0.06);
+  --accent: var(--ui-accent);
+  --accent-a: rgba(91, 140, 255, 0.16);
+  --accent-glow: rgba(91, 140, 255, 0.35);
+  --accent-glow-soft: rgba(91, 140, 255, 0.18);
+  --danger: #e05a4a;
+  /* 唯一允许的真红/真蓝（FontManager 设计统一 §1.3）：仅自绘光标用 */
+  --caret-blue: #4c8dff;
+  --skeleton: rgba(242, 242, 239, 0.05);
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --glass-border: #2a2a27;
+  --glass-top-highlight: rgba(255, 255, 255, 0.1);
+  --glass-top-highlight-strong: rgba(255, 255, 255, 0.16);
+  --shadow-ground: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-ambient: 0 12px 36px rgba(0, 0, 0, 0.45);
+  --shadow-mass: 0 12px 36px rgba(0, 0, 0, 0.55);
+
+  /* 字阶：新增代码只用 9 / 11 / 13；16 以上是标题 */
+  --fs-9: 9px;
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-20: 20px;
+  --fs-28: 28px;
+  --fs-40: 40px;
+  --fs-56: 56px;
+
+  --font-ui: "Inter Variable", "Inter", system-ui, "Segoe UI", "Microsoft YaHei",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC",
+    "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", monospace;
+
+  /* 动效：五档纯时长。写死毫秒数 = 绕过「减少动效」开关，新代码一律用令牌 */
+  --t-micro: 100ms; /* 颜色、透明度、hover */
+  --t-quick: 180ms; /* 小位移、图标变形 */
+  --t-state: 260ms; /* 状态切换（开关、选中、滑块） */
+  --t-layout: 400ms; /* 布局尺寸 */
+  --t-scene: 600ms; /* 场景级（弹层入场） */
+
+  --r-0: 0px;
+  --r-2: 2px;
+  --r-4: 4px;
+  --r-8: 8px;
+  --r-12: 12px;
+  --r-pill: 999px;
+  --r-anchor: 1px;
+
+  --h-icon: 24px;
+  --h-btn: 28px;
+  --h-ctl: 36px; /* 顶栏控件统一高度 */
+
+  --titlebar-h: 40px;
+  --tree-w: 248px;
+  --detail-w: 348px;
+  --gap: 8px;
+
+  /* 窗口圆角：与 FontManager --qb-radius 同源。窗口是 tauri transparent:true + shadow:false，
+     圆角完全由 .app-frame 画，四角必须由 body 透出桌面。 */
+  --qb-radius: 8px;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --ink-rgb: 22, 22, 32;
+  --scrim-rgb: 40, 40, 40;
+
+  --canvas: #fafaf8;
+  --ui-bg: #fafaf8;
+  --ui-panel: #ffffff;
+  --ui-menu: #ffffff;
+  --ui-fg: #141412;
+  --ui-fg-2: #6b6b66;
+  --ui-fg-3: #9b9b95;
+  --ui-line: #e2e2dd;
+  --ui-line-hover: #9b9b95;
+  --ui-hover: #f1f1ed;
+  --ui-accent: #1b4fe0;
+
+  --e0: rgba(22, 22, 32, 0);
+  --e1: rgba(22, 22, 32, 0.04);
+  --e2: rgba(22, 22, 32, 0.07);
+  --e3: rgba(253, 253, 255, 0.66);
+  --e4: rgba(253, 253, 255, 0.78);
+
+  --text-primary: #141412;
+  --text-secondary: #6b6b66;
+  --text-tertiary: #9b9b95;
+  --text-disabled: rgba(20, 20, 18, 0.28);
+
+  --hairline: rgba(20, 20, 18, 0.06);
+  --accent-a: rgba(27, 79, 224, 0.12);
+  --accent-glow: rgba(27, 79, 224, 0.3);
+  --accent-glow-soft: rgba(27, 79, 224, 0.14);
+  --danger: #c0392b;
+  --caret-blue: #2f6bdb;
+  --skeleton: rgba(20, 20, 18, 0.04);
+  --scrim: rgba(20, 20, 18, 0.24);
+
+  --glass-border: #e2e2dd;
+  --glass-top-highlight: rgba(255, 255, 255, 0.65);
+  --glass-top-highlight-strong: rgba(255, 255, 255, 0.9);
+  --shadow-ground: 0 1px 2px rgba(30, 30, 55, 0.12);
+  --shadow-ambient: 0 8px 24px rgba(20, 20, 18, 0.1);
+  --shadow-mass: 0 12px 36px rgba(20, 20, 18, 0.16);
+}
+
+/* ─── 基础 ────────────────────────────────────────────────────────────── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  /* 窗口透明：圆角外侧要露出桌面，页面画布本身不能铺底色。
+     真正铺纸白的是 .app-frame（border-radius + overflow:hidden）。 */
+  background: transparent;
+}
+
+/* 启动入场（与 FontManager #root 同一节奏） */
+#root {
+  animation: app-arrive var(--t-state) ease-out;
+}
+@keyframes app-arrive {
+  from {
+    opacity: 0;
+  }
+}
+
+html.theme-switching body {
+  transition: background var(--t-state) ease, color var(--t-state) ease;
+}
+
+body {
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+/* 文本输入元素必须把 user-select 收回来（2026-11-15，QA 报「搜索框打不进字」）。
+   body 上的 user-select: none 会被 <input> 继承，继承到 none 的文本框
+   **拿得到焦点、画得出光标，但不接收字符**（编辑管线把它当成不可选区域）。
+   反向覆盖必须是元素本身，放在 * 或 body 上无效。 */
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 0 5px var(--accent-glow-soft);
+  border-radius: 5px;
+}
+input:focus-visible,
+input:focus,
+textarea:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ─── 全局滚动条（唯一一处定义，任何容器都不许单独覆盖）───────────────
+   槽位固定 10px，视觉宽度靠透明 border 收细：
+   · 平时 border 4.5px → 视觉 1px 发丝线；
+   · 指针靠近容器右缘（容器自己挂 .scroll-hot）或压在条上 → 边收 2px，视觉 6px，抓得住。
+   槽位不随状态变，变粗时内容不会跳一下 —— 这是不用 width 做动画的原因。
+
+   ⚠️ 两条硬约定（FontManager 设计统一 §5.1）：
+   1. **不许声明 scrollbar-width / scrollbar-color** —— Chromium 里只要写了它，
+      整套 ::-webkit-scrollbar 规则会被整体禁用，菜单滚动条就会和别处不一样。
+   2. `.scroll-hot` 必须挂在**滚动容器自己**身上，::-webkit-scrollbar 只认宿主元素的类。 */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--ui-fg-3);
+  background-clip: padding-box;
+  border: 4.5px solid transparent;
+  border-radius: 999px;
+  min-height: 36px;
+}
+.scroll-hot::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:active {
+  border-width: 2px;
+  background-color: color-mix(in srgb, var(--ui-fg) 40%, transparent);
+  background-clip: padding-box;
+}
+
+/* 侧栏目录树：滚动条不画出来（侧栏只有 236px，一条常驻的条会吃掉文字宽度）。
+   只是不画，仍然能滚。**不要把这个套路推广到别的容器** —— 主区、详情、设置都要可见的条。 */
+.tree-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.tree-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ─── 通用件 ──────────────────────────────────────────────────────────── */
+.tabular,
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--e1);
+  border-radius: 5px;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    60deg,
+    transparent 30%,
+    rgba(var(--ink-rgb), 0.06) 50%,
+    transparent 70%
+  );
+  transform: translateX(-100%);
+  animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* ─── 「减少动效」在令牌层收口 ───────────────────────────────────────────
+   组件的降级由 JS 管；这里把五个时长变量压到 1ms，全站 CSS transition 一起停。
+   双轨：软件内开关（html[data-motion="reduced"]）+ 系统偏好（@media）。
+   ⚠️ 别改成 `* { transition: none }` —— 会把载入提示的 opacity 一起干掉，
+      看起来像界面卡死。 */
+html[data-motion="reduced"] {
+  --t-micro: 1ms;
+  --t-quick: 1ms;
+  --t-state: 1ms;
+  --t-layout: 1ms;
+  --t-scene: 1ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-micro: 1ms;
+    --t-quick: 1ms;
+    --t-state: 1ms;
+    --t-layout: 1ms;
+    --t-scene: 1ms;
+  }
+  .skeleton::after {
+    animation: none;
+  }
+}
+
+/* 局部例外：停靠面板的升降是「悬停即时反馈」，不走 260ms（FontManager §1.5）。
+   它不是装饰动效，也不参与场景动画。 */
+.tag-dock {
+  --t-dock: 110ms;
+}
+
+/* 色桶（T24）——与 core/src/palette.rs 的 BUCKETS 对应。
+   只用于"颜色筛选"的小圆点与文字，不参与标签配色（那套是 --tc-*）。 */
+:root {
+  --c-red: #d94a45;
+  --c-orange: #e08a3c;
+  --c-amber: #d9b23f;
+  --c-yellow: #e3d94a;
+  --c-green: #4f9d5d;
+  --c-teal: #3f9d94;
+  --c-blue: #4a7fd9;
+  --c-indigo: #5b5fd0;
+  --c-violet: #8a5bc9;
+  --c-pink: #cf5b94;
+  --c-brown: #8a6647;
+  --c-black: #1d1d1b;
+  --c-gray: #8b8b86;
+  --c-white: #ececea;
+}
