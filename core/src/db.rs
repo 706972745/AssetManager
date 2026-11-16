@@ -1902,6 +1902,25 @@ pub fn assets_without_palette_paths(c: &Connection, limit: i64) -> Res<Vec<(i64,
     Ok(rows.filter_map(|x| x.ok()).collect())
 }
 
+/// 缺主色板 / 缺哈希的**条数**（只数不取行：百万级的库不能为了显示一个数字把路径全读出来）
+pub fn count_missing_meta(c: &Connection) -> Res<(i64, i64)> {
+    let pal: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE missing=0 AND kind=0 AND (palette IS NULL OR palette='')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(e2s)?;
+    let hsh: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE missing=0 AND hash_x IS NULL AND size > 0",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(e2s)?;
+    Ok((pal, hsh))
+}
+
 /// 按绝对路径点查素材 id（引用里的绝对路径命中）。Windows 上大小写不敏感。
 pub fn asset_id_by_path(c: &Connection, path: &str) -> Res<Option<i64>> {
     let p = path.replace('/', "\\");

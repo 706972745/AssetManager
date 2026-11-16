@@ -1056,8 +1056,9 @@ impl App {
         let mut no_pal = 0;
         let mut no_hash = 0;
         for l in &self.libs {
-            no_pal += db::assets_without_palette_paths(&l.conn, 1_000_000)?.len() as i64;
-            no_hash += db::assets_without_hash_paths(&l.conn, 1_000_000)?.len() as i64;
+            let (p, h) = db::count_missing_meta(&l.conn)?;
+            no_pal += p;
+            no_hash += h;
         }
         Ok((no_pal, no_hash))
     }

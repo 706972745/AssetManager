@@ -36,7 +36,7 @@ pub fn maybe_migrate(reg: &mut Connection, data_dir: &Path) -> Res<()> {
         .map_err(|e| format!("拆库前备份失败，已中止：{e}"))?;
 
     // 老库的库根（按 id 升序，和侧栏顺序一致）
-    let mut roots: Vec<(i64, String, i64)> = Vec::new();
+    let roots: Vec<(i64, String, i64)>;
     {
         let mut st = reg
             .prepare("SELECT id, root, added_at FROM libs ORDER BY id")
@@ -47,7 +47,7 @@ pub fn maybe_migrate(reg: &mut Connection, data_dir: &Path) -> Res<()> {
         roots = rows.filter_map(|x| x.ok()).collect();
     }
     // 老库里可能有素材但库里一行都没有（早期版本只 add_lib 没写 root）→ 从 dirs 顶层补
-    if roots.is_empty() {
+    let roots = if roots.is_empty() {
         let mut st = reg
             .prepare(
                 "SELECT id, path FROM dirs WHERE parent_id IS NULL AND id IN
@@ -55,8 +55,10 @@ pub fn maybe_migrate(reg: &mut Connection, data_dir: &Path) -> Res<()> {
             )
             .map_err(|e| e.to_string())?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
-        roots = rows.filter_map(|x| x.ok()).map(|(i, p): (i64, String)| (i, p, db::now_ts())).collect();
-    }
+        rows.filter_map(|x| x.ok()).map(|(i, p): (i64, String)| (i, p, db::now_ts())).collect()
+    } else {
+        roots
+    };
 
     for (lib_id, root, added_at) in &roots {
         let rel = format!("libs/lib-{}.db", lib_id);
