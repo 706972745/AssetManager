@@ -817,19 +817,6 @@ export default function App() {
     [snaps, openSnapshot, resolveSnapshot, exportSnapshot, exportSnapshotZip, deleteSnapshot]
   );
 
-  const snapshotHeadMenu = useCallback(
-    (x: number, y: number) => {
-      setCtx({
-        x,
-        y,
-        items: [
-          { label: "新建快照", icon: "plus", action: () => setSnapPrompt({ mode: "new" }) },
-          { label: "导入快照（.json）", icon: "file", action: () => void importSnapshot() },
-        ],
-      });
-    },
-    [importSnapshot]
-  );
 
   const groupMenu = useCallback((name: string, x: number, y: number) => {
     setCtx({
@@ -1987,7 +1974,7 @@ export default function App() {
               onOpen={openSnapshot}
               onMenu={snapshotMenu}
               onCreate={() => setSnapPrompt({ mode: "new" })}
-              onHeadMenu={snapshotHeadMenu}
+              onImport={() => void importSnapshot()}
             />
           }
           tagDock={

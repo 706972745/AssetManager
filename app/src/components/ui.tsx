@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   ArrowUpDown,
+  Camera,
   ChevronRight,
   Box,
   Columns2,
@@ -16,6 +17,7 @@ import {
   Eye,
   Expand,
   FileText,
+  FileUp,
   Film,
   Filter,
   Folder,
@@ -107,6 +109,14 @@ const ICONS: Record<string, Glyph> = {
   ),
   more: ({ size, stroke, className }) => (
     <MoreHorizontal size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 快照（0.12.1）：照 FontManager 侧栏给快照行用的相机图标 */
+  camera: ({ size, stroke, className }) => (
+    <Camera size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 导入（快照 / 未来别的导入都用它） */
+  import: ({ size, stroke, className }) => (
+    <FileUp size={size} strokeWidth={stroke} className={className} />
   ),
   image: ({ size, stroke, className }) => (
     <ImageIcon size={size} strokeWidth={stroke} className={className} />

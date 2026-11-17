@@ -957,3 +957,23 @@ AM_AUTO_SNIP=1 ./target/debug/assetmanager.exe   # 4 秒后自动开一次截图
 - 快照**不含**每张图在哪一行的顺序/在板上的位置；灵感板仍然是临时视图。
 - 哈希是"内容全等"：同一张图另存为不同格式（PNG→JPG）就是另一张，不会自动算相似
   （相似度那套在查重里，语义不同，没混用）。
+
+---
+
+## §19 · 0.12.1 快照区改成 FontManager 那种「独立段落」（2026-11-17）
+
+> owner：「这个快照放在左边栏目的位置参考 FontManager 软件中的快照放在 UI 界面的位置，**不要和标签放在一起**。」
+
+上一版把快照做成了"标签 dock 上面再叠一块 32px 的 dock"，看起来像标签的一部分。改成 FontManager 侧栏
+「快照」那一段的形态（`Sidebar.tsx` 612 行起 / `.sidebar-section`、`.sidebar-heading`、`.sidebar-add`）：
+
+- **独立 section**：小号大字距段落标题（10px / 600 / letter-spacing .1em / `--text-3`，上下留白 14/5）+ 右侧
+  「导入（.json）」和「新建」两个 20×20 图标按钮；不再是 32px 的树行。
+- **可折叠**：标题前的 chevron 点一下收起，状态存 `am.snaps.closed.v1`（存"收起"，默认展开）。
+- **行**沿用 `tree-row`：相机图标（新加 `camera` / `import` 两个图标）+ 名字 + 数量。
+- **位置**照 FontManager 的顺序：目录树（浏览）→ 快照 → 标签（标签仍是自己的 dock）→ 底栏。
+  快照段上方一条发丝线、下方留 4px 气口，两段挨着但不是一块。
+- 头部右键菜单去掉（改成显式两个按钮），`snapshotHeadMenu` 一并删除。
+
+**验证**：`vite build` 通过；用 dev server + mock 数据（临时）headless 截图确认侧栏顺序与分隔，
+截完已把 mock 还原成空列表（浏览器预览模式本来就没有快照）。打包安装见 §18.7 同一套流程。

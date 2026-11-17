@@ -4015,61 +4015,76 @@ body.snip-body #root {
   font-size: 13px;
 }
 
-/* ---------------- 快照面板（0.12.0） ----------------
-   常驻在标签面板上方：头部一行（32 高，跟 .nav-row 同一套盒模型），下面是快照列表。
-   **不做悬停展开**（理由见 SnapshotDock.tsx 头注释）—— 它是"看得见才找得到"的东西。 */
-.snap-dock {
+/* ---------------- 快照分区（0.12.1，位置与形态照 FontManager 侧栏「快照」段） ----------------
+
+   它是侧栏里的**一个 section**：段落标题（小号大字距 + 可折叠）+ 右侧「导入 / 新建」两个图标按钮，
+   下面是快照行。**不要**再写成"贴在标签 dock 上的第二块"（owner 2026-11-17 明确）。
+   数值照 FontManager `.sidebar-section / .sidebar-heading / .sidebar-add`：标题 10px/600/字距 .1em、
+   上下留白 14/5、按钮 20×20 / 4 圆角。 */
+
+.snap-section {
   flex: none;
   display: flex;
   flex-direction: column;
-  margin: 0 -10px;
-  padding: 0 10px;
-  background: var(--ui-bg);
+  gap: 1px;
+  /* 与上方目录树之间留一道发丝线：让"这是新的一段"看得出来，而不是树多了一行 */
   border-top: 1px solid var(--hairline);
+  /* 与下方「标签」dock 之间再留一点气口：两段挨着但**不是一块**（owner 2026-11-17） */
+  padding-bottom: 4px;
 }
-.snap-dock-head {
-  flex: 0 0 32px;
+.snap-heading {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 32px;
-  padding: 0 11px 0 0;
-  font-size: var(--fs-11);
-  font-weight: 500;
-  color: var(--text-2);
-  user-select: none;
-}
-.snap-dock-head:hover {
-  color: var(--text-1);
-}
-.snap-dock-head .grow {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.snap-add {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
+  justify-content: space-between;
+  gap: 2px;
+  padding: 14px 11px 5px;
+  font-size: var(--fs-10);
+  font-weight: 600;
+  letter-spacing: 0.1em;
   color: var(--text-3);
 }
-.snap-add:hover {
-  background: var(--ui-hover);
+.snap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: default;
+}
+.snap-toggle:hover {
   color: var(--text-1);
 }
-.snap-dock-list {
-  max-height: 132px;
+.snap-chevron {
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.snap-add {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  color: var(--text-3);
+  transition: background var(--t-quick) ease, color var(--t-quick) ease,
+    border-color var(--t-quick) ease;
+}
+.snap-add:hover {
+  background: var(--e2);
+  color: var(--text-1);
+  border-color: var(--ui-line);
+}
+.snap-list {
+  max-height: 168px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-bottom: 2px;
-}
-.snap-dock-list:empty {
-  display: none;
-}
-.snap-row {
-  border-radius: 0;
+  padding-bottom: 4px;
 }
 .snap-empty {
   padding: 2px 11px 8px;
