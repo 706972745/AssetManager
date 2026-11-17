@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "am-core"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "arboard",
  "image",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "assetmanager"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "am-core",
  "base64 0.22.1",

@@ -1042,3 +1042,33 @@ TagDock:  const open = pinned || !!hold;   // hold = 「标签面板保持展开
 快照的新建/改名**不再影响标签面板**；点 `+` 只会让**快照段自己**（若原先收起）展开露出输入行。
 
 **验证**：`vite build` 通过；0.12.4 打包安装。
+
+---
+
+## §23 · 建 GitHub 仓 + 首个 Release（2026-11-17）
+
+> owner：「在 github 上新建一个名为 AssetManager 的仓库，参考 fontmanager 仓库一样，然后上传，
+> 然后 releases，然后更新 readme 和介绍，权限和 fontmanager 一样。」
+
+照 FontManager 的设置逐项对齐（用 API 查它的元数据，不靠记忆）：
+
+| 项 | FontManager | AssetManager |
+|---|---|---|
+| 可见性 | public | **public** |
+| 默认分支 | main | `master` 改名 `main` 后推 |
+| issues / wiki / projects | 全开 | 全开 |
+| homepage | `…/releases/latest` | 同 |
+| topics | 20 个 | 18 个（`asset-manager` `eagle-alternative` `thumbnail` `moodboard` `snapshot` `psd` `raw` `tauri-app`…） |
+| description | 中文功能串 + 技术栈 | 同写法 |
+| Release | tag `vX.Y.Z`，挂安装包 | tag `v0.12.4`，挂 `AssetManager_0.12.4_x64-setup.exe` |
+
+**做法**：`gh` 本机没装，沿用 FontManager 那条路 —— GitHub REST API + push 凭据
+（`git config remote.origin.pushurl` 里那段，**只走认证、不回显、不写进任何受版本控制的文件**）。
+建仓 → `git remote add origin`（fetch 不带凭据、pushurl 带）→ 推 `main` → 打 tag → 建 draft release →
+传资产 → `PATCH draft:false`。
+
+**README 重写**：原来是"只指路"的三行；现在照 FontManager 首页的骨架写 —— 아이콘 + 一句话 +
+badges + 链接行 + 0.12.4 主界面截图 + 「这是什么」+ 能力表 + 快捷键表 + 构建命令 + 已知限制 +
+与 FontManager 的关系 + 文档索引。正文仍以 `AssetManager-项目说明.md` 为准，README 只做门面。
+
+**核对**：仓库 public / main / issues·wiki·projects 开 / topics 18 个 / release 已发布且资产 3.61 MiB。
