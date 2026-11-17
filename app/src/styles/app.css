@@ -1164,6 +1164,15 @@
   margin-top: 3px;
   line-height: 1.5;
 }
+/* 连续同一条提示合并后的 `×N`（数值照 FontManager 的 .toast-count） */
+.toast-count {
+  margin-left: 6px;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---------------------------------------------------------------- 浮层 */
 .menu {
@@ -5380,29 +5389,3 @@ body.board-body #root {
   display: none;
 }
 
-/* ---- 操作区里的「看图」：无边框文字按钮（owner 2026-11-17）----
-   它和其他按钮动作性质不同：不碰文件，只是换个方式看。所以不画框，
-   只留图标 + 文字，悬停铺一层 e2 表示可点；高度仍与同排按钮齐平。 */
-.act-row .act-link {
-  flex: 1;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-2);
-  font-size: var(--fs-13);
-  transition: background var(--t-micro), color var(--t-micro);
-}
-.act-row .act-link:hover {
-  background: var(--e2);
-  color: var(--text-1);
-}
-.act-row .act-link svg {
-  flex-shrink: 0;
-}

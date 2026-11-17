@@ -147,10 +147,53 @@ export default function App() {
   const itemsRef = useRef<Asset[]>([]);
   itemsRef.current = items;
 
+  /* 提示条：内容镜像一份在 ref 里 —— 合并判断必须**同步**拿到"最后一条是谁"，
+     放进 setState 的 updater 里读不到（updater 是渲染阶段才跑的，StrictMode 还会跑两遍）。 */
+  const toastsRef = useRef<ToastItem[]>([]);
+  const toastTimers = useRef(new Map<number, number>());
+
   const toast = useCallback((title: string, err = false, detail?: string) => {
+    const commit = (list: ToastItem[]) => {
+      toastsRef.current = list;
+      setToasts(list);
+    };
+    /* 到期自动收（合并时要先 clear 再重设，否则第 3 次点击那条会突然整块消失） */
+    const arm = (id: number) => {
+      window.clearTimeout(toastTimers.current.get(id));
+      toastTimers.current.set(
+        id,
+        window.setTimeout(() => {
+          toastTimers.current.delete(id);
+          commit(toastsRef.current.filter((x) => x.id !== id));
+        }, 3600)
+      );
+    };
+
+    /* 连续同一条提示合并成一条 + `×N` 角标（FontManager 同一套）：
+       连点三次「复制文件名」不该在屏幕右边堆三块，看的人只想知道"复制了三次"。
+       只跟**最后一条**比，不全表扫描 —— A→B→A 应该是三条，合成一条会让人以为中间那次没发生。 */
+    const list = toastsRef.current;
+    const last = list[list.length - 1];
+    if (
+      last &&
+      last.title === title &&
+      (last.detail ?? "") === (detail ?? "") &&
+      !!last.error === !!err
+    ) {
+      commit(list.map((x) => (x.id === last.id ? { ...x, count: x.count + 1 } : x)));
+      arm(last.id);
+      return;
+    }
+
     const id = toastSeq++;
-    setToasts((t) => [...t, { id, title, detail, error: err }].slice(-4));
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+    const next = [...list, { id, title, detail, error: err, count: 1 }];
+    /* 超过 4 条从最旧那条收，顺手清掉它的计时器（不清就是泄漏） */
+    for (const gone of next.slice(0, Math.max(0, next.length - 4))) {
+      window.clearTimeout(toastTimers.current.get(gone.id));
+      toastTimers.current.delete(gone.id);
+    }
+    commit(next.slice(-4));
+    arm(id);
   }, []);
 
   useEffect(() => {
@@ -2199,7 +2242,7 @@ export default function App() {
           thumbPx={THUMB_PX[sizeIndex] ?? 384}
           onReveal={onReveal}
           onRename={onRename}
-          onView={openLightbox}
+          onPeek={openPeek}
           renaming={!!selected && renameId === selected.id}
           onStartRename={() => {
             if (selected) setRenameId(selected.id);

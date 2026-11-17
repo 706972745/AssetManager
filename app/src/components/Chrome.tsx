@@ -570,7 +570,7 @@ export function Detail({
   thumbPx,
   onReveal,
   onRename,
-  onView,
+  onPeek,
   onOpenDefault,
   onCopyFile,
   onDelete,
@@ -603,8 +603,8 @@ export function Detail({
   onReveal: (a: Asset) => void;
   /** 「重命名」入口：**不再弹窗**，改成让顶栏文件名进入就地编辑 */
   onRename: (a: Asset) => void;
-  /** 开大图（灯箱）——详情里那颗「看图」按钮 */
-  onView: (a: Asset) => void;
+  /** 「看图」= **无边框看图窗口**（Peek，窗口就是那张图），不是灯箱 */
+  onPeek: (a: Asset) => void;
   /** 顶栏文件名是否处于改名状态（由 App 统一管：右键菜单 / 操作区的重命名都走这里） */
   renaming: boolean;
   onStartRename: () => void;
@@ -1027,11 +1027,7 @@ export function Detail({
                   </button>
                 </div>
                 <div className="act-row">
-                  {/* 改名不用按钮了：顶栏文件名双击就地改（owner 2026-11-17）。
-                      这一格换成「看图」——无边框，和旁边三个实心按钮区分开，
-                      它只是"换个方式看"，不碰磁盘上的文件。 */}
-                  <button className="act-link" onClick={() => onView(asset)}>
-                    <Icon name="image" size={13} stroke={1.5} />
+                  <button className="btn" onClick={() => onPeek(asset)}>
                     看图
                   </button>
                   <button

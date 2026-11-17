@@ -413,6 +413,8 @@ export interface ToastItem {
   title: string;
   detail?: string;
   error?: boolean;
+  /** 连续同一条提示被合并的次数（1 = 没合并；>1 时标题后显示 `×N`） */
+  count: number;
 }
 
 export function Toaster({ items }: { items: ToastItem[] }) {
@@ -420,7 +422,14 @@ export function Toaster({ items }: { items: ToastItem[] }) {
     <div className="toaster">
       {items.map((t) => (
         <div key={t.id} className={`toast ${t.error ? "err" : ""}`}>
-          <div className="toast-title">{t.title}</div>
+          <div className="toast-title">
+            {t.title}
+            {t.count > 1 && (
+              <span className="toast-count" aria-label={`×${t.count}`}>
+                ×{t.count}
+              </span>
+            )}
+          </div>
           {t.detail && <div className="toast-detail">{t.detail}</div>}
         </div>
       ))}
