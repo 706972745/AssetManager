@@ -787,7 +787,12 @@ export function Snip() {
           submitText();
           return;
         }
-        void finish("copy");
+        /* **Enter = 保存到截图库**（0.1.19 改）。
+           原来照 Snipaste 设成"复制并退出"，后果是用户觉得按 Enter 是"完成"，
+           结果剪贴板被静默换掉（owner 2026-11-18：「截图完成后老是自动复制」）。
+           本软件的 F1 本来就是"落盘进素材库"这条线，所以完成 = 保存才自洽；
+           要复制请按 Ctrl+C 或点「复制到剪贴板」。 */
+        void finish("save");
         return;
       }
       if (!mod && (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown")) {
@@ -940,9 +945,9 @@ export function Snip() {
       onMouseDown={down}
       onMouseMove={move}
       onMouseUp={up}
-      onDoubleClick={(e) => {
-        if (rectRef.current && insideR(rectRef.current, { x: e.clientX, y: e.clientY })) void finish("copy");
-      }}
+      /* 双击**不再**触发"复制并退出"（0.1.19）：双击是最容易误触的动作，
+         而它的后果是悄悄换掉剪贴板。真要复制有 Ctrl+C 和复制按钮，都不难按。 */
+      onDoubleClick={(e) => e.preventDefault()}
       onContextMenu={(e) => {
         e.preventDefault();
         if (textAt) {
@@ -1108,8 +1113,8 @@ export function Snip() {
           <span className="snip-sep" />
           <BarBtn label="取消" keyHint="Esc" danger onPick={() => void source.snipCancel()} icon={<X size={15} strokeWidth={1.6} />} />
           <BarBtn label="贴图" keyHint="中键" onPick={() => void finish("peek")} icon={<Pin size={15} strokeWidth={1.5} />} />
-          <BarBtn label="保存到截图库" keyHint="Ctrl+S" onPick={() => void finish("save")} icon={<Save size={15} strokeWidth={1.5} />} />
-          <BarBtn label="复制到剪贴板" keyHint="Enter" onPick={() => void finish("copy")} icon={<Copy size={15} strokeWidth={1.5} />} />
+          <BarBtn label="保存到截图库" keyHint="Enter / Ctrl+S" onPick={() => void finish("save")} icon={<Save size={15} strokeWidth={1.5} />} />
+          <BarBtn label="复制到剪贴板" keyHint="Ctrl+C" onPick={() => void finish("copy")} icon={<Copy size={15} strokeWidth={1.5} />} />
         </div>
       )}
 
@@ -1239,7 +1244,14 @@ export function Snip() {
           <span className="keys">
             <K>Enter</K>
           </span>
-          <span>复制并退出</span>
+          <span>保存到截图库（不复制）</span>
+        </div>
+        <div className="snip-keyrow">
+          <span className="keys">
+            <K>Ctrl</K>
+            <K>C</K>
+          </span>
+          <span>复制到剪贴板</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
