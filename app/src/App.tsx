@@ -103,13 +103,12 @@ export default function App() {
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
   /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
   const [snaps, setSnaps] = useState<SnapshotRow[]>([]);
-  const [snapPrompt, setSnapPrompt] = useState<{
-    mode: "tag" | "new" | "rename";
-    id?: number;
-    tag?: string;
-    count?: number;
-    initial?: string;
-  } | null>(null);
+  /* 新建 / 改名都是**侧栏就地输入**（照 FontManager，不弹窗）：状态放这里，
+     因为「Ctrl+K → 新建快照」和快照右键「改名」都要能把它打开。 */
+  const [snapCreating, setSnapCreating] = useState(false);
+  const [snapRenaming, setSnapRenaming] = useState<{ id: number; name: string } | null>(null);
+  /* 只剩「把标签下的图片加入快照」这一种弹层（要选目标快照，弹层比就地输入合适） */
+  const [snapPrompt, setSnapPrompt] = useState<{ tag: string; count?: number } | null>(null);
   /** 正在编辑的标签/分组（null = 没开编辑卡） */
   const [tagEdit, setTagEdit] = useState<{ kind: "tag" | "group"; name: string } | null>(null);
   /** 正在编辑的标签的自动规则（T34）：null = 没有规则 */
@@ -582,7 +581,6 @@ export default function App() {
             icon: "copy",
             action: () =>
               setSnapPrompt({
-                mode: "tag",
                 tag,
                 count:
                   tags.find((t) => t.name === tag)?.count ??
@@ -743,30 +741,56 @@ export default function App() {
     [toast]
   );
 
-  const nameSnapshot = useCallback(
+  /* ---------------- 快照的新建 / 改名：都是侧栏里的一行输入（照 FontManager） ----------------
+     空名字 = 用户什么都没写 → 只退出编辑态，不报错（与"添加素材库"一致）。 */
+
+  const createSnapshotInline = useCallback(
+    async (name: string) => {
+      setSnapCreating(false);
+      const n = name.trim();
+      if (!n) return;
+      try {
+        await source.snapshotCreate(n);
+        setRefreshKey((k) => k + 1);
+        toast(
+          `快照「${n}」已建立`,
+          false,
+          "右键任意标签 →「把标签下的图片加入快照」就能往里放图"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const renameSnapshotInline = useCallback(
+    async (id: number, name: string) => {
+      const n = name.trim();
+      const cur = snaps.find((s) => s.id === id)?.name;
+      setSnapRenaming(null);
+      if (!n || n === cur) return;
+      try {
+        await source.snapshotRename(id, n);
+        setRefreshKey((k) => k + 1);
+        toast(`已改名为「${n}」`);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [snaps, toast]
+  );
+
+  /** 标签 → 快照那层弹窗里"写个新名字直接建好并加入" */
+  const createAndTagSnapshot = useCallback(
     async (name: string) => {
       const p = snapPrompt;
       if (!p) return;
       try {
-        if (p.mode === "rename" && p.id) {
-          await source.snapshotRename(p.id, name);
-          setSnapPrompt(null);
-          setRefreshKey((k) => k + 1);
-          toast(`已改名为「${name}」`);
-          return;
-        }
         const id = await source.snapshotCreate(name);
         setSnapPrompt(null);
         setRefreshKey((k) => k + 1);
-        if (p.mode === "tag" && p.tag) {
-          await addTagToSnapshot(id, p.tag);
-        } else {
-          toast(
-            `快照「${name}」已建立`,
-            false,
-            "右键任意标签 →「把标签下的图片加入快照」就能往里放图"
-          );
-        }
+        await addTagToSnapshot(id, p.tag);
       } catch (e) {
         toast(String(e), true);
       }
@@ -803,7 +827,7 @@ export default function App() {
           {
             label: "改名",
             icon: "tag",
-            action: () => setSnapPrompt({ mode: "rename", id, initial: row.name }),
+            action: () => setSnapRenaming({ id, name: row.name }),
           },
           {
             label: "删除快照（不删文件）",
@@ -1674,7 +1698,7 @@ export default function App() {
         label: "新建快照",
         icon: "expand",
         keywords: "快照 snapshot 收藏 书签",
-        run: () => setSnapPrompt({ mode: "new" }),
+        run: () => setSnapCreating(true),
       },
       {
         id: "snap-import",
@@ -1971,9 +1995,17 @@ export default function App() {
           snapshotDock={
             <SnapshotDock
               items={snaps}
+              creating={snapCreating}
+              renamingId={snapRenaming?.id ?? null}
               onOpen={openSnapshot}
               onMenu={snapshotMenu}
-              onCreate={() => setSnapPrompt({ mode: "new" })}
+              onStartCreate={() => {
+                if (!snapCreating) setSnapCreating(true);
+              }}
+              onCreate={(name) => void createSnapshotInline(name)}
+              onCancelCreate={() => setSnapCreating(false)}
+              onRename={(id, name) => void renameSnapshotInline(id, name)}
+              onCancelRename={() => setSnapRenaming(null)}
               onImport={() => void importSnapshot()}
             />
           }
@@ -1994,7 +2026,7 @@ export default function App() {
               onTagMenu={(tag, x, y) => tagMenu(tag, x, y)}
               onGroupMenu={(name, x, y) => groupMenu(name, x, y)}
               /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了 */
-              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt}
+              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt || snapCreating || !!snapRenaming}
             />
           }
         />
@@ -2220,15 +2252,11 @@ export default function App() {
 
       {snapPrompt && (
         <SnapshotPrompt
-          mode={snapPrompt.mode}
           snapshots={snaps}
           tag={snapPrompt.tag}
           count={snapPrompt.count}
-          initial={snapPrompt.initial}
-          onPick={(id) => {
-            if (snapPrompt.tag) void addTagToSnapshot(id, snapPrompt.tag);
-          }}
-          onName={(name) => void nameSnapshot(name)}
+          onPick={(id) => void addTagToSnapshot(id, snapPrompt.tag)}
+          onName={(name) => void createAndTagSnapshot(name)}
           onClose={() => setSnapPrompt(null)}
         />
       )}

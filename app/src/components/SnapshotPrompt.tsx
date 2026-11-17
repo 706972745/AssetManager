@@ -5,36 +5,30 @@ import { BlinkCaretInput, Icon } from "./ui";
 import { scrimFade, springSnappy } from "../design/springs";
 
 /**
- * 快照的小卡片（照 TagPrompt 的形态：遮罩 + 小卡片 + 一个输入框）。
+ * 「把标签下的图片加入快照」这张小卡片（照 TagPrompt 的形态：遮罩 + 小卡片 + 一个输入框）。
  *
- * 三种用法共用一套壳：
- * - `tag`：右键标签 →「把标签下的图片加入快照」，列出已有快照让你选一个，
- *   也可以直接在输入框里写新名字**新建并加入**；
- * - `new`：头部 `+` 新建一个空快照；
- * - `rename`：改名（重名由后端拒绝，界面把原话显示出来）。
+ * 这里**只做"选一个已有快照 / 写个新名字建好并加入"这一件事**。
+ * 空白快照的新建与改名**不在这里** —— 那是侧栏快照段里的一行就地输入（照 FontManager），
+ * 见 `SnapshotDock.tsx` 顶部注释第 3 条。
  */
 export function SnapshotPrompt({
-  mode,
   snapshots,
   tag,
   count,
-  initial,
   onPick,
   onName,
   onClose,
 }: {
-  mode: "tag" | "new" | "rename";
   snapshots: SnapshotRow[];
-  /** mode=tag：这批图来自哪个标签 */
+  /** 这批图来自哪个标签 */
   tag?: string;
-  /** mode=tag：这批图有多少张（先给个数，别让用户以为只加了一部分） */
+  /** 这批图有多少张（先给个数，别让用户以为只加了一部分） */
   count?: number;
-  initial?: string;
   onPick?: (id: number) => void;
   onName: (name: string) => void;
   onClose: () => void;
 }) {
-  const [name, setName] = useState(initial ?? "");
+  const [name, setName] = useState("");
   const inputRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,12 +52,11 @@ export function SnapshotPrompt({
 
   const q = name.trim().toLowerCase();
   const picks = useMemo(
-    () => (mode === "tag" ? snapshots.filter((s) => !q || s.name.toLowerCase().includes(q)) : []),
-    [mode, snapshots, q]
+    () => snapshots.filter((s) => !q || s.name.toLowerCase().includes(q)),
+    [snapshots, q]
   );
 
-  const title =
-    mode === "tag" ? "把图片加入快照" : mode === "new" ? "新建快照" : "给快照改名";
+  const title = "把图片加入快照";
 
   return (
     <motion.div
@@ -88,19 +81,17 @@ export function SnapshotPrompt({
           {title}
         </div>
 
-        {mode === "tag" && (
-          <p className="dlg-hint snap-prompt-lead">
-            标签「{tag}」下{typeof count === "number" ? ` ${count} 张图` : "的图"}
-            会<b>记进快照</b>：不移动、不复制任何文件，只是记下"这些图是哪几张"。
-          </p>
-        )}
+        <p className="dlg-hint snap-prompt-lead">
+          标签「{tag}」下{typeof count === "number" ? ` ${count} 张图` : "的图"}
+          会<b>记进快照</b>：不移动、不复制任何文件，只是记下「这些图是哪几张」。
+        </p>
 
         <div className="tag-prompt-field" ref={inputRef}>
           <BlinkCaretInput
             autoFocus
             value={name}
             onChange={setName}
-            placeholder={mode === "rename" ? "新的快照名" : "输入快照名，回车确认"}
+            placeholder="输入新快照名，回车「建好并加入」"
             inputClassName="tag-prompt-input"
             ariaLabel="快照名"
             onKeyDown={(e) => {
@@ -113,7 +104,7 @@ export function SnapshotPrompt({
           />
         </div>
 
-        {mode === "tag" && picks.length > 0 && (
+        {picks.length > 0 && (
           <div className="tag-prompt-picks">
             <div className="tag-prompt-hint">已有的快照（点一下直接加进去）</div>
             {picks.slice(0, 8).map((s) => (
@@ -134,7 +125,7 @@ export function SnapshotPrompt({
             disabled={!name.trim()}
             onClick={() => onName(name.trim())}
           >
-            {mode === "tag" ? `新建「${name.trim() || "…"}」并加入` : mode === "rename" ? "改名" : "新建"}
+            {`新建「${name.trim() || "…"}」并加入`}
           </button>
         </div>
       </motion.div>

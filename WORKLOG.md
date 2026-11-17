@@ -996,3 +996,28 @@ AM_AUTO_SNIP=1 ./target/debug/assetmanager.exe   # 4 秒后自动开一次截图
   （在快照区里滚半天，目录树没动）。
 
 结果顺序：**素材库 →（目录树）→ 快照 → 标签 → 底栏**。快照段跟着目录树一起滚，不再被推到标签上。
+
+---
+
+## §21 · 0.12.3 新建/改名改成侧栏就地输入（照 FontManager）2026-11-17
+
+> owner：「新建快照要和 fontmanager 一样的操作」。
+
+FontManager 的做法（`Sidebar.tsx::NewSnapshotInput` / `RenameInput` + `.collection-input`）：
+点段头的 `+` **不弹窗**，标题下面直接长出一行输入框 —— 相机图标 + 闪烁光标 + 高亮边框；
+`Enter` 确定、`Esc` 取消、**失焦也算确定**、空名字等于取消。改名同理（行原位变成输入框）。
+
+AssetManager 原来是弹 `SnapshotPrompt` 卡片。现在：
+
+- **新建**：段头 `+` / `Ctrl+K → 新建快照` / 空态那行按钮，都只是 `setSnapCreating(true)` →
+  `SnapshotDock` 在标题下渲染 `SnapshotInput`（`.snap-input-row`，照 `.collection-input` 的高亮圈）。
+  状态放 App（`snapCreating` / `snapRenaming`），因为命令面板和右键菜单都要能打开它。
+- **改名**：右键「改名」→ `setSnapRenaming({id,name})`，那一行原地变成输入框，提交失败时后端原话照实报。
+- **空态**：从"一段灰字"改成**可点入口**（照 FontManager `.sidebar-hint`）：一整行都能点，
+  悬停「点这里建第一份」变强调色。灰字点不动，用户只会以为这里没东西。
+- `SnapshotPrompt` 只剩一种用途：标签右键 →「把标签下的图片加入快照」（要选目标快照，弹层比就地输入合适）。
+  `mode: "new" | "rename"` 分支与 `initial` 一并删掉，`nameSnapshot` 拆成
+  `createSnapshotInline` / `renameSnapshotInline` / `createAndTagSnapshot`。
+- `Esc` 在输入行里必须 `stopPropagation`：侧栏外层有全局 Esc，不拦会把整块面板一起关掉。
+
+**验证**：dev + mock 截图两种态（空态入口 / 输入行高亮边框）；`vite build` 通过。真机交互见 WORKLOG §17.5 同类手测。
