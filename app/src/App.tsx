@@ -1115,6 +1115,28 @@ export default function App() {
     [colls, toast]
   );
 
+  /** 从某个分组里移除一批素材（只断开关联，文件一个不动）。
+      入口：正按这个分组筛选时的素材右键菜单 —— 以前只有后端 `am_coll_remove`，
+      前端没有调用点，用户进了分组就出不去（测试文档 §9.2 记的已知缺口）。 */
+  const removeFromColl = useCallback(
+    async (collId: number, ids: number[]) => {
+      try {
+        const n = await source.collRemove(collId, ids);
+        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        setColls(await source.collList());
+        setRefreshKey((k) => k + 1);
+        toast(
+          n > 0 ? `已从「${name}」移除 ${n} 项` : `这些本来就不在「${name}」里`,
+          false,
+          "只断开关联，原文件不动"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [colls, toast]
+  );
+
   /** 「加入分组…」的第二级菜单（右键 / 批量条共用） */
   const collPickMenu = useCallback(
     (ids: number[], x: number, y: number) => {
@@ -1974,6 +1996,23 @@ export default function App() {
               window.setTimeout(() => collPickMenu(ids2, x, y), 0);
             },
           },
+          /* 正在按某个分组筛选时，才给「从这个分组移除」—— 否则用户不知道往哪个组移除。
+             多选时作用于整个选中集合。 */
+          ...(collFilter != null && colls.some((c) => c.id === collFilter)
+            ? [
+                {
+                  label: (() => {
+                    const nm = colls.find((c) => c.id === collFilter)?.name ?? "分组";
+                    return n > 1 ? `从「${nm}」移除（${n} 项）` : `从「${nm}」移除`;
+                  })(),
+                  icon: "close",
+                  action: () => {
+                    const ids2 = inSel ? [...selectedIds] : [a.id];
+                    void removeFromColl(collFilter, ids2);
+                  },
+                } as CtxItem,
+              ]
+            : []),
           {
             /* 快照（0.1.18）：只记清单、不搬文件，所以放在「加入分组」旁边 */
             label: n > 1 ? `加入快照…（${n} 项）` : "加入快照…",
@@ -2152,7 +2191,22 @@ export default function App() {
     document.addEventListener("contextmenu", onCtx, true);
     return () => document.removeEventListener("contextmenu", onCtx, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, view, settingsOpen, dir, selected, busy, selectedIds, selPaths, openPeek]);
+  }, [
+    items,
+    view,
+    settingsOpen,
+    dir,
+    selected,
+    busy,
+    selectedIds,
+    selPaths,
+    openPeek,
+    /* 「从分组移除」那一项要用到这三个（分组筛选态 + 分组清单 + 移除动作），
+       漏了会点出旧闭包：筛选已经切了，移除却仍作用在上一个分组上 */
+    collFilter,
+    colls,
+    removeFromColl,
+  ]);
 
   // 键盘：空格预览、方向键切换、Esc、Ctrl+Z、Ctrl+,
   useEffect(() => {

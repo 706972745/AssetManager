@@ -2165,11 +2165,30 @@ async fn restore_peeks(app: AppHandle) {
     }
     PEEK_SEQ.store(max_seq + 1, Ordering::Relaxed);
 
+    /* 还原失败的记录**留在 peeks.json 里**，不删除。
+       为什么：原来这里只把成功建窗的记录写回去，失败的（缓存 png 被清理、盘没插、
+       文件被移走）就永久消失了 —— 用户看到的是"昨天贴着的参考图今天开机就没了"，
+       连解释都没有。留着它下次开机再试一次，代价只是 json 里多一行。
+       真要丢掉，只能由用户在界面上关掉那扇窗（那是 window-destroyed 那条路）。 */
     let mut alive: Vec<PeekRecall> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for rec in list {
-        let Some(item) = recall_to_item(&app, &rec) else { continue };
-        if spawn_peek(&app, item, rec.clone(), true).await.is_ok() {
+        let Some(item) = recall_to_item(&app, &rec) else {
+            let why = if !Path::new(&rec.path).is_file() {
+                "找不到文件（被移动/删除，或盘没插）"
+            } else {
+                "格式不能直接贴（非位图）"
+            };
+            failed.push((rec.path.clone(), why.to_string()));
             alive.push(rec);
+            continue;
+        };
+        match spawn_peek(&app, item, rec.clone(), true).await {
+            Ok(_) => alive.push(rec),
+            Err(e) => {
+                failed.push((rec.path.clone(), format!("建窗失败：{e}")));
+                alive.push(rec);
+            }
         }
     }
     {
@@ -2178,7 +2197,17 @@ async fn restore_peeks(app: AppHandle) {
     }
     save_peeks();
     if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, &format!("peeks restored: {}", peeks().lock().map(|g| g.len()).unwrap_or(0)));
+        for (p, why) in &failed {
+            log_runtime(d, &format!("peek restore failed: {p} —— {why}"));
+        }
+        log_runtime(
+            d,
+            &format!(
+                "peeks restored: {} failed: {}",
+                peeks().lock().map(|g| g.len()).unwrap_or(0) - failed.len(),
+                failed.len()
+            ),
+        );
     }
 }
 
@@ -4244,7 +4273,114 @@ fn serve_media(req_path: &str) -> Response<Vec<u8>> {
     }
 }
 
+/* ---------------- 单实例守卫 ----------------
+
+   **为什么必须有**：0.1.21 及以前没有这道闸。二次启动会起第二个进程，两个进程各自
+   `App::open` 同一个 `index.db` / `libs\lib-*.db`。SQLite 的 WAL + `busy_timeout` 能扛住
+   单点写竞争，但**两边同时跑扫描 / 重算 `dirs.cnt_all`** 时会互相覆盖 —— 表现是"扫完
+   侧栏计数忽多忽少"，查起来像索引坏了。用户场景很普通：双击两次图标、或点完没反应再点一次。
+
+   做法：命名互斥体（`Local\` = 每个登录会话一把，不跨用户串味）。已存在 → 把那个主窗
+   拉到前台，本进程直接退出；找不到窗（崩在启动早期）→ 弹一句人话。
+
+   为什么不用 `tauri-plugin-single-instance`：它要多引一个 crate（本地 registry 没有缓存，
+   得联网拉），而这里要的只是「别起第二个」。十几个 syscall，零依赖。 */
+
+#[cfg(windows)]
+fn claim_single_instance() -> bool {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    /* 句柄一律用 `isize`（Win32 的 HANDLE），与本文件别处的 Win32 声明保持同一签名 ——
+       同一个符号有两种签名时 rustc 会告警，也容易在以后真的调错 */
+    extern "system" {
+        fn CreateMutexW(attrs: isize, owner: i32, name: *const u16) -> isize;
+        fn GetLastError() -> u32;
+    }
+    let name: Vec<u16> = "Local\\AssetManager.single.instance\0".encode_utf16().collect();
+    unsafe {
+        let h = CreateMutexW(0, 0, name.as_ptr());
+        // 连互斥体都建不出来（权限 / 资源耗尽）：宁可让用户先用，也不要卡住启动
+        if h == 0 {
+            return true;
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return false;
+        }
+        // 句柄故意不关：要活到进程结束，系统会在退出时回收
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn claim_single_instance() -> bool {
+    true
+}
+
+/// 把已经在跑的那个主窗拉到前台。返回 false 表示没找到窗（已弹提示）。
+#[cfg(windows)]
+fn focus_running_window() -> bool {
+    type Hwnd = isize;
+    extern "system" {
+        fn EnumWindows(cb: extern "system" fn(Hwnd, isize) -> i32, l: isize) -> i32;
+        fn IsWindowVisible(h: Hwnd) -> i32;
+        fn GetWindowTextW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
+        fn ShowWindow(h: Hwnd, cmd: i32) -> i32;
+        fn SetForegroundWindow(h: Hwnd) -> i32;
+        fn MessageBoxW(h: Hwnd, text: *const u16, cap: *const u16, ty: u32) -> i32;
+    }
+    extern "system" fn pick(hwnd: Hwnd, lparam: isize) -> i32 {
+        unsafe {
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if n <= 0 {
+                return 1;
+            }
+            // 主窗标题是「AssetManager — <当前目录>」；贴图窗没有标题，板窗是「灵感板…」，
+            // 所以按前缀认主窗是安全的
+            let title = String::from_utf16_lossy(&buf[..n as usize]);
+            if title.starts_with("AssetManager") {
+                *(lparam as *mut Hwnd) = hwnd;
+                return 0; // 找到即停止枚举
+            }
+            1
+        }
+    }
+    unsafe {
+        let mut found: Hwnd = 0;
+        EnumWindows(pick, &mut found as *mut Hwnd as isize);
+        if found == 0 {
+            let text: Vec<u16> =
+                "AssetManager 已经在运行。\r\n\r\n请从任务栏切换过去 —— 同一份索引不能两个进程同时写。\0"
+                    .encode_utf16()
+                    .collect();
+            let cap: Vec<u16> = "AssetManager\0".encode_utf16().collect();
+            const MB_ICONINFORMATION: u32 = 0x40;
+            MessageBoxW(0, text.as_ptr(), cap.as_ptr(), MB_ICONINFORMATION);
+            return false;
+        }
+        const SW_RESTORE: i32 = 9;
+        ShowWindow(found, SW_RESTORE);
+        SetForegroundWindow(found);
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn focus_running_window() -> bool {
+    false
+}
+
 fn main() {
+    /* 单实例：必须在 `tauri::Builder` 之前 —— Builder 一跑就会 open 索引。 */
+    if !claim_single_instance() {
+        #[cfg(windows)]
+        {
+            focus_running_window();
+        }
+        return;
+    }
     tauri::Builder::default()
         .manage(WatchState(Mutex::new(None)))
         .plugin(

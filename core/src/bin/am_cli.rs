@@ -157,13 +157,27 @@ fn main() {
             }
         }
         "thumb" => {
-            let Some(id) = args.get(1).and_then(|s| s.parse::<i64>().ok()) else {
-                eprintln!("缺 asset_id");
+            let Some(gid) = args.get(1).and_then(|s| s.parse::<i64>().ok()) else {
+                eprintln!("缺 asset_id（用 `list` 打印的 # 后面那个数，是全局 id）");
                 std::process::exit(2);
             };
             let px = arg(&args, "--px").and_then(|s| s.parse().ok()).unwrap_or(256u32);
+            /* 传进来的是**全局 id**（`list` 打的就是它，形如 1099511627777 = lib<<40 | local）。
+               以前直接把 gid 丢进 `libs[0]` 里查 —— 一行也查不到，于是永远「资产不存在」，
+               排查缩略图时被这条假失败骗过。这里按 gid 拆库，找不到那个库才退回"当本地 id 用"。 */
+            let (lib_id, local_id) = am_core::ids::ungid(gid);
+            let (conn, aid) = match app.libs.iter().find(|l| l.id == lib_id) {
+                Some(l) => (&l.conn, local_id),
+                None => match app.libs.first() {
+                    Some(l) => (&l.conn, gid),
+                    None => {
+                        eprintln!("还没有任何素材库：先 scan 一个目录");
+                        std::process::exit(2);
+                    }
+                },
+            };
             let t = std::time::Instant::now();
-            match am_core::thumb::ensure_for_asset(conn(&app), &app.thumbs, id, px) {
+            match am_core::thumb::ensure_for_asset(conn, &app.thumbs, aid, px) {
                 Ok(Some(o)) => println!(
                     "OK {}  {}x{}  {} B  q={}  {} ms\n{}",
                     o.key,
