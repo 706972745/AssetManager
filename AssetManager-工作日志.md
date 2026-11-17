@@ -295,7 +295,7 @@
 |---|---|
 | 官网 | <https://pic.ghxi.com/zh/> |
 | 开源 UI 框架 | <https://github.com/ghboke/core-ui>（`ghboke/core-ui`，MIT） |
-| 本机安装副本 | `E://Users//87557//Desktop//GuoheView//`（便携版，v3.4.16 build 125，2026-11-01） |
+| 本机安装副本 | `E:\Users\87557\Desktop\GuoheView\`（便携版，v3.4.16 build 125，2026-11-01；`lang\zh-CN.lang` 是它的全部 UI 文案，`%APPDATA%\GuoheView\config.ini` 是它的性能开关） |
 | 为什么对标它 | 国内看图软件里"打开就出图、翻页不卡、窗口形态好"做得最彻底的一个；它解决的是**同一个问题**（海量本地图片的浏览速度与手感），只是它是"看图"、我们是"素材库看图" |
 
 **它值得抄的（按我们的优先级排序）**
