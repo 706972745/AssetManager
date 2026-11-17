@@ -445,6 +445,16 @@ export interface MenuItem {
   disabled?: boolean;
   on?: boolean;
   sep?: boolean;
+  /** 行首小圆点（任意 CSS background：纯色或渐变）。颜色筛选靠它一眼认色 */
+  dot?: string;
+  /** 圆点的附加类（标签行用 `.tc-*` 把 `--tc` 带进来，浅深主题各一套色） */
+  dotClass?: string;
+  /** 段头：不可点的小标题（照 FontManager 的 `.filter-heading`） */
+  heading?: boolean;
+  /** 选中项右侧打勾（FontManager 的 `.sort-item` 就是这样，比只把文字变蓝清楚） */
+  check?: boolean;
+  /** 右侧灰色附注（数量）。数字用等宽，和侧栏计数同一套观感 */
+  meta?: string;
 }
 
 export function Menu({
@@ -481,6 +491,10 @@ export function Menu({
       {items.map((it, i) =>
         it.sep ? (
           <div key={i} style={{ height: 1, background: "var(--ui-line)", margin: "5px 0" }} />
+        ) : it.heading ? (
+          <div key={i} className="menu-heading" role="none">
+            {it.label}
+          </div>
         ) : (
           <button
             key={i}
@@ -491,7 +505,17 @@ export function Menu({
               onClose();
             }}
           >
+            {/* 有 dot / dotClass 就先画一个 8px 的圆点；没有的不占位 */}
+            {(it.dot || it.dotClass) && (
+              <span
+                className={`menu-dot ${it.dotClass ?? ""}`}
+                style={it.dot ? { background: it.dot } : undefined}
+                aria-hidden
+              />
+            )}
             {it.label}
+            {it.meta && <span className="menu-meta mono">{it.meta}</span>}
+            {it.check && <span className="menu-check" aria-hidden>✓</span>}
           </button>
         )
       )}

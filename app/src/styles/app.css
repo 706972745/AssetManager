@@ -541,24 +541,6 @@
   gap: 1px;
 }
 /* 底栏第四行右侧的小键帽（照 FontManager 那个 16×16 的「?」） */
-.side-kbd {
-  flex: none;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 3px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--ui-line);
-  border-radius: 3px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-9);
-  line-height: 1;
-  color: var(--text-3);
-}
-.tree-row:hover .side-kbd {
-  color: var(--text-2);
-  border-color: var(--ui-line-hover);
-}
 
 /* ---------------------------------------------------------------- 内容区 */
 .content {
@@ -5699,4 +5681,82 @@ body.board-body #root {
 /* 段头后面的子目录比段头缩进一点，读起来才像"这一段里面的东西" */
 .shot-head + .tree-row {
   margin-top: 1px;
+}
+
+/* 菜单行首小圆点（颜色筛选）：8px，带一圈极淡描边 —— 浅色主题下白/浅黄
+   这类颜色不带描边就会和菜单底色糊在一起，看着像"这一行没有点"。 */
+.menu-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+
+/* ---- 菜单里的段头 / 数量 / 勾（照 FontManager `.filter-heading` + `.sort-item`）----
+   结构：段头 → 若干可点行（行首圆点 / 右侧数量 / 选中打勾）。
+   段头不可点、不悬停，只用来分隔维度。 */
+.menu-heading {
+  padding: 7px 10px 3px;
+  font-size: var(--fs-9);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+  cursor: default;
+  user-select: none;
+}
+.menu-meta {
+  margin-left: auto;
+  font-size: var(--fs-9);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.menu-check {
+  margin-left: 6px;
+  font-size: var(--fs-10);
+  color: var(--accent);
+  line-height: 1;
+}
+/* 标签行的圆点：颜色来自 `.tc-*` 带进来的 `--tc`（浅深主题各一套） */
+.menu-dot {
+  background: var(--tc, #8b8b86);
+}
+
+/* 截图段头：**原本那个折叠箭头换成图片图标**（不是另外加一个），
+   图标本身就是折叠开关；收起时用降低不透明度表达状态，别把图片转 90°。
+   "软件自己的、不占名额"的口径放到 tooltip 里说，行内不再贴字。 */
+.shot-head .shot-caret {
+  color: var(--text-3);
+}
+.shot-head .shot-caret.closed {
+  opacity: 0.5;
+  transform: none;
+}
+.shot-head:hover .shot-caret {
+  color: var(--text-2);
+}
+
+/* 侧栏「快捷键」行尾的 ? —— 对齐 FontManager 的 `.kbd.nav-kbd`：
+   22×20 的键帽、5px 圆角、fs-11、e2 实底 + 发丝线 + 1px 下沿，不再是一个 16px 小方框。
+   放在行尾不影响「快捷键」三字的起始位置（和 FontManager 同一列）。 */
+.side-kbd {
+  flex: none;
+  min-width: 22px;
+  height: 20px;
+  padding: 2px 7px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--e2);
+  border: 1px solid var(--ui-line);
+  box-shadow: 0 1px 0 var(--ui-line);
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  line-height: 1;
+  color: var(--text-2);
+  opacity: 0.8;
+}
+.tree-row:hover .side-kbd {
+  opacity: 1;
+  color: var(--text-1);
 }

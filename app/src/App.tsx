@@ -2121,7 +2121,7 @@ export default function App() {
           onDropTo={(n) => {
             if (selPaths.length) void doMove(selPaths, n.path);
           }}
-          onAddPath={(p) => void onAddPath(p)}
+          onToast={toast}
           onOpenLibrary={onOpenLibrary}
           onTrash={() => {
             setSelectedIds(new Set());
@@ -2193,6 +2193,14 @@ export default function App() {
               if (c) setTagFilter(null);
             }}
             colorCounts={colorCounts}
+            tags={tags}
+            activeTag={tagFilter}
+            onTag={(n) => {
+              setTagFilter(n);
+              /* 颜色和标签都作用于同一批素材：选标签就把颜色放开，
+                 否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表 */
+              if (n) setColorFilter(null);
+            }}
           />
 
           {colorFilter && (

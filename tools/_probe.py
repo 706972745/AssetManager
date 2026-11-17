@@ -23,6 +23,7 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
+KEYEVENTF_KEYUP = 0x0002
 
 
 def hwnd_of(title: str) -> int:
@@ -77,6 +78,21 @@ def main() -> None:
             user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -120 if n > 0 else 120, 0)
             time.sleep(0.03)
         return
+    if cmd == "key":
+        vk = {
+            "Return": 0x0D,
+            "Enter": 0x0D,
+            "Escape": 0x1B,
+            "Tab": 0x09,
+            "Space": 0x20,
+        }.get(sys.argv[2])
+        if vk is None:
+            raise SystemExit(f"unknown key {sys.argv[2]}")
+        user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.03)
+        user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+        return
+
     if cmd == "rclick":
         x, y = int(sys.argv[2]), int(sys.argv[3])
         user32.SetCursorPos(r.left + x, r.top + y)

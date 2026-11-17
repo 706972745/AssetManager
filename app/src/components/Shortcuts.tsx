@@ -23,18 +23,18 @@ interface Group {
   rows: Row[];
 }
 
-/** 左栏：看与选 */
+/** 左栏：看与选（只列代码里**真的注册过**的键；没有的不要往里写） */
 const LEFT: Group[] = [
   {
-    title: "浏览",
+    title: "浏览与预览",
     rows: [
-      { keys: ["Space"], label: "全屏预览选中的素材" },
-      { keys: ["B"], label: "无边框看图", hint: "只剩那张图，拖到任意位置截图；滚轮缩窗口" },
-      { keys: ["←", "→"], label: "上一个 / 下一个", hint: "大图里翻页，网格里换选中" },
-      { keys: ["Esc"], label: "关大图 / 取消多选" },
-      { keys: ["双击"], label: "用默认程序打开原文件" },
-      { keys: ["滚轮"], label: "大图里缩放（1×–8×）" },
-      { keys: ["双击大图"], label: "缩放复位到 1:1" },
+      { keys: ["Space"], label: "打开大图预览" },
+      { keys: ["B"], label: "无边框看图", hint: "当前选中那张；只剩图像，可拖到任意位置" },
+      { keys: ["←", "→"], label: "上一张 / 下一张", hint: "大图里翻页，网格里换选中" },
+      { keys: ["滚轮"], label: "大图缩放（1×–8×）" },
+      { keys: ["双击"], label: "大图缩放复位 1:1" },
+      { keys: ["Esc"], label: "关大图 / 关无边框看图 / 关浮层" },
+      { keys: ["双击标题"], label: "就地重命名", hint: "单击复制文件名；不再弹窗" },
     ],
   },
   {
@@ -48,24 +48,35 @@ const LEFT: Group[] = [
   },
 ];
 
-/** 右栏：干活 */
+/** 右栏：干活（文件动作一律落在磁盘上的原文件，不是缩略图） */
 const RIGHT: Group[] = [
   {
-    title: "文件（都作用在原文件上）",
+    title: "文件",
     rows: [
       { keys: ["拖出窗口"], label: "复制原文件", hint: "拖到 PS / 资源管理器 / 浏览器地址栏" },
       { keys: ["拖到目录树"], label: "真实移动到这个文件夹" },
+      { keys: ["Ctrl", "C"], label: "复制原文件", hint: "CF_HDROP，粘出来是文件不是位图" },
       { keys: ["Ctrl", "Z"], label: "撤销上一步文件操作" },
-      { keys: ["T"], label: "给选中的素材打标签" },
+      { keys: ["T"], label: "给选中的素材打标签", hint: "多选则整批一起打" },
     ],
   },
   {
-    title: "面板",
+    title: "截图 · 贴图（系统级）",
     rows: [
+      { keys: ["F1"], label: "选区截图 → 存到截图目录" },
+      { keys: ["Alt", "F1"], label: "选区截图 → 直接进剪贴板" },
+      { keys: ["F3"], label: "贴剪贴板图（无边框窗口）" },
+      { keys: ["Ctrl", "Z"], label: "截图标注：撤销", hint: "Ctrl+Shift+Z 重做" },
+      { keys: ["Enter"], label: "截图标注：保存", hint: "Ctrl+C 复制 / Ctrl+S 另存为" },
+    ],
+  },
+  {
+    title: "灵感板 · 面板",
+    rows: [
+      { keys: ["Ctrl", "V"], label: "灵感板：贴剪贴板图入库" },
+      { keys: ["F"], label: "灵感板：适应窗口", hint: "0 = 回到 100%" },
       { keys: ["Ctrl", "K"], label: "命令面板", hint: "所有操作都能搜到" },
       { keys: ["Ctrl", ","], label: "设置" },
-      { keys: ["Esc"], label: "关无边框窗口（在里面）" },
-      { keys: ["Esc"], label: "关闭当前浮层" },
     ],
   },
 ];

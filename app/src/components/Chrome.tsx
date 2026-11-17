@@ -16,7 +16,7 @@ import {
 import { BrandMark, BlinkCaretInput, Icon, Menu } from "./ui";
 import { COLOR_LABEL, autoTagLabel, colorClass, isAutoTag } from "../lib/tags";
 import type { ViewMode } from "./Views";
-import type { RefItem } from "../types";
+import type { RefItem, TagCount } from "../types";
 
 /* 窗口动作：桌面端走命令，浏览器预览下静默 */
 function win(cmd: string) {
@@ -116,6 +116,9 @@ export function TopBar({
   color,
   onColor,
   colorCounts,
+  tags,
+  activeTag,
+  onTag,
 }: {
   text: string;
   onText: (v: string) => void;
@@ -132,6 +135,11 @@ export function TopBar({
   onColor: (c: string | null) => void;
   /** 各色桶的素材数（只列有素材的，避免一屏空点） */
   colorCounts: [string, number][];
+  /** 标签清单（含使用数）：筛菜单里那一段「标签」用它，照 FontManager 的筛选菜单结构 */
+  tags: TagCount[];
+  /** 当前正在筛的标签（null = 不筛） */
+  activeTag: string | null;
+  onTag: (name: string | null) => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "sort" | "filter" | "color" } | null>(
     null
@@ -239,20 +247,50 @@ export function TopBar({
                 }))
               : menu.kind === "color"
               ? [
-                  { label: "全部颜色", on: color === null, onPick: () => onColor(null) },
+                  {
+                    label: "全部颜色",
+                    on: color === null,
+                    onPick: () => onColor(null),
+                    /* 全部颜色没有"自己的颜色" → 用一个七彩环点，和下面单色点区分开 */
+                    dot: "conic-gradient(#d94a45,#d9a13a,#d9cf4a,#4f9d5d,#4a7fd9,#8c5ad9,#d94a45)",
+                  },
                   ...(colorCounts.length
                     ? colorCounts.map(([k, n]) => ({
                         label: `${COLOR_LABEL[k] ?? k}（${n}）`,
                         on: color === k,
                         onPick: () => onColor(k),
+                        /* 行首圆点 = 这个颜色本身（与顶栏那颗、缩略图上的色点同一套变量） */
+                        dot: `var(--c-${k}, #8b8b86)`,
                       }))
                     : [{ label: "还没有主色数据，滚一遍缩略图就会算出来", on: false, onPick: () => {} }]),
                 ]
-              : KINDS.map((k) => ({
-                  label: k.label,
-                  on: kindKey === k.key,
-                  onPick: () => onKind(k.key),
-                }))
+              : [
+                  /* 结构照 FontManager 的筛选菜单：**段头 + 勾选**。
+                     我们只有一个类型维度，光五行看着像"少了点什么"，
+                     于是把标签也放进来（FontManager 那边是「范围 → 标签」二级菜单，
+                     我们标签本来就在侧栏，这里给一份就近入口，筛的是同一个 tagFilter）。 */
+                  { label: "类型", heading: true },
+                  ...KINDS.map((k) => ({
+                    label: k.label,
+                    on: kindKey === k.key,
+                    check: kindKey === k.key,
+                    onPick: () => onKind(k.key),
+                  })),
+                  ...(tags.length
+                    ? [
+                        { sep: true, label: "" },
+                        { label: "标签", heading: true },
+                        ...tags.map((t) => ({
+                          label: t.name,
+                          dotClass: colorClass(t.color),
+                          meta: String(t.count),
+                          on: activeTag === t.name,
+                          check: activeTag === t.name,
+                          onPick: () => onTag(activeTag === t.name ? null : t.name),
+                        })),
+                      ]
+                    : []),
+                ]
           }
         />
       )}

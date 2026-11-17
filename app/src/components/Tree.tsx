@@ -70,8 +70,8 @@ interface Props {
   selected: number | null;
   onSelect: (n: DirNode) => void;
   onDropTo: (target: DirNode) => void;
-  /** 侧栏 + 内联输入提交后回调：把这条路径加进库（真的会扫盘） */
-  onAddPath: (path: string) => void;
+  /** 出错/成功要说话（新建文件夹这类"真的动了磁盘"的动作不能静默） */
+  onToast: (msg: string, err?: boolean, detail?: string) => void;
   onOpenLibrary: () => void;
   onTrash: () => void;
   onAbout: () => void;
@@ -88,7 +88,7 @@ export function Tree({
   selected,
   onSelect,
   onDropTo,
-  onAddPath,
+  onToast,
   onOpenLibrary,
   onTrash,
   onAbout,
@@ -111,10 +111,11 @@ export function Tree({
   const nodesRef = useRef<Map<number, DirNode>>(new Map());
   const [sectionOpen, setSectionOpen] = useState(true);
   const [hover, setHover] = useState<number | null>(null);
-  /* 侧栏 + 的内联输入（与 FontManager 的「+ 新建分组」同一套互动：
-     原地长出一行输入框，回车提交 / Esc 取消 / 失焦提交）。 */
-  const [adding, setAdding] = useState(false);
-  const [addPath, setAddPath] = useState("");
+  /* 侧栏 + = **在当前库里就地新建文件夹**（owner 2026-11-17：
+     "现在选中哪个文件库，就在哪个文件库下面创建文件夹，系统级的、库地址下也真实创建"）。
+     交互照 FontManager 的「+ 新建分组」：原地长出一行输入框，回车提交 / Esc 取消 / 失焦提交。 */
+  const [creating, setCreating] = useState<{ id: number; path: string } | null>(null);
+  const [newName, setNewName] = useState("");
   const closedRef = useRef(false);
   /* 内置库（软件自己的截图目录）：不占名额、不能移除、永远在列表里 */
   const [builtin, setBuiltin] = useState<string[]>([]);
@@ -128,23 +129,67 @@ export function Tree({
 
   const isBuiltin = (p: string) => builtin.some((b) => samePath(b, p));
 
-  const openAdd = () => {
+  /** 「+」：在当前库里新建文件夹。
+   *
+   * 建在哪：**当前选中的目录**（它属于当前库时）→ 否则**当前库根**。
+   * 为什么不是一律建在库根：用户点选的是某个子目录时，把新文件夹建到库根
+   * 等于"我明明站在这个文件夹里，你却跑到最上层建"。两种选择都限制在
+   * **当前这个库**之内 —— 绝不会跑到别的库或库外去。 */
+  const startCreate = () => {
+    const root = activeRoot;
+    if (!root) {
+      onToast("还没有素材库：先在「设置 → 素材库」里加一个文件夹", true);
+      return;
+    }
+    const sel = selected != null ? nodesRef.current.get(selected) : null;
+    let parent = root;
+    if (sel) {
+      const r = rootOf(sel.id);
+      if (r && r.path === root.path) parent = sel;
+    }
     closedRef.current = false;
-    setAddPath("");
-    setAdding(true);
+    setNewName("新建文件夹");
+    setCreating({ id: parent.id, path: parent.path });
+    /* 输入行画在父行下面：父目录没展开就先把展开/子目录准备好，否则输入框看不见 */
+    void (async () => {
+      if (!open.has(parent.id)) {
+        await load(parent.id);
+        setOpen((prev) => new Set(prev).add(parent.id));
+        const paths = openSet();
+        paths.add(parent.path);
+        saveOpenPaths(paths);
+      }
+    })();
   };
-  const closeAdd = () => {
+
+  const cancelCreate = () => {
     closedRef.current = true;
-    setAdding(false);
-    setAddPath("");
+    setCreating(null);
+    setNewName("");
   };
-  const commitAdd = () => {
+
+  /** 回车/失焦提交：真的在磁盘上建（`am_mkdir` 走 core::fsops，同名会自动加 (2)） */
+  const commitCreate = async () => {
     if (closedRef.current) return;
-    const p = addPath.trim();
     closedRef.current = true;
-    setAdding(false);
-    setAddPath("");
-    if (p) onAddPath(p);
+    const target = creating;
+    const name = newName.trim();
+    setCreating(null);
+    setNewName("");
+    if (!target || !name) return;
+    try {
+      const made = await source.mkdir(target.path, name);
+      /* 建完立刻把这个父目录的子列表拉一遍（不重扫全库：新建的空文件夹没有素材，
+         索引里补上目录行就够，下一次增量扫描会自然对齐） */
+      const ch = await source.children(target.id);
+      remember(ch);
+      setKids((m) => new Map(m).set(target.id, ch));
+      const created = ch.find((c) => c.path === made) ?? ch.find((c) => c.name === name);
+      if (created) onSelect(created);
+      onToast("已创建文件夹", false, made);
+    } catch (e) {
+      onToast(String(e), true);
+    }
   };
 
   const remember = (list: DirNode[]) => {
@@ -318,6 +363,35 @@ export function Tree({
     );
   };
 
+  /** 新建文件夹的行内输入：紧跟在父行下面，缩进 = 父 + 1 层 */
+  const createRow = (parentId: number, depth: number) =>
+    creating?.id === parentId ? (
+      <div className="tree-input-row" style={{ paddingLeft: ROW_PAD + depth * DEPTH_STEP }}>
+        <span className="nav-icon">
+          <Icon name="folder" size={15} stroke={1.5} />
+        </span>
+        <BlinkCaretInput
+          autoFocus
+          value={newName}
+          onChange={setNewName}
+          placeholder="新文件夹名称（回车创建）"
+          inputClassName="tree-input"
+          ariaLabel="新建文件夹名称"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void commitCreate();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              cancelCreate();
+            }
+          }}
+          onBlur={() => void commitCreate()}
+        />
+      </div>
+    ) : null;
+
   /** 一行目录（**只画自己这一行**；子目录由 row / libBlock 铺） */
   const rowSelf = (n: DirNode, depth: number) => {
     const isOpen = open.has(n.id);
@@ -377,6 +451,7 @@ export function Tree({
     return (
       <div key={n.id}>
         {rowSelf(n, depth)}
+        {createRow(n.id, depth + 1)}
         {isOpen && list?.map((c) => row(c, depth + 1))}
       </div>
     );
@@ -400,6 +475,7 @@ export function Tree({
         style={{ position: "relative" }}
       >
         {isActive ? rowSelf(r, 0) : libRow(r)}
+        {createRow(r.id, 1)}
         {isActive && open.has(r.id) && kids.get(r.id)?.map((c) => row(c, 1))}
       </motion.div>
     );
@@ -438,40 +514,16 @@ export function Tree({
             </span>
             <button
               className="side-add"
-              title="添加素材文件夹"
-              aria-label="添加素材文件夹"
+              title="在当前素材库里新建文件夹（会真的建在磁盘上）"
+              aria-label="在当前素材库里新建文件夹"
               onClick={(e) => {
                 e.stopPropagation();
-                if (adding) closeAdd();
-                else openAdd();
+                startCreate();
               }}
             >
               <Icon name="plus" size={12} stroke={1.8} />
             </button>
           </div>
-          {adding && (
-            <div className="tree-input-row">
-              <span className="nav-icon">
-                <Icon name="folder" size={15} stroke={1.5} />
-              </span>
-              <BlinkCaretInput
-                autoFocus
-                value={addPath}
-                onChange={setAddPath}
-                placeholder="粘贴文件夹路径，回车加入"
-                inputClassName="tree-input"
-                ariaLabel="加入素材库的文件夹路径"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitAdd();
-                  else if (e.key === "Escape") {
-                    e.stopPropagation();
-                    closeAdd();
-                  }
-                }}
-                onBlur={commitAdd}
-              />
-            </div>
-          )}
           {sectionOpen && orderedRoots.map(libBlock)}
         </div>
 
@@ -499,17 +551,19 @@ export function Tree({
                 })();
               }}
             >
+              {/* 前面的箭头**换成**图片图标（不是额外再加一个）：相机留给快照段，
+                  这一段是软件截图落在磁盘上的目录。图标本身承担折叠开关。 */}
               <span
-                className={`caret ${shotOpen ? "" : "closed"}`}
+                className={`caret shot-caret ${shotOpen ? "" : "closed"}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   setShotOpen((v) => !v);
                 }}
+                title={shotOpen ? "收起" : "展开"}
               >
-                <Icon name="chevron" size={10} stroke={2} className="rot90" />
+                <Icon name="image" size={15} stroke={1.5} />
               </span>
               <span className="grow">截图</span>
-              <span className="lib-builtin">内置</span>
               <span className="tree-count">{shotRoot.assetCnt > 0 ? shotRoot.assetCnt : 0}</span>
             </div>
             {shotOpen && kids.get(shotRoot.id)?.map((c) => row(c, 0))}
@@ -554,7 +608,8 @@ export function Tree({
             <Icon name="keyboard" size={15} stroke={1.5} />
           </span>
           <span className="tree-name">快捷键</span>
-          <span className="side-kbd">?</span>
+          {/* 照 FontManager 的 `<kbd class="kbd nav-kbd">?</kbd>`：语义是键帽，不是按钮 */}
+          <kbd className="side-kbd">?</kbd>
         </div>
       </div>
     </aside>
