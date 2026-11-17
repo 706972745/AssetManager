@@ -45,3 +45,7 @@ Thumbs.db
 /docs/AssetManager-*.md
 # 历史版本截图留在本地（发布用的那张固定叫 docs/screenshot.png）
 /docs/shots-*.png
+
+# ===== 内部留痕 / 测试执行报告（不进公库，与 WORKLOG 同级）=====
+/.workbuddy/
+/docs/reports/
