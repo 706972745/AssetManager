@@ -53,6 +53,30 @@ CREATE TABLE IF NOT EXISTS tag_groups (
   created_at INTEGER NOT NULL
 );
 
+/* 快照（0.12.0）：一批图片的书签，**跨库存在**（同一块板可能横跨几个库）。
+   条目身份是**内容哈希**，不是 id 也不是路径 —— 改名 / 换目录 / 换库都还认得出来，
+   原因和取舍写在 `core/src/snapshot.rs` 的头注释里。 */
+CREATE TABLE IF NOT EXISTS snapshots (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_items (
+  snapshot_id INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  w INTEGER,
+  h INTEGER,
+  path TEXT NOT NULL DEFAULT '',
+  lib TEXT NOT NULL DEFAULT '',
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_items_hash ON snapshot_items(hash);
+
 "#;
 
 pub struct LibRow {
@@ -430,6 +454,200 @@ pub struct TagGroupRow {
     pub color: Option<String>,
     pub count: i64,
     pub tags: i64,
+}
+
+/* ------------------------------------------------------------------ 快照 */
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRow {
+    pub id: i64,
+    pub name: String,
+    /// 条目数：**记下来的条数**，不是"现在找得到的张数"。
+    /// 移动硬盘没插时也还是这么多条 —— 条目永远不会因为找不到而消失。
+    pub count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn row_to_snapshot(r: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRow> {
+    Ok(SnapshotRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        count: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+    })
+}
+
+const SNAP_SELECT: &str = "SELECT s.id, s.name,
+        (SELECT COUNT(*) FROM snapshot_items i WHERE i.snapshot_id = s.id),
+        s.created_at, s.updated_at
+     FROM snapshots s ";
+
+pub fn snapshots(c: &Connection) -> Res<Vec<SnapshotRow>> {
+    let mut st = c
+        .prepare(&format!("{SNAP_SELECT} ORDER BY s.created_at DESC, s.id DESC"))
+        .map_err(|e| e.to_string())?;
+    let rows = st.query_map([], |r| row_to_snapshot(r)).map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+pub fn snapshot(c: &Connection, id: i64) -> Res<Option<SnapshotRow>> {
+    let mut st = c
+        .prepare(&format!("{SNAP_SELECT} WHERE s.id = ?1"))
+        .map_err(|e| e.to_string())?;
+    st.query_row(params![id], |r| row_to_snapshot(r))
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+pub fn validate_snapshot_name(name: &str) -> Res<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("快照名不能为空".into());
+    }
+    if n.chars().count() > 60 {
+        return Err("快照名太长了（最多 60 个字）".into());
+    }
+    Ok(n.to_string())
+}
+
+/// 新建快照。**同名直接返回已有的 id，不报错**：用户点两次不该出现两个一样的。
+pub fn snapshot_create(c: &Connection, name: &str) -> Res<i64> {
+    let name = validate_snapshot_name(name)?;
+    let now = db::now_ts();
+    c.query_row(
+        "INSERT INTO snapshots (name, created_at, updated_at) VALUES (?1, ?2, ?2)
+         ON CONFLICT(name) DO UPDATE SET updated_at = snapshots.updated_at
+         RETURNING id",
+        params![name, now],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn snapshot_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
+    let name = validate_snapshot_name(name)?;
+    // 重名要在界面上说清楚，不能静默改成"名字 (2)"
+    let taken: Option<i64> = c
+        .query_row(
+            "SELECT id FROM snapshots WHERE name = ?1 AND id <> ?2",
+            params![name, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if taken.is_some() {
+        return Err(format!("已经有一个叫「{name}」的快照了"));
+    }
+    c.execute(
+        "UPDATE snapshots SET name = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, name, db::now_ts()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn snapshot_delete(c: &Connection, id: i64) -> Res<()> {
+    c.execute("DELETE FROM snapshot_items WHERE snapshot_id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM snapshots WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn snapshot_items(c: &Connection, id: i64) -> Res<Vec<crate::snapshot::SnapItem>> {
+    let mut st = c
+        .prepare(
+            "SELECT hash, name, size, w, h, path, lib FROM snapshot_items
+             WHERE snapshot_id = ?1 ORDER BY added_at ASC, name COLLATE NOCASE ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![id], |r| {
+            Ok(crate::snapshot::SnapItem {
+                hash: r.get(0)?,
+                name: r.get(1)?,
+                size: r.get(2)?,
+                w: r.get(3)?,
+                h: r.get(4)?,
+                path: r.get(5)?,
+                lib: r.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// 批量塞条目。返回**真正新增**的条数（同一张图重复加入是幂等的）。
+pub fn snapshot_insert_items(
+    c: &Connection,
+    id: i64,
+    items: &[crate::snapshot::SnapItem],
+) -> Res<usize> {
+    let now = db::now_ts();
+    let mut n = 0usize;
+    {
+        let mut st = c
+            .prepare(
+                "INSERT OR IGNORE INTO snapshot_items
+                   (snapshot_id, hash, name, size, w, h, path, lib, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .map_err(|e| e.to_string())?;
+        for it in items {
+            n += st
+                .execute(params![
+                    id,
+                    it.hash,
+                    it.name,
+                    it.size,
+                    it.w,
+                    it.h,
+                    it.path,
+                    it.lib,
+                    now
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    snapshot_touch(c, id)?;
+    Ok(n)
+}
+
+/// 刷新"最后一次见到的位置"（只影响显示：改名/换库后详情里显示的是新路径）
+pub fn snapshot_touch_item(c: &Connection, id: i64, hash: &str, name: &str, path: &str, lib: &str) -> Res<()> {
+    c.execute(
+        "UPDATE snapshot_items SET name = ?3, path = ?4, lib = ?5
+         WHERE snapshot_id = ?1 AND hash = ?2",
+        params![id, hash, name, path, lib],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn snapshot_remove_items(c: &Connection, id: i64, hashes: &[String]) -> Res<usize> {
+    let mut n = 0usize;
+    {
+        let mut st = c
+            .prepare("DELETE FROM snapshot_items WHERE snapshot_id = ?1 AND hash = ?2")
+            .map_err(|e| e.to_string())?;
+        for h in hashes {
+            n += st.execute(params![id, h]).map_err(|e| e.to_string())?;
+        }
+    }
+    snapshot_touch(c, id)?;
+    Ok(n)
+}
+
+pub fn snapshot_touch(c: &Connection, id: i64) -> Res<()> {
+    c.execute(
+        "UPDATE snapshots SET updated_at = ?2 WHERE id = ?1",
+        params![id, db::now_ts()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

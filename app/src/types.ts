@@ -138,9 +138,51 @@ export interface AutoRule {
   needDims: boolean;
 }
 
-/** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
-export interface BoardPastedItem {
+/** 快照（侧栏一条）。`count` 是**记下来的条数**，不是"现在找得到的张数" */
+export interface SnapshotRow {
   id: number;
+  name: string;
+  count: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 加入快照的结果：新加 / 本来就有 / 失败清单 */
+export interface SnapshotAdd {
+  added: number;
+  total: number;
+  already: number;
+  failed: string[];
+}
+
+/** 对账后的一条：`gid` 为空 = 这次没找到（**条目不会被删**，可能只是硬盘没插） */
+export interface SnapshotResolvedItem {
+  hash: string;
+  name: string;
+  gid: number | null;
+  path: string;
+  lib: string;
+  size: number;
+  w: number | null;
+  h: number | null;
+  mtime: number;
+}
+
+export interface SnapshotResolve {
+  items: SnapshotResolvedItem[];
+  found: number;
+  missing: number;
+}
+
+export interface SnapshotZip {
+  path: string;
+  ok: number;
+  bad: string[];
+  missing: number;
+}
+
+/** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
+export interface BoardPastedItem {  id: number;
   /** `thumb://` 地址：板上看到的永远是缩略图，复制/打开一律走 path 的源文件 */
   src: string;
   w: number;
@@ -416,6 +458,32 @@ export interface Source {
    * 返回刚入库的那张（前端直接贴到视口中心）。
    */
   boardPaste(tag: string): Promise<BoardPastedItem>;
+
+  /* ---------------- 快照（0.12.0） ----------------
+     快照记的是**图片的内容指纹**（不是 id、不是路径），所以图片改名、换目录、
+     换到另一个素材库之后，导回来照样能对上同一张图。导出的是清单，不含图片字节。 */
+  snapshotList(): Promise<SnapshotRow[]>;
+  /** 新建（同名直接返回已有的那个）。返回 id */
+  snapshotCreate(name: string): Promise<number>;
+  snapshotRename(id: number, name: string): Promise<void>;
+  snapshotDelete(id: number): Promise<void>;
+  /** 把一批素材加进快照 */
+  snapshotAdd(id: number, ids: number[]): Promise<SnapshotAdd>;
+  /** 把某个标签下的全部图片加进快照（文件不动） */
+  snapshotAddTag(id: number, tag: string): Promise<SnapshotAdd>;
+  /** 对账：按内容哈希在当前所有库里重新找一遍 */
+  snapshotResolve(id: number): Promise<SnapshotResolve>;
+  snapshotRemove(id: number, hashes: string[]): Promise<number>;
+  /** 导出清单（.json）。返回最终路径，取消 = null */
+  snapshotExport(id: number): Promise<string | null>;
+  /** 导入清单。返回 `[id, 最终名字, 新增条数, 跳过条数]`，取消 = null */
+  snapshotImport(): Promise<[number, string, number, number] | null>;
+  /** 导出原始图片（.zip）。取消 = null */
+  snapshotExportZip(id: number): Promise<SnapshotZip | null>;
+  /** 开一块快照灵感板 */
+  snapshotOpen(id: number): Promise<number>;
+  /** 快照板里 Ctrl+V：存截图目录 + 入库 + 加进这个快照 */
+  snapshotPaste(id: number): Promise<BoardPastedItem>;
   peekTop(on: boolean): Promise<boolean>;
   /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
   peekReady(): Promise<void>;

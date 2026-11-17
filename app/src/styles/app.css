@@ -4015,6 +4015,77 @@ body.snip-body #root {
   font-size: 13px;
 }
 
+/* ---------------- 快照面板（0.12.0） ----------------
+   常驻在标签面板上方：头部一行（32 高，跟 .nav-row 同一套盒模型），下面是快照列表。
+   **不做悬停展开**（理由见 SnapshotDock.tsx 头注释）—— 它是"看得见才找得到"的东西。 */
+.snap-dock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  margin: 0 -10px;
+  padding: 0 10px;
+  background: var(--ui-bg);
+  border-top: 1px solid var(--hairline);
+}
+.snap-dock-head {
+  flex: 0 0 32px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 11px 0 0;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--text-2);
+  user-select: none;
+}
+.snap-dock-head:hover {
+  color: var(--text-1);
+}
+.snap-dock-head .grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.snap-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--text-3);
+}
+.snap-add:hover {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+.snap-dock-list {
+  max-height: 132px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 2px;
+}
+.snap-dock-list:empty {
+  display: none;
+}
+.snap-row {
+  border-radius: 0;
+}
+.snap-empty {
+  padding: 2px 11px 8px;
+  font-size: var(--fs-10);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.snap-prompt-lead {
+  margin-bottom: 8px;
+}
+.snap-pick-count {
+  margin-left: 6px;
+  font-size: 9px;
+  opacity: 0.55;
+}
+
 /* ---------------- 灵感板窗口（0.11.0，照 PureRef 的无限画布） ----------------
 
    窗口里只有一块画布：图随便摆、画布随便拖、滚轮缩放，没有边界。

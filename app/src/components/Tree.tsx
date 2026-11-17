@@ -46,6 +46,8 @@ interface Props {
   onAbout: () => void;
   onShortcuts: () => void;
   refreshKey: number;
+  /** 快照面板（0.12.0）：常驻在标签面板上方一行行列出快照 */
+  snapshotDock?: ReactNode;
   /** 标签抽屉（默认收起、悬浮左缘展开）。侧栏只负责给它一块位置，内容与状态都在 App 里 */
   tagDock?: ReactNode;
 }
@@ -61,6 +63,7 @@ export function Tree({
   onAbout,
   onShortcuts,
   refreshKey,
+  snapshotDock,
   tagDock,
 }: Props) {
   const [roots, setRoots] = useState<DirNode[]>([]);
@@ -290,6 +293,8 @@ export function Tree({
           {sectionOpen && roots.map((r) => row(r, 0))}
         </div>
     </div>
+
+      {snapshotDock}
 
       {tagDock}
 

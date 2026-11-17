@@ -2029,53 +2029,34 @@ fn board_items(app: &App, tag: &str) -> Result<(Vec<BoardItem>, usize), String> 
 }
 
 /// 开一块灵感板。同一个标签已经开着就直接聚焦，不重复开。
-#[tauri::command]
-async fn am_board_open(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    tag: String,
-    title: Option<String>,
-) -> Result<usize, String> {
-    let tag = tag.trim().to_string();
-    if tag.is_empty() {
-        return Err("没有指定标签".into());
-    }
+/// 开一块灵感板窗口（**标签板 / 快照板共用**）。
+/// `key` 是去重键（`tag:参考` / `snap:12`）：同一个键已经开着就聚焦，不再开第二块。
+/// `boot` 原样塞进新窗口的 `window.__AM_BOARD__`，前端 `Board.tsx` 只从那里读一切。
+fn spawn_board(
+    app: &AppHandle,
+    key: &str,
+    title: &str,
+    boot: serde_json::Value,
+) -> Result<(), String> {
     {
-        // 已经开着这块板 → 抬到前面
         let map = board_tags().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((label, _)) = map.iter().find(|(_, t)| **t == tag) {
+        if let Some((label, _)) = map.iter().find(|(_, k)| k.as_str() == key) {
             if let Some(w) = app.get_webview_window(label) {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
-                return Ok(0);
+                return Ok(());
             }
         }
     }
-    let (items, total) = {
-        let a = lock(&state);
-        board_items(&a, &tag)?
-    };
-    /* 空标签也开板：板子的第二个用法就是"往空画布上粘图"（Ctrl+V 会存进截图目录
-       并打上这个标签）。原来这里直接报「下面还没有素材」，等于把这条路堵死了。 */
-    let shown = items.len();
     let label = format!("board-{}", BOARD_SEQ.fetch_add(1, Ordering::Relaxed));
-    let title = title.unwrap_or_else(|| format!("灵感板 · {tag}"));
-    let boot = serde_json::json!({
-        "label": label,
-        "tag": tag,
-        "title": title,
-        "items": items,
-        "more": total > shown,
-        "total": total,
-    });
     let script = format!("window.__AM_BOARD__ = {boot};");
     let win = tauri::WebviewWindowBuilder::new(
-        &app,
+        app,
         &label,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title(&title)
+    .title(title)
     .inner_size(1280.0, 860.0)
     .min_inner_size(720.0, 520.0)
     .decorations(false)
@@ -2093,8 +2074,8 @@ async fn am_board_open(
     board_tags()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(label.clone(), tag.clone());
-    // 窗口没了就把映射清掉，否则下次点同一个标签会去聚焦一个不存在的窗口
+        .insert(label.clone(), key.to_string());
+    // 窗口没了就把映射清掉，否则下次点同一个键会去聚焦一个不存在的窗口
     let lbl = label.clone();
     win.on_window_event(move |ev| {
         if matches!(ev, tauri::WindowEvent::Destroyed) {
@@ -2103,8 +2084,39 @@ async fn am_board_open(
     });
     let _ = win.set_focus();
     if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, &format!("board {label} tag={tag} items={shown}/{total}"));
+        log_runtime(d, &format!("board {label} key={key}"));
     }
+    Ok(())
+}
+
+/// 开一块标签板。同一个标签已经开着就直接聚焦，不重复开。
+#[tauri::command]
+async fn am_board_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tag: String,
+    title: Option<String>,
+) -> Result<usize, String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("没有指定标签".into());
+    }
+    let (items, total) = {
+        let a = lock(&state);
+        board_items(&a, &tag)?
+    };
+    /* 空标签也开板：板子的第二个用法就是"往空画布上粘图"（Ctrl+V 会存进截图目录
+       并打上这个标签）。原来这里直接报「下面还没有素材」，等于把这条路堵死了。 */
+    let shown = items.len();
+    let title = title.unwrap_or_else(|| format!("灵感板 · {tag}"));
+    let boot = serde_json::json!({
+        "tag": tag,
+        "title": title,
+        "items": items,
+        "more": total > shown,
+        "total": total,
+    });
+    spawn_board(&app, &format!("tag:{tag}"), &title, boot)?;
     Ok(shown)
 }
 
@@ -2138,6 +2150,20 @@ fn free_path(dir: &Path, stem: &str) -> PathBuf {
 ///
 /// 返回的是**新入库那张素材**的信息，前端拿它直接贴到视口中心。
 #[tauri::command]
+/// 剪贴板图片 → `程序目录\screenshots\粘贴 <时间戳>.png`。
+/// 标签板和快照板的 Ctrl+V 共用这一条（先落盘，再入库，最后挂到板上）。
+fn save_clip_png() -> Result<(PathBuf, u32, u32), String> {
+    let (cw, ch, png) = clipimg::get_png()
+        .map_err(|e| format!("{e}。Ctrl+V 只认剪贴板里的图片（复制文件请用右键菜单）"))?;
+    let dir = shot_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录 {}：{e}", dir.display()))?;
+    let (stamp, _) = screen::local_stamp();
+    let target = free_path(&dir, &format!("粘贴 {stamp}"));
+    std::fs::write(&target, &png).map_err(|e| format!("写图片失败 {}：{e}", target.display()))?;
+    Ok((target, cw, ch))
+}
+
+#[tauri::command]
 async fn am_board_paste(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2147,16 +2173,7 @@ async fn am_board_paste(
     if tag.is_empty() {
         return Err("这块灵感板没有对应的标签".into());
     }
-    let (cw, ch, png) = clipimg::get_png()
-        .map_err(|e| format!("{e}。Ctrl+V 只认剪贴板里的图片（复制文件请用右键菜单）"))?;
-
-    let dir = shot_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("建不了截图目录 {}：{e}", dir.display()))?;
-    let (stamp, _) = screen::local_stamp();
-    let target = free_path(&dir, &format!("粘贴 {stamp}"));
-    std::fs::write(&target, &png)
-        .map_err(|e| format!("写图片失败 {}：{e}", target.display()))?;
+    let (target, cw, ch) = save_clip_png()?;
     let saved = target.to_string_lossy().to_string();
 
     // 截图目录自动进库（库满 3 个就只存盘、不进库 —— 下面会明确告出来，不静默）
@@ -2182,7 +2199,9 @@ async fn am_board_paste(
     let asset = asset.ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
 
     // 主窗的列表要立刻能看到这张新图（走的是「外部变更」那条刷新链路，400ms 去抖）
-    let _ = app.emit("fs://changed", vec![dir.to_string_lossy().to_string()]);
+    if let Some(parent) = target.parent() {
+        let _ = app.emit("fs://changed", vec![parent.to_string_lossy().to_string()]);
+    }
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("board paste tag={tag} -> {saved}"));
     }
@@ -2196,6 +2215,278 @@ async fn am_board_paste(
         name: asset.name.clone(),
         path: asset.path.clone(),
     })
+}
+
+/* ---------------- 快照（0.12.0） ----------------
+
+   一个快照 = 一批图片的**内容指纹清单**。导出的是一份几 KB 的 json（不含图片字节），
+   导回来时按哈希在**当前所有库里重新找一遍** —— 改名字、换目录、换库都还认得出。
+   取舍与匹配算法见 `core/src/snapshot.rs` 的头注释。 */
+
+#[derive(Serialize)]
+struct SnapshotZip {
+    path: String,
+    ok: usize,
+    /// 打不进去的文件（读失败等）
+    bad: Vec<String>,
+    /// 快照里有、但这次没找到文件的条数（没进 zip）
+    missing: usize,
+}
+
+#[tauri::command]
+fn am_snapshot_list(state: State<'_, AppState>) -> Result<Vec<am_core::reg::SnapshotRow>, String> {
+    lock(&state).snapshot_list()
+}
+
+#[tauri::command]
+fn am_snapshot_create(name: String, state: State<'_, AppState>) -> Result<i64, String> {
+    lock(&state).snapshot_create(&name)
+}
+
+#[tauri::command]
+fn am_snapshot_rename(id: i64, name: String, state: State<'_, AppState>) -> Result<(), String> {
+    lock(&state).snapshot_rename(id, &name)
+}
+
+#[tauri::command]
+fn am_snapshot_delete(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    lock(&state).snapshot_delete(id)
+}
+
+/// 把一批素材加进快照（界面上是"选中 → 加入快照"）
+#[tauri::command]
+fn am_snapshot_add(
+    snapshot: i64,
+    ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<am_core::SnapshotAdd, String> {
+    lock(&state).snapshot_add_assets(snapshot, &ids)
+}
+
+/// 把某个标签下的全部图片加进快照（不移动文件，语义等价于"给这批图打书签"）
+#[tauri::command]
+fn am_snapshot_add_tag(
+    snapshot: i64,
+    tag: String,
+    state: State<'_, AppState>,
+) -> Result<am_core::SnapshotAdd, String> {
+    lock(&state).snapshot_add_tag(snapshot, &tag)
+}
+
+/// 对账：把快照里的每一条按内容哈希在当前库里找回来（missing 不为 0 只是"这次没找到"）
+#[tauri::command]
+fn am_snapshot_resolve(
+    snapshot: i64,
+    state: State<'_, AppState>,
+) -> Result<am_core::SnapshotResolve, String> {
+    lock(&state).snapshot_resolve(snapshot)
+}
+
+#[tauri::command]
+fn am_snapshot_remove(
+    snapshot: i64,
+    hashes: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    lock(&state).snapshot_remove(snapshot, &hashes)
+}
+
+/// 导出快照（json 清单）。返回最终路径，取消 = None
+#[tauri::command]
+async fn am_snapshot_export(
+    state: State<'_, AppState>,
+    snapshot: i64,
+) -> Result<Option<String>, String> {
+    let file = {
+        let a = lock(&state);
+        a.snapshot_export(snapshot)?
+    };
+    let stem = am_core::snapshot::safe_file_stem(&file.name);
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导出快照（只含图片编号，不含原图）")
+        .set_file_name(format!("{stem}.am-snapshot.json"))
+        .add_filter("AssetManager 快照", &["json"])
+        .save_file()
+        .await;
+    let Some(h) = picked else { return Ok(None) };
+    let path = h.path().to_path_buf();
+    let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("写不了 {}：{e}", path.display()))?;
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("snapshot export id={snapshot} -> {}", path.display()));
+    }
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// 导入快照。返回 `(id, 最终名字, 新增条数, 跳过的坏条目)`，取消 = None
+#[tauri::command]
+async fn am_snapshot_import(
+    state: State<'_, AppState>,
+) -> Result<Option<(i64, String, usize, usize)>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导入快照")
+        .add_filter("AssetManager 快照", &["json"])
+        .pick_file()
+        .await;
+    let Some(h) = picked else { return Ok(None) };
+    let text = std::fs::read_to_string(h.path())
+        .map_err(|e| format!("读不了 {}：{e}", h.path().display()))?;
+    let mut a = lock(&state);
+    let r = a.snapshot_import(&text)?;
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("snapshot import {} -> id={} 新增 {} 条", r.1, r.0, r.2));
+    }
+    Ok(Some(r))
+}
+
+/// 导出快照里的**原始图片**，打成 zip 到用户选的位置。
+/// 只有这次真找到的图才进包；找不到的条数照实报出来（不假装成功）。
+#[tauri::command]
+async fn am_snapshot_export_zip(
+    state: State<'_, AppState>,
+    snapshot: i64,
+) -> Result<Option<SnapshotZip>, String> {
+    let (name, files, missing) = {
+        let a = lock(&state);
+        let row = a.snapshot_get(snapshot)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let res = a.snapshot_resolve(snapshot)?;
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut missing = 0usize;
+        for it in res.items {
+            if it.gid.is_none() {
+                missing += 1;
+                continue;
+            }
+            let p = PathBuf::from(&it.path);
+            if p.is_file() {
+                files.push(p);
+            } else {
+                missing += 1;
+            }
+        }
+        (row.name, files, missing)
+    };
+    if files.is_empty() {
+        return Err("这个快照里一张能导出的图都没有（文件都不在原位）".into());
+    }
+    let stem = am_core::snapshot::safe_file_stem(&name);
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导出原始图片（zip）")
+        .set_file_name(format!("{stem}.zip"))
+        .add_filter("压缩包", &["zip"])
+        .save_file()
+        .await;
+    let Some(h) = picked else { return Ok(None) };
+    let target = h.path().to_path_buf();
+    let t2 = target.clone();
+    let (ok, bad) = tauri::async_runtime::spawn_blocking(move || {
+        am_core::snapshot::zip_files(&t2, &files)
+    })
+    .await
+    .map_err(|e| format!("打包线程挂了：{e}"))??;
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!("snapshot zip id={snapshot} ok={ok} bad={} -> {}", bad.len(), target.display()),
+        );
+    }
+    Ok(Some(SnapshotZip { path: target.to_string_lossy().to_string(), ok, bad, missing }))
+}
+
+/// 快照的灵感板：先把条目对成现在的素材，再把它们铺到无限画布上。
+/// 找不到的条目**不静默丢** —— 窗口标题里写明「N 张这次没找到」。
+#[tauri::command]
+async fn am_snapshot_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    snapshot: i64,
+) -> Result<usize, String> {
+    let (row, res) = {
+        let a = lock(&state);
+        (
+            a.snapshot_get(snapshot)?,
+            a.snapshot_resolve(snapshot)?,
+        )
+    };
+    let row = row.ok_or_else(|| "这个快照已经不在了".to_string())?;
+    let mut items: Vec<BoardItem> = Vec::with_capacity(res.items.len());
+    for it in &res.items {
+        let Some(g) = it.gid else { continue };
+        items.push(BoardItem {
+            id: g,
+            src: format!("http://thumb.localhost/{}?px=1024&r={}", g, it.mtime),
+            w: it.w.unwrap_or(0).max(0) as u32,
+            h: it.h.unwrap_or(0).max(0) as u32,
+            name: it.name.clone(),
+            path: it.path.clone(),
+        });
+    }
+    let shown = items.len();
+    let title = format!("灵感板 · 快照 {}", row.name);
+    let boot = serde_json::json!({
+        "snapshot": { "id": snapshot, "name": row.name },
+        "title": title,
+        "items": items,
+        "more": false,
+        "total": res.items.len(),
+        "missing": res.missing,
+    });
+    spawn_board(&app, &format!("snap:{snapshot}"), &title, boot)?;
+    log_runtime_opt(&format!("snapshot board id={snapshot} items={shown} missing={}", res.missing));
+    Ok(shown)
+}
+
+/// 快照板里的 Ctrl+V：剪贴板图片存进截图目录、入库、**加进这个快照**，再贴到板上。
+#[tauri::command]
+async fn am_snapshot_paste(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    snapshot: i64,
+) -> Result<BoardItem, String> {
+    let (target, cw, ch) = save_clip_png()?;
+    let saved = target.to_string_lossy().to_string();
+    remember_shot_dir(&app);
+
+    let (lib_id, local) = {
+        let a = lock(&state);
+        let lib_id = a.lib_for_path(&saved).ok_or_else(|| {
+            format!("图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次没进快照")
+        })?;
+        let local = db::asset_id_by_path(a.conn_for_path(&saved)?, &saved)?
+            .ok_or_else(|| format!("图片已存到 {saved}，但索引里还没找到它 —— 稍等一下再按一次 Ctrl+V"))?;
+        (lib_id, local)
+    };
+    let g = am_core::gid(lib_id, local);
+    {
+        let mut a = lock(&state);
+        a.snapshot_add_assets(snapshot, &[g])?;
+    }
+    let asset = {
+        let a = lock(&state);
+        a.asset(g)?
+    }
+    .ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
+
+    if let Some(parent) = target.parent() {
+        let _ = app.emit("fs://changed", vec![parent.to_string_lossy().to_string()]);
+    }
+    log_runtime_opt(&format!("snapshot paste id={snapshot} -> {saved}"));
+
+    Ok(BoardItem {
+        id: g,
+        src: format!("http://thumb.localhost/{}?px=1024&r={}", asset.id, asset.mtime),
+        w: asset.width.unwrap_or(cw as i64).max(0) as u32,
+        h: asset.height.unwrap_or(ch as i64).max(0) as u32,
+        name: asset.name.clone(),
+        path: asset.path.clone(),
+    })
+}
+
+/// 记一行运行时日志（没有日志目录时什么都不做）
+fn log_runtime_opt(msg: &str) {
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, msg);
+    }
 }
 
 /* ---------------- 复制 / 另存 ---------------- */
@@ -3104,6 +3395,19 @@ fn main() {
             am_board_open,
             am_board_close,
             am_board_paste,
+            am_snapshot_list,
+            am_snapshot_create,
+            am_snapshot_rename,
+            am_snapshot_delete,
+            am_snapshot_add,
+            am_snapshot_add_tag,
+            am_snapshot_resolve,
+            am_snapshot_remove,
+            am_snapshot_export,
+            am_snapshot_import,
+            am_snapshot_export_zip,
+            am_snapshot_open,
+            am_snapshot_paste,
             am_save_as,
             am_hotkeys_set,
             am_meta_missing,

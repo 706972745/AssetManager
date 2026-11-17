@@ -29,6 +29,7 @@ pub mod reg;
 pub mod scan;
 pub mod screen;
 pub mod shellthumb;
+pub mod snapshot;
 pub mod thumb;
 pub mod watch;
 
@@ -1356,6 +1357,311 @@ fn cmp_assets(a: &model::Asset, b: &model::Asset, sort: &str) -> std::cmp::Order
     }
 }
 
+/* ------------------------------------------------------------------ 快照
+   一个快照 = 一批图片的「内容指纹清单」。做法和坑都写在 snapshot.rs 头注释里，
+   这里只负责跨库的部分：算哈希、按哈希在三五个库里找回来、把结果对成全局 id。 */
+
+/// 加入快照的结果（界面要分别说清"新加了几张 / 本来就有几张 / 哪几张失败"）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapshotAdd {
+    pub added: usize,
+    pub total: usize,
+    pub already: usize,
+    pub failed: Vec<String>,
+}
+
+/// 对账后的一条：`gid` 为 None = 这次没找到（**不删条目**，用户可能只是没插硬盘）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedItem {
+    pub hash: String,
+    pub name: String,
+    pub gid: Option<i64>,
+    /// 现在能找到的路径（找不到时是快照里记的最后一次路径）
+    pub path: String,
+    pub lib: String,
+    pub size: i64,
+    pub w: Option<i64>,
+    pub h: Option<i64>,
+    /// 用来给 `thumb://` 做缓存失效（文件一改 URL 就变）
+    pub mtime: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapshotResolve {
+    pub items: Vec<ResolvedItem>,
+    pub found: usize,
+    pub missing: usize,
+}
+
+impl App {
+    pub fn snapshot_list(&self) -> Result<Vec<reg::SnapshotRow>, String> {
+        reg::snapshots(&self.reg)
+    }
+
+    pub fn snapshot_get(&self, id: i64) -> Result<Option<reg::SnapshotRow>, String> {
+        reg::snapshot(&self.reg, id)
+    }
+
+    pub fn snapshot_create(&mut self, name: &str) -> Result<i64, String> {
+        reg::snapshot_create(&self.reg, name)
+    }
+
+    pub fn snapshot_rename(&mut self, id: i64, name: &str) -> Result<(), String> {
+        reg::snapshot_rename(&self.reg, id, name)
+    }
+
+    pub fn snapshot_delete(&mut self, id: i64) -> Result<(), String> {
+        reg::snapshot_delete(&self.reg, id)
+    }
+
+    pub fn snapshot_items(&self, id: i64) -> Result<Vec<snapshot::SnapItem>, String> {
+        reg::snapshot_items(&self.reg, id)
+    }
+
+    pub fn snapshot_remove(&mut self, id: i64, hashes: &[String]) -> Result<usize, String> {
+        reg::snapshot_remove_items(&self.reg, id, hashes)
+    }
+
+    /// 把一批素材加进快照。**身份是文件内容哈希**：算过的直接用，没算过的现算并写回
+    /// `assets.hash_x`（顺手，下次查重也省事）。
+    pub fn snapshot_add_assets(&mut self, snap: i64, ids: &[i64]) -> Result<SnapshotAdd, String> {
+        reg::snapshot(&self.reg, snap)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let mut items: Vec<snapshot::SnapItem> = Vec::with_capacity(ids.len());
+        let mut failed: Vec<String> = Vec::new();
+
+        for &g in ids {
+            let (lib_id, local) = ungid(g);
+            let Some(l) = self.libs.iter().find(|l| l.id == lib_id) else {
+                failed.push(format!("#{g} 已经不属于任何库了"));
+                continue;
+            };
+            let lib_root = l.root.clone();
+            let a = match db::asset_by_id(&l.conn, local)? {
+                Some(a) => a,
+                None => {
+                    failed.push(format!("#{g} 已经不在了"));
+                    continue;
+                }
+            };
+            let hash = match db::asset_hash(&l.conn, local)? {
+                Some(h) if !h.is_empty() => h,
+                _ => match snapshot::hash_path(Path::new(&a.path)) {
+                    Ok(h) => {
+                        let _ = db::set_hash_only(&l.conn, local, &h);
+                        h
+                    }
+                    Err(e) => {
+                        failed.push(e);
+                        continue;
+                    }
+                },
+            };
+            items.push(snapshot::SnapItem {
+                hash: snapshot::hex(&hash),
+                name: a.name,
+                size: a.size,
+                w: a.width,
+                h: a.height,
+                path: a.path,
+                lib: lib_root,
+            });
+        }
+
+        let total = items.len();
+        let added = reg::snapshot_insert_items(&self.reg, snap, &items)?;
+        Ok(SnapshotAdd { added, total, already: total - added, failed })
+    }
+
+    /// 把某个标签下的**全部**素材加进快照。不移动任何文件，语义等价于"给这批图打书签"。
+    pub fn snapshot_add_tag(&mut self, snap: i64, tag: &str) -> Result<SnapshotAdd, String> {
+        let tag = tag.trim().to_string();
+        if tag.is_empty() {
+            return Err("没有指定标签".into());
+        }
+        let mut ids: Vec<i64> = Vec::new();
+        let mut cursor: Option<(i64, i64)> = None;
+        loop {
+            let q = model::AssetQuery {
+                tag: Some(tag.clone()),
+                limit: Some(1000),
+                cursor,
+                sort: Some("mtime_desc".into()),
+                ..Default::default()
+            };
+            let rows = self.list(&q)?;
+            if rows.is_empty() {
+                break;
+            }
+            for r in &rows {
+                ids.push(r.id);
+            }
+            match rows.last() {
+                Some(last) => cursor = Some((last.mtime, last.id)),
+                None => break,
+            }
+            if ids.len() > 500_000 {
+                break; // 保险：真到这个量级，用户该改用整库快照了
+            }
+        }
+        self.snapshot_add_assets(snap, &ids)
+    }
+
+    /// 对账：把快照里的每一条**按内容哈希**在当前所有库里找回来。
+    ///
+    /// 三条路，按代价从低到高：① 哈希命中（走索引，一条 SQL）；② 同体积候选逐个现算哈希
+    /// （改名 / 新入库的行 `hash_x` 还是 NULL，只能这样）；③ 都不中 = 记为找不到。
+    /// 找到之后**顺手把条目里的路径/名字更新成现在这份**（显示用，不动身份）。
+    pub fn snapshot_resolve(&self, snap: i64) -> Result<SnapshotResolve, String> {
+        let stored = reg::snapshot_items(&self.reg, snap)?;
+        let mut items = Vec::with_capacity(stored.len());
+        let mut found = 0usize;
+
+        for it in stored {
+            let Some(hash) = snapshot::unhex(&it.hash) else {
+                items.push(ResolvedItem {
+                    hash: it.hash,
+                    name: it.name,
+                    gid: None,
+                    path: it.path,
+                    lib: it.lib,
+                    size: it.size,
+                    w: it.w,
+                    h: it.h,
+                    mtime: 0,
+                });
+                continue;
+            };
+            match self.match_by_hash(&hash, it.size)? {
+                Some((g, a, lib_root)) => {
+                    found += 1;
+                    // 位置变了就更新（改名 / 换库 / 换目录都走这条），失败不影响对账
+                    let _ = reg::snapshot_touch_item(
+                        &self.reg,
+                        snap,
+                        &it.hash,
+                        &a.name,
+                        &a.path,
+                        &lib_root,
+                    );
+                    items.push(ResolvedItem {
+                        hash: it.hash,
+                        name: a.name,
+                        gid: Some(g),
+                        path: a.path,
+                        lib: lib_root,
+                        size: a.size,
+                        w: a.width,
+                        h: a.height,
+                        mtime: a.mtime,
+                    });
+                }
+                None => items.push(ResolvedItem {
+                    hash: it.hash,
+                    name: it.name,
+                    gid: None,
+                    path: it.path,
+                    lib: it.lib,
+                    size: it.size,
+                    w: it.w,
+                    h: it.h,
+                    mtime: 0,
+                }),
+            }
+        }
+
+        let missing = items.len() - found;
+        Ok(SnapshotResolve { items, found, missing })
+    }
+
+    /// 按内容哈希在**所有库**里找一张图。命中返回 `(全局 id, 素材, 库根)`。
+    fn match_by_hash(
+        &self,
+        hash: &[u8],
+        size: i64,
+    ) -> Result<Option<(i64, model::Asset, String)>, String> {
+        // ① 哈希已经在库里（查重算过，或本功能算过）
+        for l in &self.libs {
+            if let Some(&local) = db::ids_by_hash(&l.conn, hash)?.first() {
+                if let Some(mut a) = db::asset_by_id(&l.conn, local)? {
+                    a.dir_id = gid(l.id, a.dir_id);
+                    a.id = gid(l.id, local);
+                    return Ok(Some((a.id, a, l.root.clone())));
+                }
+            }
+        }
+        // ② 刚改名 / 刚入库的行没有哈希：按体积捞候选，真读字节算一遍再比。
+        //    体积相同的文件很少（照片几乎不会），候选只取 50 个，代价可控。
+        if size <= 0 {
+            return Ok(None);
+        }
+        for l in &self.libs {
+            for (local, known) in db::ids_by_size(&l.conn, size, 50)? {
+                let same = match known {
+                    Some(bytes) => bytes == hash,
+                    None => {
+                        let Some(a) = db::asset_by_id(&l.conn, local)? else { continue };
+                        match snapshot::hash_path(Path::new(&a.path)) {
+                            Ok(bytes) => {
+                                // 顺便补进库：下次快照/查重就不用再算一遍
+                                let _ = db::set_hash_only(&l.conn, local, &bytes);
+                                bytes == hash
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                };
+                if same {
+                    if let Some(mut a) = db::asset_by_id(&l.conn, local)? {
+                        a.dir_id = gid(l.id, a.dir_id);
+                        a.id = gid(l.id, local);
+                        return Ok(Some((a.id, a, l.root.clone())));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 导出用：把快照记成一份可读的清单（**只有哈希和元数据，不含任何图片字节**）
+    pub fn snapshot_export(&self, id: i64) -> Result<snapshot::SnapFile, String> {
+        let row = reg::snapshot(&self.reg, id)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let items = reg::snapshot_items(&self.reg, id)?;
+        Ok(snapshot::SnapFile::new(&row.name, items))
+    }
+
+    /// 导入：重名自动加 ` (2)`，**一条都不丢**（解析不了的那条会被跳过并计入跳过量）
+    pub fn snapshot_import(&mut self, text: &str) -> Result<(i64, String, usize, usize), String> {
+        let file = snapshot::SnapFile::parse(text)?;
+        let mut name = file.name.trim().to_string();
+        let mut n = 2;
+        while self
+            .snapshot_list()?
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(&name))
+        {
+            name = format!("{} ({n})", file.name.trim());
+            n += 1;
+            if n > 999 {
+                return Err("同名快照太多了".into());
+            }
+        }
+        let id = reg::snapshot_create(&self.reg, &name)?;
+        let mut clean: Vec<snapshot::SnapItem> = Vec::new();
+        let total = file.items.len();
+        for mut it in file.items {
+            // 只认 32 位十六进制的哈希；别的一律当坏数据丢掉（宁少不错）
+            it.hash = it.hash.trim().to_ascii_lowercase();
+            if snapshot::unhex(&it.hash).is_none() {
+                continue;
+            }
+            clean.push(it);
+        }
+        let skipped = total - clean.len();
+        let added = reg::snapshot_insert_items(&self.reg, id, &clean)?;
+        Ok((id, name, added, skipped))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,4 +1922,144 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /* ---------------- 快照（0.12.0） ----------------
+       这几条守的是**用户唯一的硬要求**：改名 / 换库之后，快照里的图还必须认得出来。
+       身份是内容哈希，所以下面每一步都不看文件名、不看 id、不看路径。 */
+
+    fn img_at(path: &std::path::Path, w: u32, h: u32, rgb: [u8; 3]) {
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // .jpg 不支持 RGBA，统一写 RGB8（PNG 写 RGB8 也一样能读）
+        image::RgbImage::from_pixel(w, h, image::Rgb(rgb)).save(path).unwrap();
+    }
+
+    fn png_at(path: &std::path::Path, r: u8, g: u8, b: u8) {
+        img_at(path, 6, 4, [r, g, b]);
+    }
+
+    #[test]
+    fn snapshot_survives_rename_and_library_move() {
+        let d = tmp("snap-move");
+        let lib_a = d.join("lib-a");
+        let f = lib_a.join("原图.png");
+        png_at(&f, 10, 20, 30);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        let snap = app.snapshot_create("参考板").unwrap();
+        let ids: Vec<i64> = app
+            .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(app.snapshot_add_assets(snap, &ids).unwrap().added, 1);
+
+        let r = app.snapshot_resolve(snap).unwrap();
+        assert_eq!((r.found, r.missing), (1, 0), "刚加进去就该找得到");
+
+        // ① 改名（内容不变）：重扫之后老行 missing、新行 hash_x 还是 NULL
+        let renamed = lib_a.join("改了名字.png");
+        std::fs::rename(&f, &renamed).unwrap();
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        let r = app.snapshot_resolve(snap).unwrap();
+        assert_eq!((r.found, r.missing), (1, 0), "改名之后必须还认得出（靠内容，不靠文件名）");
+        assert_eq!(r.items[0].name, "改了名字.png", "条目里记的位置要跟着更新");
+
+        // ② 换库：同一张图放到另一个库根，旧库整个移除
+        let lib_b = d.join("lib-b");
+        std::fs::create_dir_all(&lib_b).unwrap();
+        std::fs::copy(&renamed, lib_b.join("全新的名字.png")).unwrap();
+        app.remove_lib(&lib_a.to_string_lossy()).unwrap();
+        app.scan(&lib_b.to_string_lossy(), |_| {}).unwrap();
+        let r = app.snapshot_resolve(snap).unwrap();
+        assert_eq!((r.found, r.missing), (1, 0), "换到另一个素材库之后必须还找得到");
+        assert_eq!(r.items[0].name, "全新的名字.png");
+        assert_eq!(r.items[0].lib, lib_b.to_string_lossy().to_string());
+
+        // ③ 内容真的不是同一张图 → 才算找不到（同名也不行）
+        std::fs::remove_file(lib_b.join("全新的名字.png")).unwrap();
+        img_at(&lib_b.join("全新的名字.png"), 9, 7, [200, 10, 10]);
+        app.scan(&lib_b.to_string_lossy(), |_| {}).unwrap();
+        let r = app.snapshot_resolve(snap).unwrap();
+        assert_eq!((r.found, r.missing), (0, 1), "同名的另一张图不许被当成同一张");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn snapshot_export_import_roundtrip_keeps_identity() {
+        let d = tmp("snap-io");
+        let lib = d.join("lib");
+        png_at(&lib.join("a.png"), 1, 2, 3);
+        png_at(&lib.join("b.png"), 4, 5, 6);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let snap = app.snapshot_create("导出板").unwrap();
+        let ids: Vec<i64> = app
+            .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(app.snapshot_add_assets(snap, &ids).unwrap().added, 2);
+
+        let file = app.snapshot_export(snap).unwrap();
+        assert_eq!(file.items.len(), 2);
+        assert_eq!(file.kind, "snapshot");
+        let text = serde_json::to_string_pretty(&file).unwrap();
+        // 导出的是**编号**，不是图片字节
+        assert!(!text.contains("iVBORw0KGgo"), "快照文件里不许出现图片数据");
+
+        // 导回来：重名自动加后缀，条目一条不丢，还能对上现在库里的图
+        let (id2, name, added, skipped) = app.snapshot_import(&text).unwrap();
+        assert_eq!((added, skipped), (2, 0));
+        assert_eq!(name, "导出板 (2)", "重名要自动区分，不能覆盖原来那块");
+        let r = app.snapshot_resolve(id2).unwrap();
+        assert_eq!((r.found, r.missing), (2, 0));
+
+        // 坏条目跳过而不是整份失败
+        let bad = r#"{"app":"AssetManager","kind":"snapshot","version":1,"name":"半坏",
+            "items":[{"hash":"not-a-hash","name":"x.png"},{"hash":"00112233445566778899aabbccddeeff","name":"y.png"}]}"#;
+        let (_, _, added, skipped) = app.snapshot_import(bad).unwrap();
+        assert_eq!((added, skipped), (1, 1));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn snapshot_add_tag_takes_every_asset_under_it() {
+        let d = tmp("snap-tag");
+        let lib = d.join("lib");
+        png_at(&lib.join("a.png"), 9, 9, 9);
+        png_at(&lib.join("b.png"), 8, 8, 8);
+        png_at(&lib.join("c.jpg"), 7, 7, 7);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let ids: Vec<i64> = app
+            .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        app.tag_assets(&ids, "场景参考").unwrap();
+
+        let snap = app.snapshot_create("场景板").unwrap();
+        let res = app.snapshot_add_tag(snap, "场景参考").unwrap();
+        assert_eq!((res.added, res.total), (3, 3), "标签下有几张就进几张");
+        // 幂等：再点一次不重复
+        let again = app.snapshot_add_tag(snap, "场景参考").unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(again.already, 3);
+
+        // 文件一个都没动
+        assert!(lib.join("a.png").is_file() && lib.join("c.jpg").is_file());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
 }

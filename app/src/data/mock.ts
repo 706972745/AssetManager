@@ -421,6 +421,41 @@ export const mockSource: Source = {
   async boardPaste() {
     throw new Error("浏览器预览模式没有灵感板");
   },
+  async snapshotList() {
+    return [];
+  },
+  async snapshotCreate() {
+    throw new Error("浏览器预览模式没有快照");
+  },
+  async snapshotRename() {},
+  async snapshotDelete() {},
+  async snapshotAdd() {
+    throw new Error("浏览器预览模式没有快照");
+  },
+  async snapshotAddTag() {
+    throw new Error("浏览器预览模式没有快照");
+  },
+  async snapshotResolve() {
+    return { items: [], found: 0, missing: 0 };
+  },
+  async snapshotRemove() {
+    return 0;
+  },
+  async snapshotExport() {
+    return null;
+  },
+  async snapshotImport() {
+    return null;
+  },
+  async snapshotExportZip() {
+    return null;
+  },
+  async snapshotOpen() {
+    throw new Error("浏览器预览模式没有灵感板");
+  },
+  async snapshotPaste() {
+    throw new Error("浏览器预览模式没有灵感板");
+  },
   async peekTop(on: boolean) {
     return on;
   },

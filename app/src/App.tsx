@@ -15,6 +15,7 @@ import {
   type Prefs,
   type TagCount,
   type TagGroup,
+  type SnapshotRow,
   type Query,
   type AutoRule,
   type ScanProgress,
@@ -32,6 +33,8 @@ import { Icon, Toaster, type ToastItem } from "./components/ui";
 import { ContextMenu, type CtxItem, type CtxState } from "./components/ContextMenu";
 import { TagPrompt } from "./components/TagPrompt";
 import { TagDock } from "./components/TagDock";
+import { SnapshotDock } from "./components/SnapshotDock";
+import { SnapshotPrompt } from "./components/SnapshotPrompt";
 import { TagEdit } from "./components/TagEdit";
 import { COLOR_LABEL, autoTagLabel, isAutoTag, loadDenied, saveDenied } from "./lib/tags";
 import { useDialog } from "./components/Dialog";
@@ -98,6 +101,15 @@ export default function App() {
   const [tools, setTools] = useState<{ tab: ToolTab } | null>(null);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
+  /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
+  const [snaps, setSnaps] = useState<SnapshotRow[]>([]);
+  const [snapPrompt, setSnapPrompt] = useState<{
+    mode: "tag" | "new" | "rename";
+    id?: number;
+    tag?: string;
+    count?: number;
+    initial?: string;
+  } | null>(null);
   /** 正在编辑的标签/分组（null = 没开编辑卡） */
   const [tagEdit, setTagEdit] = useState<{ kind: "tag" | "group"; name: string } | null>(null);
   /** 正在编辑的标签的自动规则（T34）：null = 没有规则 */
@@ -451,7 +463,8 @@ export default function App() {
     void source.tags().then(setTags).catch(() => {});
     void source.tagGroups().then(setTagGroups).catch(() => {});
     void source.autoTags().then(setAutoTagCounts).catch(() => {});
-  }, [refreshKey, tagPrompt, tagEdit]);
+    void source.snapshotList().then(setSnaps).catch(() => {});
+  }, [refreshKey, tagPrompt, tagEdit, snapPrompt]);
 
   // 当前页的手工标签（详情面板 + 后面的批量操作都要用）
   useEffect(() => {
@@ -563,6 +576,19 @@ export default function App() {
             action: () =>
               void source.boardOpen(tag).catch((e) => toast(String(e))),
           },
+          {
+            /* 快照：把这一整个标签下的图都记进快照（文件一个都不动） */
+            label: "把标签下的图片加入快照…",
+            icon: "copy",
+            action: () =>
+              setSnapPrompt({
+                mode: "tag",
+                tag,
+                count:
+                  tags.find((t) => t.name === tag)?.count ??
+                  autoTagCounts.find((t) => t.name === tag)?.count,
+              }),
+          },
           { kind: "separator" },
           {
             label: on ? "取消这个筛选" : `只看「${label}」`,
@@ -590,6 +616,219 @@ export default function App() {
       });
     },
     [tagFilter, deleteTagEverywhere, toast]
+  );
+
+  /* ---------------- 快照（0.12.0） ----------------
+     快照记的是图片的**内容指纹**，所以改名、换目录、换库之后导回来照样对得上。
+     界面上只有三件事：打开灵感板、对账、导出（清单 / 原图 zip）。 */
+
+  const openSnapshot = useCallback(
+    (row: SnapshotRow) => {
+      void source.snapshotOpen(row.id).catch((e) => toast(String(e), true));
+    },
+    [toast]
+  );
+
+  const resolveSnapshot = useCallback(
+    async (row: SnapshotRow) => {
+      try {
+        const r = await source.snapshotResolve(row.id);
+        if (r.missing === 0) {
+          toast(
+            `「${row.name}」对上了：${r.found} 张全在`,
+            false,
+            "按图片内容匹配 —— 改过名字、换过库的也算同一张"
+          );
+        } else {
+          toast(
+            `「${row.name}」对上 ${r.found} 张，${r.missing} 张这次没找到`,
+            true,
+            "条目不会被删，硬盘插回来再点一次对账就行"
+          );
+        }
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const exportSnapshot = useCallback(
+    async (row: SnapshotRow) => {
+      try {
+        const p = await source.snapshotExport(row.id);
+        if (p) toast("快照已导出", false, p);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const exportSnapshotZip = useCallback(
+    async (row: SnapshotRow) => {
+      try {
+        toast(`正在打包「${row.name}」的原图…`, false, "图多、图大的话要等一会儿");
+        const r = await source.snapshotExportZip(row.id);
+        if (!r) return;
+        const notes: string[] = [];
+        if (r.bad.length) notes.push(`${r.bad.length} 个失败`);
+        if (r.missing) notes.push(`${r.missing} 张这次没找到，没进包`);
+        const file = r.path.split(/[\\/]/).pop() ?? r.path;
+        toast(`已导出 ${r.ok} 张 → ${file}`, notes.length > 0, notes.join(" · ") || undefined);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const importSnapshot = useCallback(async () => {
+    try {
+      const r = await source.snapshotImport();
+      if (!r) return;
+      const [, name, added, skipped] = r;
+      setRefreshKey((k) => k + 1);
+      toast(
+        `已导入快照「${name}」：${added} 张`,
+        skipped > 0,
+        skipped ? `${skipped} 条坏数据已跳过` : undefined
+      );
+    } catch (e) {
+      toast(String(e), true);
+    }
+  }, [toast]);
+
+  const deleteSnapshot = useCallback(
+    async (row: SnapshotRow) => {
+      const v = await dlg.ask({
+        title: `删除快照「${row.name}」？`,
+        body: (
+          <p className="dlg-hint">
+            只删这份清单（{row.count} 条）。磁盘上的图片、素材库里的素材、标签都不动。
+          </p>
+        ),
+        buttons: [
+          { label: "删除快照", value: "go", tone: "danger" },
+          { label: "取消", value: "no" },
+        ],
+      });
+      if (v !== "go") return;
+      try {
+        await source.snapshotDelete(row.id);
+        setRefreshKey((k) => k + 1);
+        toast(`已删除快照「${row.name}」`);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [toast]
+  );
+
+  const addTagToSnapshot = useCallback(
+    async (id: number, tag: string) => {
+      try {
+        const r = await source.snapshotAddTag(id, tag);
+        setSnapPrompt(null);
+        setRefreshKey((k) => k + 1);
+        const notes: string[] = [];
+        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
+        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
+        toast(`已加入 ${r.added} 张`, r.failed.length > 0, notes.join(" · ") || undefined);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const nameSnapshot = useCallback(
+    async (name: string) => {
+      const p = snapPrompt;
+      if (!p) return;
+      try {
+        if (p.mode === "rename" && p.id) {
+          await source.snapshotRename(p.id, name);
+          setSnapPrompt(null);
+          setRefreshKey((k) => k + 1);
+          toast(`已改名为「${name}」`);
+          return;
+        }
+        const id = await source.snapshotCreate(name);
+        setSnapPrompt(null);
+        setRefreshKey((k) => k + 1);
+        if (p.mode === "tag" && p.tag) {
+          await addTagToSnapshot(id, p.tag);
+        } else {
+          toast(
+            `快照「${name}」已建立`,
+            false,
+            "右键任意标签 →「把标签下的图片加入快照」就能往里放图"
+          );
+        }
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [snapPrompt, toast, addTagToSnapshot]
+  );
+
+  const snapshotMenu = useCallback(
+    (id: number, x: number, y: number) => {
+      const row = snaps.find((s) => s.id === id);
+      if (!row) return;
+      setCtx({
+        x,
+        y,
+        items: [
+          { label: "打开灵感板（无限画布）", icon: "expand", action: () => openSnapshot(row) },
+          {
+            label: "重新对账（按内容找回来）",
+            icon: "search",
+            action: () => void resolveSnapshot(row),
+          },
+          { kind: "separator" },
+          {
+            label: "导出快照（.json，只含编号）",
+            icon: "file",
+            action: () => void exportSnapshot(row),
+          },
+          {
+            label: "导出原始图片（.zip）",
+            icon: "file",
+            action: () => void exportSnapshotZip(row),
+          },
+          { kind: "separator" },
+          {
+            label: "改名",
+            icon: "tag",
+            action: () => setSnapPrompt({ mode: "rename", id, initial: row.name }),
+          },
+          {
+            label: "删除快照（不删文件）",
+            icon: "trash",
+            danger: true,
+            action: () => void deleteSnapshot(row),
+          },
+        ],
+      });
+    },
+    [snaps, openSnapshot, resolveSnapshot, exportSnapshot, exportSnapshotZip, deleteSnapshot]
+  );
+
+  const snapshotHeadMenu = useCallback(
+    (x: number, y: number) => {
+      setCtx({
+        x,
+        y,
+        items: [
+          { label: "新建快照", icon: "plus", action: () => setSnapPrompt({ mode: "new" }) },
+          { label: "导入快照（.json）", icon: "file", action: () => void importSnapshot() },
+        ],
+      });
+    },
+    [importSnapshot]
   );
 
   const groupMenu = useCallback((name: string, x: number, y: number) => {
@@ -1443,6 +1682,20 @@ export default function App() {
         keywords: "库 文件夹 添加 library folder",
         run: () => void onAddFolder(),
       },
+      {
+        id: "snap-new",
+        label: "新建快照",
+        icon: "expand",
+        keywords: "快照 snapshot 收藏 书签",
+        run: () => setSnapPrompt({ mode: "new" }),
+      },
+      {
+        id: "snap-import",
+        label: "导入快照（.json）",
+        icon: "file",
+        keywords: "快照 snapshot 导入 import",
+        run: () => void importSnapshot(),
+      },
     ];
 
     if (dir) {
@@ -1728,6 +1981,15 @@ export default function App() {
           onAbout={() => toast("AssetManager 0.7.0 开发版 · 索引式素材库，不搬动你的原始文件")}
           onShortcuts={() => setShortcutsOpen(true)}
           refreshKey={refreshKey}
+          snapshotDock={
+            <SnapshotDock
+              items={snaps}
+              onOpen={openSnapshot}
+              onMenu={snapshotMenu}
+              onCreate={() => setSnapPrompt({ mode: "new" })}
+              onHeadMenu={snapshotHeadMenu}
+            />
+          }
           tagDock={
             <TagDock
               tags={tags}
@@ -1745,7 +2007,7 @@ export default function App() {
               onTagMenu={(tag, x, y) => tagMenu(tag, x, y)}
               onGroupMenu={(name, x, y) => groupMenu(name, x, y)}
               /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了 */
-              hold={!!tagEdit || !!tagPrompt || !!ctx}
+              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt}
             />
           }
         />
@@ -1966,6 +2228,21 @@ export default function App() {
             void applyTag(t, ids);
           }}
           onClose={() => setTagPrompt(null)}
+        />
+      )}
+
+      {snapPrompt && (
+        <SnapshotPrompt
+          mode={snapPrompt.mode}
+          snapshots={snaps}
+          tag={snapPrompt.tag}
+          count={snapPrompt.count}
+          initial={snapPrompt.initial}
+          onPick={(id) => {
+            if (snapPrompt.tag) void addTagToSnapshot(id, snapPrompt.tag);
+          }}
+          onName={(name) => void nameSnapshot(name)}
+          onClose={() => setSnapPrompt(null)}
         />
       )}
 

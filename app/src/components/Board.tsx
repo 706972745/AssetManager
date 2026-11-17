@@ -30,17 +30,24 @@ interface BoardItem {
 }
 
 interface BoardBoot {
-  label: string;
-  tag: string;
+  label?: string;
+  /** 标签板：这块板对应哪个标签（Ctrl+V 打的就是这个标签） */
+  tag?: string;
+  /** 快照板：这块板对应哪份快照（Ctrl+V 加进这个快照） */
+  snapshot?: { id: number; name: string };
   title: string;
   items: BoardItem[];
   more?: boolean;
   total?: number;
+  /** 快照板专用：快照里有、但这次没找到的条数（标题上要说出来） */
+  missing?: number;
 }
 
 function bootData(): BoardBoot | null {
   const b = (window as unknown as { __AM_BOARD__?: BoardBoot }).__AM_BOARD__;
-  if (!b?.items?.length) return null;
+  if (!b) return null;
+  // 快照板可能**一张都没对上**（硬盘没插）：那也要开板并说明，不能当成"数据丢失"
+  if (!b.tag && !b.snapshot) return null;
   return b;
 }
 
@@ -364,12 +371,14 @@ export function Board() {
 
   const paste = useCallback(async () => {
     if (!boot) return;
+    const snap = boot.snapshot;
+    const tag = boot.tag;
     /* 按住 Ctrl+V 会连发 keydown：粘贴要读剪贴板 + 可能扫一遍截图目录，
        不加这道闸，一次长按就能给你粘出二十张一模一样的图。 */
     if (pasting.current) return;
     pasting.current = true;
     try {
-      const it = await source.boardPaste(boot.tag);
+      const it = snap ? await source.snapshotPaste(snap.id) : await source.boardPaste(tag!);
       const root = rootRef.current;
       const W = root?.clientWidth ?? 1200;
       const H = root?.clientHeight ?? 800;
@@ -385,7 +394,12 @@ export function Board() {
       const cy = (H / 2 - v.y) / v.k;
       pos.current.set(it.id, { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h });
       setItems((old) => (old.some((x) => x.id === it.id) ? old : [...old, it]));
-      setHint({ text: `已存进程序目录的 screenshots，并打上「${boot.tag}」`, bad: false });
+      setHint({
+        text: snap
+          ? `已存进程序目录的 screenshots，并加进快照「${snap.name}」`
+          : `已存进程序目录的 screenshots，并打上「${tag}」`,
+        bad: false,
+      });
     } catch (e) {
       setHint({ text: String(e), bad: true });
     } finally {
@@ -560,10 +574,20 @@ export function Board() {
       {/* 空板：唯一的正经动作就是「粘一张进来」，所以直接把这句话写在画布中央 */}
       {!items.length && (
         <div className="board-empty">
-          <span className="board-empty-title">这块板还是空的</span>
+          <span className="board-empty-title">
+            {boot.snapshot ? "这份快照里的图这次一张都没找到" : "这块板还是空的"}
+          </span>
           <span className="board-empty-hint">
-            <kbd className="mono">Ctrl+V</kbd> 粘贴剪贴板里的图片 ——
-            会存到程序目录的 <span className="mono">screenshots</span>，并打上「{boot.tag}」标签
+            {boot.snapshot ? (
+              <>
+                条目不会被删 —— 移动硬盘插回来、或者把目录重新加进素材库之后，
+                在侧栏右键这份快照点「重新对账」就行。
+                <br />
+              </>
+            ) : null}
+            <kbd className="mono">Ctrl+V</kbd> 粘贴剪贴板里的图片 —— 会存到程序目录的{" "}
+            <span className="mono">screenshots</span>，
+            {boot.snapshot ? `并加进快照「${boot.snapshot.name}」` : `并打上「${boot.tag}」标签`}
           </span>
         </div>
       )}
@@ -577,6 +601,7 @@ export function Board() {
           <span className="board-count mono">
             {items.length}
             {boot.more ? `/${boot.total}` : ""} 张
+            {!!boot.missing && ` · ${boot.missing} 张这次没找到`}
           </span>
         </div>
         <div className="board-actions">

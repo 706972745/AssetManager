@@ -719,7 +719,14 @@ pub fn sync_dir(c: &Connection, dir_id: i64, entries: &[crate::scan::RawEntry]) 
                 c.execute(
                     "UPDATE assets SET size=?1, mtime=?2, width=?3, height=?4, missing=0,
                        thumb_key = CASE WHEN mtime<>?2 OR size<>?1 THEN NULL ELSE thumb_key END,
-                       thumb_state = CASE WHEN mtime<>?2 OR size<>?1 THEN 0 ELSE thumb_state END
+                       thumb_state = CASE WHEN mtime<>?2 OR size<>?1 THEN 0 ELSE thumb_state END,
+                       /* 内容变了 → 指纹与主色一起作废。
+                          不清的话，快照/查重/颜色筛选会拿**旧内容**的结论去匹配这个新文件
+                          （实测：同名的另一张图被当成同一张，快照对账会误判为「还找得到」）。 */
+                       hash_x  = CASE WHEN mtime<>?2 OR size<>?1 THEN NULL ELSE hash_x END,
+                       phash   = CASE WHEN mtime<>?2 OR size<>?1 THEN NULL ELSE phash END,
+                       palette = CASE WHEN mtime<>?2 OR size<>?1 THEN '' ELSE palette END,
+                       color   = CASE WHEN mtime<>?2 OR size<>?1 THEN '' ELSE color END
                      WHERE id=?5",
                     params![en.size, en.mtime, en.width, en.height, id],
                 )
@@ -1934,6 +1941,46 @@ pub fn asset_id_by_path(c: &Connection, path: &str) -> Res<Option<i64>> {
     )
     .optional()
     .map_err(e2s)
+}
+
+/* ---------------- 内容指纹（快照的身份） ----------------
+   快照不存 id：拆库/重建索引之后 id 全会变。存的是**文件内容**的 xxh3-128，
+   所以改名字、换目录、换到另一个库里，同一张图照样认得出来。 */
+
+/// 这个素材算过内容哈希没有（NULL = 还没算，查重/加快照时才补）
+pub fn asset_hash(c: &Connection, id: i64) -> Res<Option<Vec<u8>>> {
+    let v: Option<Option<Vec<u8>>> = c
+        .query_row("SELECT hash_x FROM assets WHERE id=?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(e2s)?;
+    Ok(v.flatten())
+}
+
+/// 只写内容哈希。**不碰 `phash`**（那是出缩略图时算的相似指纹，两回事）
+pub fn set_hash_only(c: &Connection, id: i64, hash: &[u8]) -> Res<()> {
+    c.execute("UPDATE assets SET hash_x=?1 WHERE id=?2", params![hash, id])
+        .map_err(e2s)?;
+    Ok(())
+}
+
+/// 按内容哈希找素材（同一份内容可能有多份拷贝，全给出来；快照取第一个）
+pub fn ids_by_hash(c: &Connection, hash: &[u8]) -> Res<Vec<i64>> {
+    let mut st = c
+        .prepare("SELECT id FROM assets WHERE missing=0 AND hash_x=?1 ORDER BY id")
+        .map_err(e2s)?;
+    let rows = st.query_map(params![hash], |r| r.get(0)).map_err(e2s)?;
+    Ok(rows.flatten().collect())
+}
+
+/// 按体积取候选（**改名/新入库的同一张图 hash_x 还是 NULL**，只能先按体积捞出来，再算哈希确认）
+pub fn ids_by_size(c: &Connection, size: i64, limit: i64) -> Res<Vec<(i64, Option<Vec<u8>>)>> {
+    let mut st = c
+        .prepare("SELECT id, hash_x FROM assets WHERE missing=0 AND size=?1 ORDER BY id LIMIT ?2")
+        .map_err(e2s)?;
+    let rows = st
+        .query_map(params![size, limit], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(e2s)?;
+    Ok(rows.flatten().collect())
 }
 
 /// 按文件名在**全库**找（相对路径引用时文件名是唯一线索；同名取 id 最小，只当提示）
