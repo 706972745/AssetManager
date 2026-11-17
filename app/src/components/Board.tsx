@@ -360,8 +360,14 @@ export function Board() {
 
   /* ---------------- 粘贴（Ctrl+V）：落盘截图目录 + 入库 + 打上这块板的标签 ---------------- */
 
+  const pasting = useRef(false);
+
   const paste = useCallback(async () => {
     if (!boot) return;
+    /* 按住 Ctrl+V 会连发 keydown：粘贴要读剪贴板 + 可能扫一遍截图目录，
+       不加这道闸，一次长按就能给你粘出二十张一模一样的图。 */
+    if (pasting.current) return;
+    pasting.current = true;
     try {
       const it = await source.boardPaste(boot.tag);
       const root = rootRef.current;
@@ -382,6 +388,8 @@ export function Board() {
       setHint({ text: `已存进程序目录的 screenshots，并打上「${boot.tag}」`, bad: false });
     } catch (e) {
       setHint({ text: String(e), bad: true });
+    } finally {
+      pasting.current = false;
     }
   }, [boot]);
 
@@ -395,7 +403,7 @@ export function Board() {
          复制走的是原文件（下面 Ctrl+C），所以粘进来的永远是源文件，不是缩略图。 */
       if (mod && e.key.toLowerCase() === "v") {
         e.preventDefault();
-        void paste();
+        if (!e.repeat) void paste();
         return;
       }
       /* Ctrl+C = 复制**指针下那张的原文件**（CF_HDROP）。
