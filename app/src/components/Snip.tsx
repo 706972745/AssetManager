@@ -19,7 +19,8 @@ import { source } from "../data/source";
  *
  * 交互也照它：一开始**没有激活任何工具**（拖框内 = 移动选区），
  * 点工具才进入标注；右键 = 取消选区（没有选区时退出）；Esc = 退出；
- * **交付只有显式的两个键**：Ctrl+C = 复制到剪贴板、Ctrl+S = 保存到截图库；
+ * **交付只认鼠标**（0.1.26 起）：工具栏三个按钮「贴图 / 保存到截图库 / 复制到剪贴板」+ 中键贴图。
+ * 没有任何键盘快捷键能交付 —— 不复制、不保存、不关窗，除非你点了按钮；
  * Enter **不结束截图**（0.1.20 定案：框完直接画标注）；Ctrl+A = 全屏；方向键微调（Shift = 改大小）。
  * 历史包袱：0.10～0.1.18 是「Enter 复制并退出」（照 Snipaste），0.1.19 是「Enter 保存并退出」，
  * 0.1.20 起 Enter 不交付任何东西 —— 否则用户框完顺手按 Enter 就再也进不到标注这一步。
@@ -164,8 +165,8 @@ export function Snip() {
   useEffect(() => {
     if (rect) rectBorn.current = Date.now();
   }, [rect]);
-  /* 「Ctrl+C 是不是真人按的」不在这里判断：键盘消息进了 WebView 分不出注入还是人按，
-     所以闸门放在 Rust 侧（core/src/keywatch.rs 低级键盘钩子 + am_snip_finish 里的校验）。 */
+  /* 交付没有键盘快捷键，所以这里不需要判「按键是真人还是注入」——
+     没有哪颗键能让它自己复制。见 keydown 里那段说明。 */
   const [ops, setOps] = useState<Op[]>([]);
   const [redo, setRedo] = useState<Op[]>([]);
   const [cursor, setCursor] = useState<P>({ x: -999, y: -999 });
@@ -795,16 +796,10 @@ export function Snip() {
         }
         return;
       }
-      if (mod && low === "c") {
-        e.preventDefault();
-        void finish("copy", "ctrl+c");
-        return;
-      }
-      if (mod && low === "s") {
-        e.preventDefault();
-        void finish("save", "ctrl+s");
-        return;
-      }
+      /* **交付没有快捷键**（owner 2026-11-18：「不允许软件自己用 Ctrl+C，
+         所有自动实现快捷键的功能全部取消」）。
+         复制 / 保存 / 贴图只能点工具栏按钮或按中键 —— 每个交付都是一次明确的鼠标动作。
+         这条同时堵死了「注入的 Ctrl+C 被当成用户意图」那条路（历史事故见 WORKLOG §38）。 */
       if (mod && low === "a") {
         e.preventDefault();
         setOps([]);
@@ -823,7 +818,7 @@ export function Snip() {
            历史：0.10.0～0.1.18 是「复制并退出」（照 Snipaste），0.1.19 改成「保存并退出」。
            但 owner 反复报的「框完就复制、没法加线条文字」，根因是**框选完下意识按 Enter**
            —— 只要 Enter 还会关窗，他就永远进不到标注那一步。所以 Enter 不再交付任何东西。 */
-        say("Enter 不再结束截图 · 框完直接画标注 · Ctrl+S 保存 / Ctrl+C 复制");
+        say("Enter 不再结束截图 · 框完直接画标注 · 保存 / 复制请点右下角按钮");
         return;
       }
       if (!mod && (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown")) {
@@ -977,7 +972,7 @@ export function Snip() {
       onMouseMove={move}
       onMouseUp={up}
       /* 双击**不再**触发"复制并退出"（0.1.19）：双击是最容易误触的动作，
-         而它的后果是悄悄换掉剪贴板。真要复制有 Ctrl+C 和复制按钮，都不难按。 */
+         而它的后果是悄悄换掉剪贴板。真要复制有「复制到剪贴板」按钮。 */
       onDoubleClick={(e) => e.preventDefault()}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -1144,8 +1139,8 @@ export function Snip() {
           <span className="snip-sep" />
           <BarBtn label="取消" keyHint="Esc" danger onPick={() => void source.snipCancel()} icon={<X size={15} strokeWidth={1.6} />} />
           <BarBtn label="贴图" keyHint="中键" onPick={() => void finish("peek", "btn")} icon={<Pin size={15} strokeWidth={1.5} />} />
-          <BarBtn label="保存到截图库" keyHint="Ctrl+S" onPick={() => void finish("save", "btn")} icon={<Save size={15} strokeWidth={1.5} />} />
-          <BarBtn label="复制到剪贴板" keyHint="Ctrl+C" onPick={() => void finish("copy", "btn")} icon={<Copy size={15} strokeWidth={1.5} />} />
+          <BarBtn label="保存到截图库" onPick={() => void finish("save", "btn")} icon={<Save size={15} strokeWidth={1.5} />} />
+          <BarBtn label="复制到剪贴板" onPick={() => void finish("copy", "btn")} icon={<Copy size={15} strokeWidth={1.5} />} />
         </div>
       )}
 

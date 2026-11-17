@@ -4459,20 +4459,6 @@ body.snip-body #root {
   background: rgba(0, 0, 0, 0.78);
   z-index: 40;
 }
-.snip-err {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  max-width: 70vw;
-  padding: 10px 16px;
-  border-radius: 5px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #fff;
-  background: rgba(196, 40, 40, 0.94);
-  z-index: 41;
-}
 .snip-miss {
   position: fixed;
   inset: 0;
@@ -4948,17 +4934,27 @@ body.board-body #root {
   background: var(--e2);
 }
 
+/* 交付失败的提示：**只许是一条细条**，钉在底部中间。
+   2026-11-18 owner 截图报过「整个覆盖层变成一块红」—— 一次错误不该把画面吞掉，
+   所以这里写死高度上限 + 单行省略，且不吃鼠标（不然点不到下面的按钮）。 */
 .snip-err {
   position: absolute;
   left: 50%;
   bottom: 28px;
   transform: translateX(-50%);
   max-width: 70vw;
-  padding: 6px 14px;
+  max-height: 22px;
+  padding: 4px 12px;
   border-radius: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: 11px;
+  line-height: 14px;
   color: #fff;
   background: rgba(190, 48, 40, 0.92);
+  pointer-events: none;
+  z-index: 42;
 }
 
 /* 详情顶部：预览 + 竖排色板 */

@@ -1,19 +1,18 @@
 """门禁：截图覆盖层不许「自动交付」。
 
 背景（2026-11-18）：本机有程序向**前台窗口注入 Ctrl+C**（低级键盘钩子实测：`0xa2`(左 Ctrl)
-与 `C` 同一毫秒到达、都带 INJECTED 标记）。0.1.22 及更早把它当成用户意图，
+与 `C` 同一毫秒到达、都带 INJECTED 标记）。历史版本把它当成用户意图，
 表现成「框完 / 画完一条线，它自己复制并关窗」。
 
-判据（判据在 Rust 侧：`core/src/keywatch.rs` 只记**真人**按键，
-`am_snip_finish` 要求最近 1.2s 内真人按的正是那颗 C / S）：
+**0.1.26 的解法是从源头砍掉入口**：截图界面**没有任何交付快捷键**，
+复制 / 保存 / 贴图只能点工具栏按钮或按中键。所以任何键（真人也罢、注入也罢）
+都不可能让覆盖层自己交付。
 
-  A) 注入 Ctrl+C → 覆盖层必须还在、剪贴板不许变位图；
-  B) 注入 Ctrl+S → 同上（保存也不许被注水）；
-  C) 中键贴图 → 必须照常交付（非快捷键路径不能被误伤）。
+判据：
 
-⚠️ **真人 Ctrl+C 这一条没法用脚本验**：脚本发的按键本身就是注入，
-一定会被闸门挡下 —— 那是判据在起作用，不是缺陷。
-真人按键请 owner 手按一次，日志里会留 `snip finish … last_real=Some((67, …))`。
+  A) 注入 Ctrl+C → 覆盖层必须还在、剪贴板不许变位图、日志无 `snip finish`；
+  B) 注入 Ctrl+S → 同上；
+  C) 中键贴图 → 必须照常交付（鼠标路径不能被误伤）。
 
 用法（必须用 bash 启动，见 WORKLOG §36.6）：
     python tools/e2e_noauto.py
@@ -115,11 +114,10 @@ def case(name, act, expect):
 
 def main():
     r = []
-    r.append(case("A_注入 Ctrl+C（必须挡住）", inject_copy, "block"))
-    r.append(case("B_注入 Ctrl+S（必须挡住）", inject_save, "block"))
+    r.append(case("A_注入 Ctrl+C（必须无反应）", inject_copy, "block"))
+    r.append(case("B_注入 Ctrl+S（必须无反应）", inject_save, "block"))
     r.append(case("C_中键贴图（必须照常交付）", middle_click, "deliver"))
     ok = all(r)
-    print("\n注：真人 Ctrl+C 请 owner 手按一次验证（脚本的按键是注入，一定被挡）。")
     print("EXIT=", 0 if ok else 1)
     return 0 if ok else 1
 
