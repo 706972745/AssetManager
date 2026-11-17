@@ -10,6 +10,7 @@
 
 <br>
 
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-0.12.4-gray?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
@@ -99,6 +100,16 @@ cd .. && ./app/node_modules/.bin/tauri dev
 同一台机器上的另一个项目是 [FontManager](https://github.com/706972745/FontManager)（字体管理器）。
 两者**互不依赖**：各自的仓库、版本号、安装包、数据目录、端口（AssetManager `1430`）。
 只共用便携工具链与视觉语汇 —— 侧栏、动效、标签面板、快照段的形态刻意保持一致，用起来是同一套手感。
+
+## 许可
+
+**GNU General Public License v3.0**（GPL-3.0）· 全文见 [`LICENSE`](LICENSE)。
+
+Copyright (C) 2026 AssetManager authors
+
+简单说：可以自由使用、修改、分发，甚至商用；但**分发时必须一并提供源码**，
+且衍生作品必须同样以 GPL-3.0 发布。想把它并进闭源产品是不行的。
+（如果你只想在自己机器上用，这些义务与你无关。）
 
 ## 文档索引
 

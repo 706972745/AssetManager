@@ -4,6 +4,7 @@ version = "0.12.4"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"
+license = "GPL-3.0-only"
 rust-version = "1.77"
 
 [build-dependencies]

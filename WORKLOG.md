@@ -1072,3 +1072,20 @@ badges + 链接行 + 0.12.4 主界面截图 + 「这是什么」+ 能力表 + �
 与 FontManager 的关系 + 文档索引。正文仍以 `AssetManager-项目说明.md` 为准，README 只做门面。
 
 **核对**：仓库 public / main / issues·wiki·projects 开 / topics 18 个 / release 已发布且资产 3.61 MiB。
+
+---
+
+## §24 · 许可证定为 GPL-3.0（2026-11-17）
+
+> owner 在「加 / 不加 / 其他许可」对比后选了 **GPL-3.0**。
+
+- `LICENSE`：GNU 官方 `gpl-3.0.txt` 原文（674 行），**不是**从 FontManager 抄 ——
+  它那份开头带 `copyright @ 2026 TheHolyOneZ`，是 FontManager 的上游版权行，不能沿用。
+- 清单补声明，免得以后被人当"无许可"：`core/Cargo.toml`、`src-tauri/Cargo.toml`
+  `license = "GPL-3.0-only"`；`app/package.json` `"license": "GPL-3.0-only"`。
+- README 首个 badge 换成 `License: GPL-3.0`（指向 `LICENSE`），并加「许可」一节：
+  版权行 + 一句话说清义务（分发必须给源码、衍生作品同许可、自用不受影响）。
+- 为什么两个项目可以同许可：FontManager 是 ZFontManager 的衍生作品，**必须** GPL；
+  AssetManager 自研、版权自有，是主动选择。
+
+**验证**：`cargo check` 通过（license 字段合法）；GitHub 侧待推后确认 API 的 `license.spdx_id`。
