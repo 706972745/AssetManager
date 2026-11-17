@@ -72,12 +72,12 @@ fn is_reparse(_meta: &std::fs::Metadata) -> bool {
 
 /// 「库中库」：别的软件的私有素材库目录，里面的文件不是用户的素材。
 ///
-/// 目前只认一种，但它是真事（2026-11-16 用户库）：**Eagle** 的 `<名字>.library`，
+/// 目前只认一种，但它是真事（2026-11-16 用户库）：第三方素材软件导出的 `<名字>.library` 包，
 /// 里面是 `metadata.json` + `images/` + `thumbs/` + `mtime.json`，一个库动辄几万个
 /// 内部文件（缩略图 + 元数据 JSON）。
 ///
 /// 为什么不索引：
-/// 1. 用户要的是「我的素材」，不是 Eagle 的缓存；把 7 万个 json/缩略图塞进列表，
+/// 1. 用户要的是「我的素材」，不是别的软件的缓存；把 7 万个 json/缩略图塞进列表，
 ///    首屏按「最近修改」排出来的全是 json，看起来像"缩略图全挂了"；
 /// 2. 这些文件删了重建、改了没意义，索引它们纯属噪音，还把扫描时间拉长 3 倍。
 ///
@@ -299,7 +299,7 @@ mod tests {
         let eagle = base.join("的VS发.library");
         std::fs::create_dir_all(eagle.join("images")).unwrap();
         std::fs::write(eagle.join("metadata.json"), b"{}").unwrap();
-        assert!(is_foreign_library(&eagle), "Eagle 库要跳");
+        assert!(is_foreign_library(&eagle), "第三方素材库的 .library 包要跳");
 
         // 名字像但没有 metadata.json → 普通目录，不许跳
         let lookalike = base.join("我的素材.library");

@@ -132,7 +132,7 @@ pub struct ScanStats {
     pub errors: i64,
     /// 增量扫描时「磁盘上已经没有、索引行被删掉」的目录数
     pub removed_dirs: i64,
-    /// 整棵跳过的「库中库」目录数（Eagle 的 `*.library` 之类，见 scan::is_foreign_library）
+    /// 整棵跳过的「库中库」目录数（第三方素材软件的 `*.library` 包，见 scan::is_foreign_library）
     pub skipped: i64,
     pub elapsed_ms: u128,
 }
