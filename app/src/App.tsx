@@ -2206,6 +2206,7 @@ export default function App() {
           onSetRating={onSetRating}
           onSetNote={onSetNote}
           onSetSource={onSetSource}
+          onClose={() => setSelected(null)}
         />
       </div>
 

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, GripVertical, Sparkles } from "lucide-react";
 import {
   badge,
   fmtNum,
@@ -264,6 +266,7 @@ export function TopBar({
 const DETAIL_W = 348;
 const DETAIL_MIN = 300;
 const DETAIL_MAX = 560;
+const DETAIL_W_KEY = "am.detail.w.v1";
 
 /** 复制文本：优先 Clipboard API，失败退 textarea + execCommand（WebView2 在自定义协议下偶尔拒绝） */
 async function copyText(text: string): Promise<boolean> {
@@ -331,6 +334,145 @@ function SquarePreview({
   );
 }
 
+/* ---------------- 评分：星标 + 浮层（照 FontManager 的交互） ----------------
+ *
+ * 详情里不再摆一排星星。顶上只有**一颗星 + 角标**：角标显示已打几星（0 星不显示角标）。
+ * 鼠标停一下（110ms）或点一下，浮层在星标下方展开：5 颗星 + 「N 星」+「清除」。
+ * 浮层用 portal 挂到 body —— 详情面板有 overflow:hidden，就地绝对定位会被裁掉半截。
+ */
+
+const RATING_POP_W = 176;
+const RATING_OPEN_DELAY = 110;
+const RATING_CLOSE_DELAY = 220;
+
+function RatingStars({
+  rating,
+  onChange,
+}: {
+  rating: number;
+  /** 传 0 = 清除评分 */
+  onChange: (n: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(0);
+  const [pos, setPos] = useState({ left: -999, top: -999 });
+  const btn = useRef<HTMLButtonElement>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(openTimer.current);
+      window.clearTimeout(closeTimer.current);
+    },
+    []
+  );
+
+  const place = () => {
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return;
+    /* 贴星标右下沿展开；面板靠左时往右收，别让最后两颗星跑到窗口外 */
+    setPos({
+      left: Math.max(8, Math.min(r.left - 4, window.innerWidth - RATING_POP_W - 8)),
+      top: r.bottom + 7,
+    });
+  };
+
+  const show = (delay: number) => {
+    window.clearTimeout(closeTimer.current);
+    window.clearTimeout(openTimer.current);
+    const reveal = () => {
+      place();
+      setOpen(true);
+    };
+    if (delay === 0) reveal();
+    else openTimer.current = window.setTimeout(reveal, delay);
+  };
+
+  const hide = () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      setOpen(false);
+      setHover(0);
+    }, RATING_CLOSE_DELAY);
+  };
+
+  const closeNow = () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setOpen(false);
+    setHover(0);
+  };
+
+  const rate = (n: number) => {
+    onChange(n);
+    closeNow();
+  };
+
+  return (
+    <span className="rating-wrap">
+      <button
+        ref={btn}
+        className={`rating-btn ${rating > 0 ? "on" : ""}`}
+        title={rating > 0 ? `已评 ${rating} 星 · 点击修改` : "还没评分 · 点击打分"}
+        aria-label="评分"
+        aria-expanded={open}
+        onMouseEnter={() => show(RATING_OPEN_DELAY)}
+        onMouseLeave={hide}
+        onFocus={() => show(0)}
+        onClick={() => (open ? closeNow() : show(0))}
+      >
+        <Icon name="star" size={15} stroke={1.6} />
+        {rating > 0 && <span className="rating-badge mono">{rating}</span>}
+      </button>
+
+      {createPortal(
+        open ? (
+          <div
+            className="rating-pop"
+            style={{ left: pos.left, top: pos.top }}
+            role="group"
+            aria-label="打分"
+            onMouseEnter={() => show(0)}
+            onMouseLeave={hide}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="rating-pop-stars" onMouseLeave={() => setHover(0)}>
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  className={`rating-star ${n <= (hover || rating) ? "on" : ""}`}
+                  title={`${n} 星`}
+                  aria-label={`${n} 星`}
+                  onMouseEnter={() => setHover(n)}
+                  onFocus={() => setHover(n)}
+                  onClick={() => rate(n)}
+                >
+                  <Icon name="star" size={16} stroke={1.5} />
+                </button>
+              ))}
+            </div>
+            <div className="rating-pop-foot">
+              <span className="rating-pop-value">
+                {hover > 0 ? `${hover} 星` : rating > 0 ? `${rating} 星` : "未评分"}
+              </span>
+              {rating > 0 && (
+                <button className="rating-pop-clear" onClick={() => rate(0)}>
+                  <Icon name="close" size={9} stroke={2} />
+                  清除
+                </button>
+              )}
+            </div>
+          </div>
+        ) : null,
+        document.body
+      )}
+    </span>
+  );
+}
+
 export function Detail({
   asset,
   source,
@@ -343,6 +485,7 @@ export function Detail({
   onDelete,
   onDragOut,
   onToast,
+  onClose,
   tags,
   colors,
   autoTags,
@@ -368,6 +511,8 @@ export function Detail({
   onCopyFile: (a: Asset) => void;
   onDelete: (a: Asset) => void;
   onToast: (msg: string, err?: boolean) => void;
+  /** 关掉详情（顶栏那个 ×） */
+  onClose: () => void;
   /** 当前素材的手工标签 */
   tags: string[];
   /** 标签名 → 颜色键（详情 chip 上的小色点） */
@@ -389,8 +534,20 @@ export function Detail({
   onSetNote: (id: number, note: string) => void;
   onSetSource: (id: number, url: string) => void;
 }) {
-  const [width, setWidth] = useState(DETAIL_W);
+  const [width, setWidth] = useState(() => {
+    /* 宽度记在本地（照 FontManager：它把 panelWidth 存进 prefs）。
+       默认 348、范围 300–560 与 FontManager 完全相同。 */
+    try {
+      const v = Number(localStorage.getItem(DETAIL_W_KEY));
+      if (Number.isFinite(v) && v >= DETAIL_MIN && v <= DETAIL_MAX) return v;
+    } catch {
+      /* 读不到就用默认宽 */
+    }
+    return DETAIL_W;
+  });
   const drag = useRef<{ x: number; w: number } | null>(null);
+  /** 引用（显示层 / 谁在用 / 它引用了谁）默认收起 —— 排障时才展开 */
+  const [refsOpen, setRefsOpen] = useState(false);
   /* 引用关系（T26）：这个文件引用了谁 / 谁在用它。只在选中变化时查一次。 */
   const [refsOut, setRefsOut] = useState<RefItem[]>([]);
   const [refsIn, setRefsIn] = useState<RefItem[]>([]);
@@ -413,6 +570,11 @@ export function Detail({
       dead = true;
     };
   }, [asset?.id, source]);
+
+  /* 换素材 / 关掉详情时把折叠收回去：上一条的"展开"不该跟着带过来 */
+  useEffect(() => {
+    setRefsOpen(false);
+  }, [asset?.id]);
 
   /* 详情里的预览图也能直接拖出去（与网格里的瓦片同一套手势）：
      按下记坐标 → 移动超过 6px 交给 Rust 起 OLE 拖拽，出去的是原文件。 */
@@ -442,9 +604,7 @@ export function Detail({
     };
   }, [onDragOut]);
 
-  /* 左侧边缘拖动改宽度：抓在 10px 的握把上，双击复位。
-     这是 FontManager 详情面板的交互，照搬过来 —— 素材路径和文件名都长，
-     300 固定宽会一直省略号。 */
+  /* 左侧边缘拖动改宽度：抓在 10px 的握把上（hover 才显形），双击复位到 348 */
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -458,6 +618,11 @@ export function Detail({
   const onUp = (e: React.PointerEvent<HTMLDivElement>) => {
     drag.current = null;
     e.currentTarget.releasePointerCapture?.(e.pointerId);
+    try {
+      localStorage.setItem(DETAIL_W_KEY, String(width));
+    } catch {
+      /* 存不进就本次会话有效 */
+    }
   };
 
   /** 主色板：后端给的是 `rrggbb,rrggbb,…` */
@@ -480,36 +645,16 @@ export function Detail({
         onPointerUp={onUp}
         onPointerCancel={onUp}
         onDoubleClick={() => setWidth(DETAIL_W)}
-      />
+      >
+        <GripVertical size={12} strokeWidth={1.5} />
+      </div>
 
       <div className="detail-inner scroll-hot">
         {asset ? (
           <>
-            {/* 预览 + 右侧竖排色板：色板贴在预览右边而不是另起一行，
-                扫一眼就知道这张图是什么调性，也不占纵向空间。 */}
-            <div className="detail-hero">
-              <SquarePreview
-                src={thumbSrc(asset, 512)}
-                aspect={asset.width && asset.height ? asset.width / asset.height : 0}
-                onPressStart={(e) => {
-                  if (e.button === 0) press.current = { x: e.clientX, y: e.clientY };
-                }}
-              />
-              {palette.length > 0 && (
-                <div className="detail-palette" aria-label="主色板">
-                  {palette.slice(0, 7).map((hex, i) => (
-                    <button
-                      key={`${hex}-${i}`}
-                      style={{ background: `#${hex}` }}
-                      title={`#${hex.toUpperCase()} · 点击复制`}
-                      onClick={() => void copy(`#${hex.toUpperCase()}`, "色值")}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-
+            {/* 顶栏：格式徽标 + 文件名 + 评分 + 关闭。**吸附在顶部**，往下滚也不走 */}
             <header className="detail-head">
+              <span className="detail-badge">{badge(asset.ext)}</span>
               <button
                 className="detail-title"
                 title="点击复制文件名"
@@ -517,98 +662,185 @@ export function Detail({
               >
                 {asset.name}
               </button>
-              <span className="detail-badge">{badge(asset.ext)}</span>
+              <RatingStars
+                rating={asset.rating}
+                onChange={(n) => onSetRating([asset.id], n)}
+              />
+              <button className="detail-close" aria-label="关闭详情" title="关闭详情（Esc）" onClick={onClose}>
+                <Icon name="close" size={15} stroke={1.5} />
+              </button>
             </header>
 
-            <div className="detail-artmeta mono">
-              <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
-              <span>{fmtSize(asset.size)}</span>
-              <span>{KIND_LABEL[asset.kind] ?? "其他"}</span>
-            </div>
+            <div className="detail-body">
+              {/* 预览 + 右侧竖排色板：色板贴在预览右边而不是另起一行，
+                  扫一眼就知道这张图是什么调性，也不占纵向空间。 */}
+              <div className="detail-hero">
+                <SquarePreview
+                  src={thumbSrc(asset, 512)}
+                  aspect={asset.width && asset.height ? asset.width / asset.height : 0}
+                  onPressStart={(e) => {
+                    if (e.button === 0) press.current = { x: e.clientX, y: e.clientY };
+                  }}
+                />
+                {palette.length > 0 && (
+                  <div className="detail-palette" aria-label="主色板">
+                    {palette.slice(0, 6).map((hex, i) => (
+                      <button
+                        key={`${hex}-${i}`}
+                        style={{ background: `#${hex}` }}
+                        title={`#${hex.toUpperCase()} · 点击复制`}
+                        onClick={() => void copy(`#${hex.toUpperCase()}`, "色值")}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
 
-            <section>
-              <div className="detail-heading">基本信息</div>
-              <dl className="detail-meta">
-                <dt>格式</dt>
-                <dd>{asset.ext.toUpperCase()}</dd>
-                <dt>尺寸</dt>
-                <dd className="mono">
-                  {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
-                </dd>
-                <dt>大小</dt>
-                <dd className="mono">{fmtSize(asset.size)}</dd>
-                <dt>修改时间</dt>
-                <dd className="mono">{fmtTime(asset.mtime)}</dd>
-                <dt>位置</dt>
-                <dd>
-                  <button className="path-link" onClick={() => onReveal(asset)} title={asset.path}>
-                    <Icon name="reveal" size={11} stroke={1.5} />
-                    <span>{asset.path}</span>
-                  </button>
-                </dd>
-              </dl>
-            </section>
-            <section>
-              <div className="detail-heading">标签</div>
-              <TagSection
-                manual={tags}
-                colors={colors}
-                auto={autoTags}
-                all={allTags}
-                onAdd={onAddTag}
-                onRemove={onRemoveTag}
-                onPick={onPickTag}
-                onDeny={onDenyAutoTag}
-                onEdit={onEditTag}
-              />
-            </section>
-            <section>
-              <div className="detail-heading">注释与评分</div>
-              {/* 评分 / 注释 / 来源 URL 都是**人写的东西**：扫描与重建索引永远不碰它们 */}
-              <div className="mine">
-                <div className="mine-rate" role="group" aria-label="评分">
-                  {[1, 2, 3, 4, 5].map((n) => (
-                    <button
-                      key={n}
-                      className={`mine-star ${asset.rating >= n ? "on" : ""}`}
-                      title={asset.rating === n ? `已是 ${n} 星，再点一下清掉` : `打 ${n} 星`}
-                      aria-label={`${n} 星`}
-                      onClick={() => onSetRating([asset.id], asset.rating === n ? n - 1 : n)}
-                    >
-                      <Icon name="star" size={13} stroke={1.6} />
+              <div className="detail-artmeta mono">
+                <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
+                <span>{fmtSize(asset.size)}</span>
+                <span>{KIND_LABEL[asset.kind] ?? "其他"}</span>
+              </div>
+
+              <section>
+                <div className="detail-heading">基本信息</div>
+                <dl className="detail-meta">
+                  <dt>格式</dt>
+                  <dd>{asset.ext.toUpperCase()}</dd>
+                  <dt>尺寸</dt>
+                  <dd className="mono">
+                    {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
+                  </dd>
+                  <dt>大小</dt>
+                  <dd className="mono">{fmtSize(asset.size)}</dd>
+                  <dt>修改时间</dt>
+                  <dd className="mono">{fmtTime(asset.mtime)}</dd>
+                  <dt>位置</dt>
+                  <dd>
+                    <button className="path-link" onClick={() => onReveal(asset)} title={asset.path}>
+                      <Icon name="reveal" size={11} stroke={1.5} />
+                      <span>{asset.path}</span>
                     </button>
-                  ))}
-                  <span className="mine-rate-text">
-                    {asset.rating > 0 ? `${asset.rating} 星` : "未评分"}
-                  </span>
-                </div>
+                  </dd>
+                </dl>
+              </section>
 
-              {/* 主色板（T24）：出缩略图时从解码后的像素里算出来的，点一下就复制色值 */}
-              {palette.length > 0 && (
-                <div className="mine-palette" aria-label="主色板">
-                  {palette.map((hex, i) => (
-                    <button
-                      key={`${hex}-${i}`}
-                      className="mine-swatch"
-                      style={{ background: `#${hex}` }}
-                      title={`#${hex.toUpperCase()} · 点击复制`}
-                      onClick={() => void copy(`#${hex.toUpperCase()}`, "色值")}
-                    />
-                  ))}
-                  {asset.color && <span className="mine-color-name">{COLOR_LABEL[asset.color] ?? asset.color}</span>}
-                </div>
-              )}
+              {/* 引用（默认收起）：显示层 + 谁在用它 + 它引用了谁。
+                  这些是"排障 / 想知道缩略图哪来的"才看的东西，不该占满屏。 */}
+              <section className="detail-fold-sec">
+                <button
+                  className="detail-fold"
+                  aria-expanded={refsOpen}
+                  onClick={() => setRefsOpen((v) => !v)}
+                >
+                  <span className="detail-heading">引用</span>
+                  <Icon name="chevron" size={12} stroke={2} className={refsOpen ? "rot90" : ""} />
+                </button>
+
+                {refsOpen && (
+                  <div className="detail-fold-body">
+                    {!PREVIEWABLE_KINDS.has(asset.kind) ? (
+                      <dl className="detail-meta">
+                        <dt>缩略图</dt>
+                        <dd className="wrap">没有（这类文件没有预览图）</dd>
+                        <dt>怎么看</dt>
+                        <dd className="wrap">双击、或用下面的「用默认程序打开」</dd>
+                      </dl>
+                    ) : (
+                      <dl className="detail-meta">
+                        <dt>缩略图</dt>
+                        <dd className="mono">
+                          WebP · {thumbPx}px 档
+                        </dd>
+                        <dt>来源</dt>
+                        <dd className="wrap">{thumbSourceLabel(asset)}</dd>
+                        {asset.quality === 2 && (
+                          <>
+                            <dt>清晰度</dt>
+                            <dd className="wrap">
+                              受限于来源（
+                              {EMBEDDED_EXT.has(asset.ext) ? "文件里的内嵌预览" : "系统的缩略图提供者"}
+                              ），可能不如原图锐利
+                            </dd>
+                          </>
+                        )}
+                        <dt>用途</dt>
+                        <dd className="wrap">只为显示快；上面所有操作都不碰它</dd>
+                      </dl>
+                    )}
+
+                    {refsIn.length > 0 && (
+                      <>
+                        <div className="detail-sub">被这些工程文件用着（{refsIn.length}）</div>
+                        <ul className="ref-list">
+                          {refsIn.slice(0, 6).map((r) => (
+                            <li key={`in-${r.srcId}`} title={r.srcPath}>
+                              {r.srcName}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {refsOut.length > 0 && (
+                      <>
+                        <div className="detail-sub">
+                          这个工程引用的素材（{refsOut.length}，丢失{" "}
+                          {refsOut.filter((r) => r.missing).length}）
+                        </div>
+                        <ul className="ref-list">
+                          {refsOut.slice(0, 8).map((r) => (
+                            <li
+                              key={`out-${r.dstPath}`}
+                              className={r.missing ? "miss" : ""}
+                              title={r.dstPath}
+                            >
+                              {r.dstName || r.dstPath}
+                              {r.missing && <span className="miss-tag">找不到</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {refsIn.length === 0 && refsOut.length === 0 && PREVIEWABLE_KINDS.has(asset.kind) && (
+                      <p className="detail-note">没有工程文件引用它，它也没有引用别的素材。</p>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <div className="detail-heading">标签</div>
+                <TagSection
+                  manual={tags}
+                  colors={colors}
+                  auto={autoTags}
+                  all={allTags}
+                  onAdd={onAddTag}
+                  onRemove={onRemoveTag}
+                  onPick={onPickTag}
+                  onDeny={onDenyAutoTag}
+                  onEdit={onEditTag}
+                />
+              </section>
+
+              <section>
+                <div className="detail-heading">备注</div>
+                {/* 备注 / 来源 URL 都是**人写的东西**：扫描与重建索引永远不碰它们 */}
                 <textarea
                   key={`note-${asset.id}`}
                   className="mine-note"
-                  rows={2}
-                  placeholder="注释（失焦即存）"
+                  rows={3}
+                  placeholder="备注——例如：给客户 A 的那一版"
                   defaultValue={asset.note}
                   onBlur={(e) => {
                     const v = e.target.value;
                     if (v !== asset.note) onSetNote(asset.id, v);
                   }}
                 />
+              </section>
+
+              <section>
+                <div className="detail-heading">来源</div>
                 <div className="mine-url">
                   <input
                     key={`url-${asset.id}`}
@@ -632,103 +864,45 @@ export function Detail({
                     </button>
                   )}
                 </div>
-              </div>
+              </section>
 
-              <div className="detail-heading">操作（都作用在原文件上）</div>
-              <button
-                className="act-primary"
-                onClick={() => onOpenDefault(asset)}
-                disabled={!source.desktop}
-              >
-                <span>用默认程序打开</span>
-                <Icon name="image" size={13} stroke={1.5} />
-              </button>
-              <div className="act-row">
-                <button className="btn" onClick={() => onReveal(asset)}>
-                  在资源管理器中显示
-                </button>
-                <button className="btn" onClick={() => onCopyFile(asset)} disabled={!source.desktop}>
-                  复制文件
-                </button>
-              </div>
-              <div className="act-row">
-                <button className="btn" onClick={() => onRename(asset)} disabled={!source.desktop}>
-                  重命名
-                </button>
+              {/* 操作放最后（owner 2026-11-17）：删改这类动作不该挡在查看的路径上 */}
+              <section>
+                <div className="detail-heading">操作（都作用在原文件上）</div>
                 <button
-                  className="btn btn-danger"
-                  onClick={() => onDelete(asset)}
+                  className="act-primary"
+                  onClick={() => onOpenDefault(asset)}
                   disabled={!source.desktop}
                 >
-                  删除
+                  <span>用默认程序打开</span>
+                  <Icon name="image" size={13} stroke={1.5} />
                 </button>
-              </div>
-              <p className="detail-note">
-                按住上面的预览图往外拖 = 把原文件拖到 Photoshop / 资源管理器；
-                拖到左侧目录树 = 移动到这个文件夹。出去/移走的都是磁盘上的原文件。
-              </p>
-            </section>
-            <section>
-                <div className="detail-heading">引用</div>
-                {refsIn.length > 0 && (
-                  <>
-                    <div className="detail-sub">被这些工程文件用着（{refsIn.length}）</div>
-                    <ul className="ref-list">
-                      {refsIn.slice(0, 6).map((r) => (
-                        <li key={`in-${r.srcId}`} title={r.srcPath}>
-                          {r.srcName}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {refsOut.length > 0 && (
-                  <>
-                    <div className="detail-sub">
-                      这个工程引用的素材（{refsOut.length}，丢失{" "}
-                      {refsOut.filter((r) => r.missing).length}）
-                    </div>
-                    <ul className="ref-list">
-                      {refsOut.slice(0, 8).map((r) => (
-                        <li key={`out-${r.dstPath}`} className={r.missing ? "miss" : ""} title={r.dstPath}>
-                          {r.dstName || r.dstPath}
-                          {r.missing && <span className="miss-tag">找不到</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
+                <div className="act-row">
+                  <button className="btn" onClick={() => onReveal(asset)}>
+                    在资源管理器中显示
+                  </button>
+                  <button className="btn" onClick={() => onCopyFile(asset)} disabled={!source.desktop}>
+                    复制文件
+                  </button>
+                </div>
+                <div className="act-row">
+                  <button className="btn" onClick={() => onRename(asset)} disabled={!source.desktop}>
+                    重命名
+                  </button>
+                  <button
+                    className="btn btn-danger"
+                    onClick={() => onDelete(asset)}
+                    disabled={!source.desktop}
+                  >
+                    删除
+                  </button>
+                </div>
+                <p className="detail-note">
+                  按住上面的预览图往外拖 = 把原文件拖到 Photoshop / 资源管理器；
+                  拖到左侧目录树 = 移动到这个文件夹。出去/移走的都是磁盘上的原文件。
+                </p>
               </section>
-            <section>
-              <div className="detail-heading">显示层</div>
-              {!PREVIEWABLE_KINDS.has(asset.kind) ? (
-                /* 这类文件没有图可出 —— 老实说清楚，别写「还没生成」让用户等一张永远不会来的图 */
-                <dl className="detail-meta">
-                  <dt>缩略图</dt>
-                  <dd>没有（这类文件没有预览图）</dd>
-                  <dt>怎么看</dt>
-                  <dd className="wrap">双击、或用下面的「用默认程序打开」</dd>
-                </dl>
-              ) : (
-              <dl className="detail-meta">
-                <dt>缩略图</dt>
-                <dd className="mono">WebP · {thumbPx}px 档</dd>
-                <dt>来源</dt>
-                <dd>{thumbSourceLabel(asset)}</dd>
-                {asset.quality === 2 && (
-                  <>
-                    <dt>清晰度</dt>
-                    <dd className="wrap">
-                      受限于来源（{EMBEDDED_EXT.has(asset.ext) ? "文件里的内嵌预览" : "系统的缩略图提供者"}
-                      ），可能不如原图锐利
-                    </dd>
-                  </>
-                )}
-                <dt>用途</dt>
-                <dd className="wrap">只为显示快；上面所有操作都不碰它</dd>
-              </dl>
-              )}
-            </section>
+            </div>
           </>
         ) : (
           <p className="muted">选一个素材看详情。空格全屏预览，Esc 关闭。</p>
@@ -739,12 +913,19 @@ export function Detail({
 }
 
 /**
- * 详情面板的标签区（照 FontManager 详情面板那套）。
+ * 标签编辑器：形态与 FontManager 详情面板里的那一块一致
  *
- * 两类标签视觉上必须能分清，这是「自动 / 手动」这条纪律的落点：
- * - **手动**：实心 chip，带 × ，点一下按它筛选，× 从这张素材上摘掉；
- * - **自动**：虚边 chip、字色更浅，右上角一个小圆点；点一下同样能筛，
- *   右键/长按出「不再建议」—— 否决后这个标签对这个素材不再出现（名单存在本地）。
+ * ```
+ * 标签
+ * [● 品牌A ×] [✦ 4K ×]              ← chip：图标 + 名字 + 删除；自动标签虚线 + 魔棒
+ * [ 添加标签…                  ✓ ]   ← 一行输入，回车或点 ✓ 打上
+ * [ + 从已有标签选 45 ]              ← 展开选择面板：搜索 + 多选 + 一次加进去
+ * ```
+ *
+ * 三处**不能改**的约定（用户明确"和 FontManager 一模一样"）：
+ * 1. 手工标签点名字 = 按它筛列表，右键 = 改颜色/分组，× = 从这张素材上移除；
+ * 2. 自动标签是虚线 chip + 魔棒图标，点也可以筛，右键 = 不再建议；
+ * 3. "从已有标签选"的候选里**排除已在这张素材上的**，别让用户看到自己已经有的。
  */
 function TagSection({
   manual,
@@ -767,112 +948,184 @@ function TagSection({
   onDeny: (tag: string) => void;
   onEdit: (tag: string) => void;
 }) {
-  const [adding, setAdding] = useState(false);
   const [q, setQ] = useState("");
+  const [picker, setPicker] = useState(false);
+  const [pq, setPq] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
 
-  const picks = all.filter((t) => !manual.includes(t) && (!q.trim() || t.includes(q.trim()))).slice(0, 6);
-  const canCreate = q.trim().length > 0 && !manual.includes(q.trim()) && !picks.includes(q.trim());
+  /** 候选 = 已有手工标签里，这张素材还没有的那些 */
+  const candidates = all.filter((t) => !manual.includes(t));
+  const list = candidates.filter((t) => !pq.trim() || t.toLowerCase().includes(pq.trim().toLowerCase()));
+
+  /* 换素材就把草稿收掉：上一条打的半截字不该跟着到下一张 */
+  const firstId = manual.join("\u0000");
+  useEffect(() => {
+    setQ("");
+    setPicked([]);
+    setPq("");
+    setPicker(false);
+  }, [firstId]);
 
   const commit = (v: string) => {
     const t = v.trim();
     if (!t) return;
     onAdd(t);
     setQ("");
-    setAdding(false);
+  };
+
+  const togglePick = (t: string) => {
+    setPicked((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
+  };
+
+  const commitPicked = () => {
+    for (const t of picked) onAdd(t);
+    setPicked([]);
+    setPicker(false);
+    setPq("");
   };
 
   return (
-    <div className="tag-block">
+    <div className="tag-editor">
       <div className="tag-chips">
-        {manual.map((t) => (
-          <span
-            key={t}
-            className={`tag-chip ${colorClass(colors[t])}`}
-            title="点标签按它筛选；右键改颜色 / 分组"
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onEdit(t);
-            }}
-          >
-            <span className="tag-dot" aria-hidden />
-            <button className="tag-chip-text" onClick={() => onPick(t)}>
-              {t}
-            </button>
-            <button
-              className="tag-chip-x"
-              title="从这张素材上移除此标签"
-              aria-label={`移除标签 ${t}`}
-              onClick={() => onRemove(t)}
-            >
-              <Icon name="close" size={9} stroke={2} />
-            </button>
-          </span>
-        ))}
-
-        {auto.map((a) => (
-          <span
-            key={a.tag}
-            className="tag-chip auto"
-            title={`${a.reason}｜右键可「不再建议」`}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onDeny(a.tag);
-            }}
-          >
-            <button className="tag-chip-text" onClick={() => onPick(a.tag)}>
-              {isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag}
-            </button>
-            <span className="tag-chip-dot" aria-hidden />
-          </span>
-        ))}
-
-        {!adding && (
-          <button className="tag-add" onClick={() => setAdding(true)} title="给这张素材打标签">
-            <Icon name="plus" size={10} stroke={1.8} />
-            标签
+      {manual.map((t) => (
+        <span
+          key={t}
+          className={`tag-chip tag-chip-iconed ${colorClass(colors[t])}`}
+          title="点名字按它筛选；右键改颜色 / 分组"
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onEdit(t);
+          }}
+        >
+          <span className="tag-dot tag-dot-chip" aria-hidden />
+          <Icon name="tag" size={10} stroke={1.5} className="tag-manual-icon" />
+          <button className="tag-chip-text" onClick={() => onPick(t)}>
+            {t}
           </button>
-        )}
+          <button
+            className="tag-chip-x"
+            title="从这张素材上移除此标签"
+            aria-label={`移除标签 ${t}`}
+            onClick={() => onRemove(t)}
+          >
+            <Icon name="close" size={9} stroke={2} />
+          </button>
+        </span>
+      ))}
+
+      {auto.map((a) => (
+        <span
+          key={a.tag}
+          className="tag-chip tag-chip-auto"
+          title={`${a.reason}｜右键可「不再建议」`}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onDeny(a.tag);
+          }}
+        >
+          <Sparkles size={10} strokeWidth={1.6} className="tag-auto-spark" />
+          <button className="tag-chip-text" onClick={() => onPick(a.tag)}>
+            {isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag}
+          </button>
+        </span>
+      ))}
       </div>
 
-      {adding && (
-        <div className="tag-add-box">
-          <BlinkCaretInput
-            autoFocus
-            value={q}
-            onChange={setQ}
-            placeholder="输入标签名，回车打上"
-            inputClassName="tag-add-input"
-            ariaLabel="标签名"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commit(q);
-              } else if (e.key === "Escape") {
-                e.stopPropagation();
-                setAdding(false);
-                setQ("");
-              }
-            }}
-          />
-          {(picks.length > 0 || canCreate) && (
-            <div className="tag-picks">
-              {picks.map((t) => (
-                <button key={t} className="tag-chip pick" onClick={() => commit(t)}>
-                  {t}
-                </button>
-              ))}
-              {canCreate && (
-                <button className="tag-chip pick new" onClick={() => commit(q)}>
-                  新建「{q.trim()}」
-                </button>
-              )}
-            </div>
-          )}
+      {/* 一行输入 + ✓：与 FontManager 同一个手感（回车也提交，Esc 清空收起） */}
+      <div className="tag-add-row">
+        <BlinkCaretInput
+          value={q}
+          onChange={setQ}
+          placeholder="添加标签…"
+          inputClassName="tag-add-input"
+          ariaLabel="标签名"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit(q);
+            } else if (e.key === "Escape") {
+              e.stopPropagation();
+              setQ("");
+              setPicker(false);
+            }
+          }}
+        />
+        <button
+          className="tag-add-ok"
+          title="打上这个标签"
+          aria-label="打上这个标签"
+          disabled={!q.trim()}
+          onClick={() => commit(q)}
+        >
+          <Check size={12} strokeWidth={2} />
+        </button>
+      </div>
+
+      {candidates.length > 0 && (
+        <button
+          className={`tag-from-all ${picker ? "open" : ""}`}
+          aria-expanded={picker}
+          onClick={() => setPicker((v) => !v)}
+        >
+          <Icon name="plus" size={10} stroke={1.8} />
+          从已有标签选 {candidates.length}
+        </button>
+      )}
+
+      {picker && (
+        <div className="tag-picker" role="dialog" aria-label="选标签">
+          <div className="tag-picker-head">
+            <input
+              autoFocus
+              value={pq}
+              onChange={(e) => setPq(e.target.value)}
+              placeholder="搜索标签…"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setPicker(false);
+                  setPq("");
+                }
+              }}
+            />
+            <button
+              className="tag-picker-close"
+              aria-label="关闭选择面板"
+              onClick={() => {
+                setPicker(false);
+                setPq("");
+              }}
+            >
+              <Icon name="close" size={11} stroke={2} />
+            </button>
+          </div>
+          <ul className="tag-picker-list">
+            {list.length === 0 ? (
+              <li className="tag-picker-empty">没有匹配的标签</li>
+            ) : (
+              list.map((t) => {
+                const on = picked.includes(t);
+                return (
+                  <li key={t}>
+                    <button className={`tag-picker-item ${on ? "on" : ""}`} onClick={() => togglePick(t)}>
+                      <span className="tag-picker-mark">{on && <Check size={11} strokeWidth={2} />}</span>
+                      <span className="tag-picker-name">{t}</span>
+                    </button>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+          <div className="tag-picker-foot">
+            <button className="tag-picker-add" disabled={picked.length === 0} onClick={commitPicked}>
+              {picked.length > 0 ? `添加 ${picked.length} 个标签` : "添加标签"}
+            </button>
+          </div>
         </div>
       )}
 
-      {manual.length === 0 && auto.length === 0 && !adding && (
-        <p className="detail-note">还没有标签。按 T 或点上面的「标签」手动打；下面那类是自动的。</p>
+      {manual.length === 0 && auto.length === 0 && (
+        <p className="detail-note">还没有标签。在上面输入名字回车就能打上，也可以从已有标签里选。</p>
       )}
     </div>
   );

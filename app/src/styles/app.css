@@ -4476,3 +4476,809 @@ body.board-body #root {
   transform: translateX(-1px);
   border-color: rgba(var(--ink-rgb), 0.34);
 }
+
+/* ============================================================================
+   详情面板重排（0.1.2）—— 结构照 FontManager 的右侧详情
+   顶栏（徽标 + 文件名 + 评分 + 关闭）吸顶 → 预览 + 竖排色板 → 基本信息 →
+   引用（默认收起）→ 标签（FontManager 形态）→ 备注 → 来源 → 操作（放最后）
+   ============================================================================ */
+
+/* inner 只管滚动，内边距交给顶栏和 body —— 否则 sticky 顶栏上下会漏出内容 */
+.detail-inner {
+  padding: 0;
+  gap: 0;
+}
+
+.detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 14px 10px 16px;
+  background: var(--ui-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.detail-head .detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: var(--fs-16);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.2;
+  color: var(--text-1);
+}
+
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px 16px 28px;
+}
+
+.detail-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 5px;
+  color: var(--text-3);
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.detail-close:hover {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+
+/* 拖宽握把：静止什么都不画，靠近才出一条竖线 + 抓握图标 */
+.detail-resize {
+  display: grid;
+  place-items: center;
+  color: transparent;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.detail-resize:hover,
+.detail-resize:active {
+  color: var(--text-3);
+  background: linear-gradient(90deg, var(--accent-a), transparent);
+}
+
+/* ---------------- 评分：星标 + 角标 + 浮层 ---------------- */
+
+.rating-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.rating-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  color: var(--text-3);
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.rating-btn:hover {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+.rating-btn.on {
+  color: var(--accent);
+}
+.rating-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -1px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 3px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 8px;
+  line-height: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rating-pop {
+  position: fixed;
+  z-index: 90;
+  width: 176px;
+  padding: 8px;
+  border-radius: 9px;
+  background: var(--e2);
+  border: 1px solid rgba(var(--ink-rgb), 0.12);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+.rating-pop-stars {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+}
+.rating-star {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--text-3);
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.rating-star:hover {
+  background: var(--ui-hover);
+}
+.rating-star.on {
+  color: var(--accent);
+}
+.rating-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(var(--ink-rgb), 0.07);
+  font-size: var(--fs-10);
+  color: var(--text-3);
+}
+.rating-pop-value {
+  font-weight: 500;
+}
+.rating-pop-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-10);
+  color: var(--text-3);
+  transition: color var(--t-quick) ease;
+}
+.rating-pop-clear:hover {
+  color: var(--error);
+}
+
+/* ---------------- 引用（折叠） ---------------- */
+
+.detail-fold {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  color: var(--text-3);
+  transition: color var(--t-quick) ease;
+}
+.detail-fold:hover {
+  color: var(--text-1);
+}
+.detail-fold .detail-heading {
+  margin: 0;
+}
+.detail-fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ---------------- 标签（照 FontManager 详情里的那一块） ---------------- */
+
+.tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-chip.tag-chip-iconed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px 3px 8px;
+  border-radius: 5px;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  background: var(--e2);
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  color: var(--text-1);
+}
+.tag-chip-iconed .tag-dot-chip {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.tag-manual-icon {
+  flex: none;
+  opacity: 0.55;
+}
+.tag-chip-iconed .tag-chip-x {
+  display: grid;
+  place-items: center;
+  padding: 1px;
+  border-radius: 50%;
+  color: var(--text-3);
+  transition: color var(--t-quick) ease;
+}
+.tag-chip-iconed .tag-chip-x:hover {
+  color: var(--error);
+}
+
+.tag-chip.tag-chip-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: var(--fs-11);
+  border: 1px dashed rgba(var(--ink-rgb), 0.18);
+  background: transparent;
+  color: var(--text-2);
+}
+.tag-chip-auto:hover {
+  border-color: rgba(var(--ink-rgb), 0.3);
+  color: var(--text-1);
+}
+.tag-auto-spark {
+  flex: none;
+  opacity: 0.6;
+}
+
+.tag-add-row {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  padding: 0 4px 0 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(var(--ink-rgb), 0.09);
+  background: var(--e1);
+  transition: border-color var(--t-quick) ease;
+}
+.tag-add-row:focus-within {
+  border-color: var(--accent);
+}
+.tag-add-row .blink-caret-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tag-add-input {
+  width: 100%;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: var(--fs-11);
+  color: var(--text-1);
+}
+.tag-add-input::placeholder {
+  color: var(--text-3);
+}
+.tag-add-ok {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-3);
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.tag-add-ok:hover:not(:disabled) {
+  background: var(--e2);
+  color: var(--accent);
+}
+.tag-add-ok:disabled {
+  opacity: 0.35;
+}
+
+.tag-from-all {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 5px;
+  border: 1px dashed rgba(var(--ink-rgb), 0.18);
+  font-size: var(--fs-11);
+  color: var(--text-3);
+  transition: color var(--t-quick) ease, border-color var(--t-quick) ease;
+}
+.tag-from-all:hover,
+.tag-from-all.open {
+  color: var(--text-1);
+  border-color: var(--accent);
+}
+
+.tag-picker {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--e2);
+  border: 1px solid rgba(var(--ink-rgb), 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.26);
+}
+.tag-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-bottom: 1px solid rgba(var(--ink-rgb), 0.07);
+}
+.tag-picker-head input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  background: var(--e1);
+  font-size: var(--fs-11);
+  color: var(--text-1);
+  outline: none;
+}
+.tag-picker-head input:focus {
+  border-color: var(--accent);
+}
+.tag-picker-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-3);
+}
+.tag-picker-close:hover {
+  background: var(--e1);
+  color: var(--text-1);
+}
+.tag-picker-list {
+  max-height: 196px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.tag-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 7px;
+  border-radius: 4px;
+  font-size: var(--fs-11);
+  text-align: left;
+  color: var(--text-2);
+}
+.tag-picker-item:hover {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+.tag-picker-item.on {
+  color: var(--text-1);
+}
+.tag-picker-mark {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  flex: none;
+  color: var(--accent);
+}
+.tag-picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-picker-empty {
+  padding: 9px 7px;
+  font-size: var(--fs-11);
+  color: var(--text-3);
+}
+.tag-picker-foot {
+  padding: 6px;
+  border-top: 1px solid rgba(var(--ink-rgb), 0.07);
+}
+.tag-picker-add {
+  width: 100%;
+  height: 28px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-11);
+  font-weight: 500;
+}
+.tag-picker-add:disabled {
+  opacity: 0.4;
+}
+
+/* 备注框：与来源 URL 框同一套底 */
+.mine-note {
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(var(--ink-rgb), 0.09);
+  background: var(--e1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  resize: vertical;
+}
+.mine-note:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* 预览方框被压扁的修复（0.1.2）：
+   `.detail-inner` 是 flex column，`.detail-body` 默认 flex-shrink:1；而
+   `.detail-art` 的高度由 `aspect-ratio` + 宽度推出，它的 **min-content 高度是 0** ——
+   于是整条收缩链一路把它压成一条线（截图里预览只剩 28px）。
+   做法：body / hero 都不参与收缩，超出高度交给 `.detail-inner` 滚动。 */
+.detail-body {
+  flex: 0 0 auto;
+  width: 100%;
+}
+.detail-hero {
+  flex: 0 0 auto;
+}
+.detail-hero .detail-art {
+  flex: 1 1 auto;
+}
+.detail-palette {
+  align-self: stretch;
+}
+
+/* ---- 三处照 FontManager 对齐（0.1.2 二次修） ---- */
+
+/* 1) 预览方框宽度：必须是 `flex: 1 1 0%`。写成 `auto` 时 basis 取内容宽，
+   而 img 是 `width:100%` 反过来依赖父宽 —— 循环解析成 0，整个预览消失。 */
+.detail-hero .detail-art {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
+/* 2) 拖宽把手：靠近/拖动时整条边泛蓝（DragManager 那条一样的观感），
+   按住时再叠一条 2px 实线蓝在左缘。 */
+.detail-resize:hover {
+  color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-glow), transparent 72%);
+}
+.detail-resize:active {
+  color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-glow) 0%, var(--accent-a) 42%, transparent);
+}
+.detail-resize:active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+
+/* 3) 「添加标签…」不是一个整行输入框 —— FontManager 里它是 **chip 大小**的窄框：
+   内宽 72px + 右侧 ✓，宽度不随面板变。整行宽的框会把标签区压低一大截。 */
+.tag-add-row {
+  flex: 0 0 auto;
+  padding: 6px 6px 6px 10px;
+  min-height: 0;
+  width: auto;
+}
+.tag-add-input {
+  width: 72px;
+  height: auto;
+}
+.tag-add-ok {
+  width: 18px;
+  height: 18px;
+}
+
+/* ---- 标签区：chips 一行流，输入框与「从已有标签选」各占一行（照 FontManager 图 7） ---- */
+.tag-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.tag-picker {
+  width: 100%;
+}
+
+/* ---- 色板：一列**方块**，从顶部往下排，不随预览高度拉伸 ---- */
+.detail-palette {
+  width: 24px;
+  gap: 4px;
+  justify-content: flex-start;
+}
+.detail-palette button {
+  flex: 0 0 auto;
+  height: 26px;
+  min-height: 0;
+  border-radius: 4px;
+}
+
+/* ---- 基本信息：行距放宽到 FontManager 的密度 ---- */
+.detail-meta {
+  row-gap: 9px;
+}
+
+/* ============================================================================
+   度量对齐 FontManager（0.1.2 三轮）：所有间距 / 字号取 FontManager 详情面板的真实值
+   FontManager: .detail-inner padding 20px 18px 24px / gap 20px；
+                .detail-heading fs-10 600 .1em margin-bottom 8；
+                .detail-meta 92px + 1fr, row-gap 9, column-gap 10, fs-13,
+                dt fs-11 uppercase .05em；.tag-chip fs-11 padding 4/7/4/10；
+                .tag-input padding 6/9/6/12 + input 72px
+   ============================================================================ */
+
+.detail-body {
+  padding: 20px 18px 24px;
+  gap: 20px;
+}
+
+.detail-head {
+  gap: 10px;
+  padding: 20px 18px 12px;
+}
+
+.detail-head .detail-title {
+  font-size: var(--fs-20);
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+}
+
+/* 键值表：列宽 / 行距 / 字号全部取 FontManager */
+.detail-meta {
+  grid-template-columns: 92px minmax(0, 1fr);
+  row-gap: 9px;
+  column-gap: 10px;
+  font-size: var(--fs-13);
+}
+.detail-meta dt {
+  font-size: var(--fs-11);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+}
+.detail-meta dd {
+  color: var(--text-2);
+}
+
+/* chip：FontManager 的内距（4/7/4/10）+ 4px 圆角 + 11px 字 */
+.tag-chip.tag-chip-iconed {
+  padding: 4px 7px 4px 10px;
+  border-radius: 4px;
+  gap: 4px;
+  font-size: var(--fs-11);
+}
+.tag-chip.tag-chip-auto {
+  padding: 4px 8px;
+  border-radius: 4px;
+  gap: 4px;
+  font-size: var(--fs-11);
+}
+
+/* 添加标签：FontManager 的内距 + 72px 输入 */
+.tag-add-row {
+  padding: 6px 9px 6px 12px;
+  border-radius: 5px;
+  min-height: 0;
+}
+.tag-add-input {
+  width: 72px;
+  height: 15px;
+  line-height: 15px;
+}
+
+/* 从已有标签选：与输入框同一行高 */
+.tag-from-all {
+  height: 28px;
+  border-radius: 5px;
+}
+
+/* 色板：一列方块均分预览高度（图 3 就是这样填满的） */
+.detail-palette {
+  width: 26px;
+  gap: 4px;
+}
+.detail-palette button {
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
+  border-radius: 4px;
+}
+
+/* 备注框：FontManager 的备注是 6px 圆角 + e1 底 + 约 80px 高 */
+.mine-note {
+  min-height: 78px;
+  border-radius: 6px;
+  padding: 9px 11px;
+  font-size: var(--fs-11);
+  line-height: 1.65;
+}
+
+/* ============================================================================
+   最终度量对齐（第四轮）—— 下方每条数值都在 FontManager app.css 里对得上
+   评分浮层 .rating-pop/width 168、padding 7/8/6、radius 8、star 高 27；
+   .rating-star-on 用 --warning 且 svg fill（实心）；角标 12px/fs-9/700；
+   备注 .note-editor：min-height 52 / fs-13 / 1.5 / padding 9 12 / radius 8 / inset 阴影；
+   标签选择器 .tag-picker-add：高 26 / radius 4 / 浅底 e1 / 文字主色（**不是**蓝底）
+   ============================================================================ */
+
+/* ---- 评分：顶栏星标（蓝）+ 浮层（灰实心） ---- */
+.rating-btn {
+  padding: 4px;
+  border-radius: 4px;
+  width: auto;
+  height: auto;
+  color: var(--text-3);
+}
+.rating-btn:hover {
+  background: var(--e2);
+  color: var(--text-3);
+}
+.rating-btn.on,
+.rating-btn[aria-pressed="true"] {
+  color: var(--ui-accent);
+}
+.rating-badge {
+  right: -3px;
+  bottom: -3px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  border-radius: 6px;
+  background: var(--ui-accent);
+  color: #fff;
+  font-size: var(--fs-9);
+  font-weight: 700;
+  line-height: 12px;
+}
+
+.rating-pop {
+  width: 168px;
+  padding: 7px 8px 6px;
+  border-radius: 8px;
+}
+.rating-pop-stars {
+  gap: 2px;
+}
+.rating-star {
+  flex: 1;
+  width: auto;
+  height: 27px;
+  border-radius: 5px;
+  color: var(--text-3);
+}
+.rating-star:hover {
+  background: var(--e2);
+  color: var(--warning);
+}
+.rating-star.on {
+  color: var(--warning);
+}
+.rating-star.on svg {
+  fill: var(--warning);
+}
+.rating-pop-foot {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(var(--ink-rgb), 0.08);
+  font-size: var(--fs-10);
+  color: var(--text-3);
+}
+.rating-pop-clear {
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.rating-pop-clear:hover {
+  background: var(--e2);
+  color: var(--text-1);
+}
+
+/* ---- 尺寸行与其他小字 ---- */
+.detail-artmeta {
+  font-size: var(--fs-11);
+  color: var(--text-3);
+}
+
+/* ---- 备注框：照 .note-editor ---- */
+.mine-note {
+  min-height: 52px;
+  font-size: var(--fs-13);
+  line-height: 1.5;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--ink-rgb), 0.06);
+  background: var(--e1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+  resize: vertical;
+}
+.mine-note:focus {
+  border-color: var(--accent-glow);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.2),
+    0 0 0 4px var(--accent-glow-soft);
+}
+
+/* ---- 标签选择器：按钮是**浅底**，不是蓝底 ---- */
+.tag-picker-add {
+  height: 26px;
+  border-radius: 4px;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--text-1);
+  background: var(--e1);
+  border: 1px solid rgba(var(--ink-rgb), 0.12);
+}
+.tag-picker-add:hover:not(:disabled) {
+  border-color: var(--accent-glow);
+  background: var(--e2);
+}
+.tag-picker-item {
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--text-2);
+  gap: 6px;
+  height: 28px;
+  font-size: var(--fs-11);
+}
+.tag-picker-item:hover {
+  background: var(--e1);
+  color: var(--text-1);
+}
+
+/* ---- 来源 URL 框：与备注同一套底 ---- */
+.mine-url-input {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(var(--ink-rgb), 0.06);
+  background: var(--e1);
+  font-size: var(--fs-11);
+  color: var(--text-1);
+}
+.mine-url-input:focus {
+  outline: none;
+  border-color: var(--accent-glow);
+}
+
+/* ---- 操作区按钮：FontManager 的按钮是 13px / 5px 圆角 / padding 10 ---- */
+.detail .btn {
+  height: 34px;
+  border-radius: 5px;
+  font-size: var(--fs-13);
+}
+.detail .act-primary {
+  height: 38px;
+  border-radius: 8px;
+  font-size: var(--fs-13);
+}

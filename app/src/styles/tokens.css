@@ -28,6 +28,7 @@
   --ui-line-hover: #9a9a94;
   --ui-hover: #1c1c1a;
   --ui-accent: #5b8cff;
+  --warning: #d4d4d8;
 
   /* 叠加档（半透明，让底色透出来 —— 实色 hex 在浅色主题下会「糊成一片」） */
   --e0: rgba(255, 255, 255, 0);
@@ -128,6 +129,7 @@ html[data-theme="light"] {
   --ui-line-hover: #9b9b95;
   --ui-hover: #f1f1ed;
   --ui-accent: #1b4fe0;
+  --warning: #3f3f46;
 
   --e0: rgba(22, 22, 32, 0);
   --e1: rgba(22, 22, 32, 0.04);
