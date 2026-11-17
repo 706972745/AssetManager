@@ -5760,3 +5760,20 @@ body.board-body #root {
   opacity: 1;
   color: var(--text-1);
 }
+
+/* 二级菜单里的入口行：右侧一个细箭头（FontManager 的 FilterSubTrigger 同款口径），
+   数值 meta 让"这一维正在筛几项"不用展开也能看见。 */
+.menu-item.has-sub {
+  justify-content: flex-start;
+}
+.menu-arrow {
+  margin-left: auto;
+  font-size: var(--fs-13);
+  line-height: 1;
+  color: var(--text-3);
+}
+.menu.submenu {
+  min-width: 200px;
+  max-width: 280px;
+  max-height: min(440px, calc(100vh - 24px));
+}

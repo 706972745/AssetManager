@@ -77,6 +77,8 @@ pub struct AssetQuery {
     pub tag: Option<String>,
     /// 颜色筛选（T24）：色桶名（red / orange / …）。空 = 不筛
     pub color: Option<String>,
+    /// **评分下限**（0.1.11）：Some(n) = 只列 n 星及以上。None = 不筛
+    pub min_rating: Option<i32>,
     /// **后端填的**：手工标签在注册库里的 id（拆库后 asset_tags 存的是 tag_id 不是名字）。
     /// 前端不送 —— `tag` 里给的是名字，`App::list` 查一次注册库换成 id。
     pub tag_ids: Option<Vec<i64>>,

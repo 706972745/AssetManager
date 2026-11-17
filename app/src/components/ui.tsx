@@ -455,6 +455,8 @@ export interface MenuItem {
   check?: boolean;
   /** 右侧灰色附注（数量）。数字用等宽，和侧栏计数同一套观感 */
   meta?: string;
+  /** 二级菜单项：命中后在菜单左侧展开一块 fixed 面板（照 FontManager 的 FilterSubTrigger） */
+  sub?: MenuItem[];
 }
 
 export function Menu({
@@ -469,56 +471,122 @@ export function Menu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const subRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const timer = useRef<number | null>(null);
+  /** 二级面板（照 FontManager 的 FilterSubTrigger）：fixed 定位、向左弹，
+   *  因为 .menu 自己 overflow-y:auto，绝对定位的子面板会被裁掉。 */
+  const [sub, setSub] = useState<{ items: MenuItem[]; left: number; top: number } | null>(null);
+
+  const left = Math.min(x, window.innerWidth - 300);
+  const maxH = Math.min(480, window.innerHeight - 24);
+
+  const keep = () => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+  };
+  const openSub = (el: HTMLElement, subItems: MenuItem[]) => {
+    keep();
+    triggerRef.current = el;
+    const r = el.getBoundingClientRect();
+    setSub({
+      items: subItems,
+      left: Math.max(8, Math.min(r.left, window.innerWidth - 8) - 224),
+      top: Math.max(8, Math.min(r.top - 4, window.innerHeight - 320)),
+    });
+  };
+  const closeSubSoon = () => {
+    keep();
+    timer.current = window.setTimeout(() => {
+      /* 到点复查：指针还压在入口行或子面板上就不收（FontManager 的 240ms 口径） */
+      if (!triggerRef.current?.matches(":hover") && !subRef.current?.matches(":hover")) setSub(null);
+      timer.current = null;
+    }, 240);
+  };
+
   useEffect(() => {
     const h = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !subRef.current?.contains(t)) onClose();
     };
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (sub) setSub(null);
+      else onClose();
+    };
     window.addEventListener("mousedown", h);
     window.addEventListener("keydown", k);
     return () => {
       window.removeEventListener("mousedown", h);
       window.removeEventListener("keydown", k);
+      keep();
     };
-  }, [onClose]);
+  }, [onClose, sub]);
+
+  const renderRow = (it: MenuItem, i: number, inSub = false) => {
+    if (it.sep) return <div key={i} style={{ height: 1, background: "var(--ui-line)", margin: "5px 0" }} />;
+    if (it.heading)
+      return (
+        <div key={i} className="menu-heading" role="none">
+          {it.label}
+        </div>
+      );
+    return (
+      <button
+        key={i}
+        className={`menu-item ${it.on ? "on" : ""} ${it.sub?.length ? "has-sub" : ""}`}
+        disabled={it.disabled}
+        onClick={(e) => {
+          if (it.sub?.length && !inSub) {
+            if (sub) setSub(null);
+            else openSub(e.currentTarget, it.sub);
+            return;
+          }
+          it.onPick?.();
+          onClose();
+        }}
+        onMouseEnter={(e) => {
+          if (!inSub && it.sub?.length) openSub(e.currentTarget, it.sub);
+        }}
+        onMouseLeave={() => {
+          if (!inSub && it.sub?.length) closeSubSoon();
+        }}
+      >
+        {(it.dot || it.dotClass) && (
+          <span
+            className={`menu-dot ${it.dotClass ?? ""}`}
+            style={it.dot ? { background: it.dot } : undefined}
+            aria-hidden
+          />
+        )}
+        {it.label}
+        {it.meta && <span className="menu-meta mono">{it.meta}</span>}
+        {it.check && <span className="menu-check" aria-hidden>✓</span>}
+        {it.sub?.length && !inSub && <span className="menu-arrow" aria-hidden>›</span>}
+      </button>
+    );
+  };
 
   return (
-    <div
-      ref={ref}
-      className="menu"
-      style={{ left: Math.min(x, window.innerWidth - 300), top: Math.min(y, window.innerHeight - 40 - items.length * 33) }}
-    >
-      {items.map((it, i) =>
-        it.sep ? (
-          <div key={i} style={{ height: 1, background: "var(--ui-line)", margin: "5px 0" }} />
-        ) : it.heading ? (
-          <div key={i} className="menu-heading" role="none">
-            {it.label}
-          </div>
-        ) : (
-          <button
-            key={i}
-            className={`menu-item ${it.on ? "on" : ""}`}
-            disabled={it.disabled}
-            onClick={() => {
-              it.onPick?.();
-              onClose();
-            }}
-          >
-            {/* 有 dot / dotClass 就先画一个 8px 的圆点；没有的不占位 */}
-            {(it.dot || it.dotClass) && (
-              <span
-                className={`menu-dot ${it.dotClass ?? ""}`}
-                style={it.dot ? { background: it.dot } : undefined}
-                aria-hidden
-              />
-            )}
-            {it.label}
-            {it.meta && <span className="menu-meta mono">{it.meta}</span>}
-            {it.check && <span className="menu-check" aria-hidden>✓</span>}
-          </button>
-        )
+    <>
+      <div
+        ref={ref}
+        className="menu"
+        style={{
+          left,
+          top: Math.max(8, Math.min(y, window.innerHeight - maxH - 8)),
+          maxHeight: maxH,
+        }}
+      >
+        {items.map((it, i) => renderRow(it, i))}
+      </div>
+      {sub && (
+        <div ref={subRef} className="menu submenu" style={{ left: sub.left, top: sub.top }}>
+          {sub.items.map((it, i) => renderRow(it, i, true))}
+        </div>
       )}
-    </div>
+    </>
   );
 }

@@ -68,6 +68,8 @@ export interface Query {
   tag?: string | null;
   /** 颜色筛选（T24）：色桶名（red / orange / …），空 = 不筛 */
   color?: string | null;
+  /** 评分下限（1–5）：只列 n 星及以上；空 = 不筛 */
+  minRating?: number | null;
 }
 
 

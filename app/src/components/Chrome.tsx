@@ -13,10 +13,10 @@ import {
   type SortKey,
   type Source,
 } from "../types";
-import { BrandMark, BlinkCaretInput, Icon, Menu } from "./ui";
+import { BrandMark, BlinkCaretInput, Icon, Menu, type MenuItem } from "./ui";
 import { COLOR_LABEL, autoTagLabel, colorClass, isAutoTag } from "../lib/tags";
 import type { ViewMode } from "./Views";
-import type { RefItem, TagCount } from "../types";
+import type { DirNode, RefItem, TagCount } from "../types";
 
 /* 窗口动作：桌面端走命令，浏览器预览下静默 */
 function win(cmd: string) {
@@ -119,6 +119,12 @@ export function TopBar({
   tags,
   activeTag,
   onTag,
+  source,
+  dirNode,
+  onDir,
+  autoTags,
+  rating,
+  onRating,
 }: {
   text: string;
   onText: (v: string) => void;
@@ -140,16 +146,143 @@ export function TopBar({
   /** 当前正在筛的标签（null = 不筛） */
   activeTag: string | null;
   onTag: (name: string | null) => void;
+  /** 文件夹段：选中的目录（null = 不按目录筛） */
+  source: Source;
+  dirNode: DirNode | null;
+  onDir: (n: DirNode | null) => void;
+  /** 形状 / 格式段用现成的自动标签（`orient:*` / `fmt:*`），不另造口径 */
+  autoTags: TagCount[];
+  /** 评分下限（1–5 星；null = 不筛） */
+  rating: number | null;
+  onRating: (n: number | null) => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "sort" | "filter" | "color" } | null>(
     null
   );
+  /** 打开筛选菜单时才拉目录：主界面初次渲染不该为了一个可能永远不打开的菜单扫两遍树 */
+  const [folders, setFolders] = useState<DirNode[]>([]);
+  useEffect(() => {
+    if (!menu || menu.kind !== "filter") return;
+    let live = true;
+    void (async () => {
+      const roots = await source.roots().catch(() => [] as DirNode[]);
+      const children = await Promise.all(roots.map((r) => source.children(r.id).catch(() => [] as DirNode[])));
+      const list = [...roots, ...children.flat()].slice(0, 30);
+      if (live) setFolders(list);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [menu, source]);
+
+  const ORIENT_LABEL: Record<string, string> = {
+    landscape: "横向",
+    portrait: "纵向",
+    square: "方形",
+  };
   const kind = KINDS.find((k) => k.key === kindKey) ?? KINDS[0];
 
   const openMenu = (e: React.MouseEvent<HTMLElement>, k: "sort" | "filter" | "color") => {
     const r = e.currentTarget.getBoundingClientRect();
     setMenu({ x: r.left, y: r.bottom + 6, kind: k });
   };
+
+  const autoOf = (ns: string) => autoTags.filter((t) => t.name.startsWith(`${ns}:`));
+  const pickTag = (name: string) => onTag(activeTag === name ? null : name);
+
+  /* 筛选菜单（照 owner 给的 Eagle 那条：标签 / 文件夹 / 形状 / 评分 / 格式；
+     **颜色不做** —— 顶栏那颗彩色按钮已经是颜色筛选，再放一遍就是两套入口）。
+     Shape / 格式复用 `orient:*` / `fmt:*` 自动标签，评分走后端 `minRating`。 */
+  const filterItems: MenuItem[] = [
+    { label: "类型", heading: true },
+    ...KINDS.map((k) => ({
+      label: k.label,
+      on: kindKey === k.key,
+      check: kindKey === k.key,
+      onPick: () => onKind(k.key),
+    })),
+
+    { sep: true, label: "" },
+    /* 下面几段像 FontManager 那样收进**二级菜单**：
+       主菜单只留入口行，内容在左边的浮层里选 —— 一屏就能看全所有维度，
+       不必在一个长列表里滚半天（owner 2026-11-17 指定）。 */
+    { label: "范围", heading: true },
+    {
+      label: "标签",
+      meta: activeTag ? "1" : undefined,
+      on: !!activeTag,
+      sub: [
+        { label: "全部标签", on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
+        ...tags.map((t) => ({
+          label: t.name,
+          dotClass: colorClass(t.color),
+          meta: String(t.count),
+          on: activeTag === t.name,
+          check: activeTag === t.name,
+          onPick: () => pickTag(t.name),
+        })),
+      ],
+    },
+    {
+      label: "文件夹",
+      meta: dirNode ? "1" : undefined,
+      on: !!dirNode,
+      sub: [
+        { label: "全部文件夹", on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
+        ...folders.map((d) => ({
+          label: d.name,
+          meta: d.assetCnt > 0 ? String(d.assetCnt) : undefined,
+          on: dirNode?.id === d.id,
+          check: dirNode?.id === d.id,
+          onPick: () => onDir(d),
+        })),
+      ],
+    },
+    {
+      label: "形状",
+      meta: activeTag?.startsWith("orient:") ? "1" : undefined,
+      on: !!activeTag?.startsWith("orient:"),
+      sub: [
+        { label: "全部形状", on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
+        ...autoOf("orient").map((t) => ({
+          label: ORIENT_LABEL[t.name.slice("orient:".length)] ?? t.name,
+          meta: String(t.count),
+          on: activeTag === t.name,
+          check: activeTag === t.name,
+          onPick: () => pickTag(t.name),
+        })),
+      ],
+    },
+    {
+      label: "评分",
+      meta: rating !== null ? `${rating}★` : undefined,
+      on: rating !== null,
+      sub: [
+        { label: "全部评分", on: rating === null, check: rating === null, onPick: () => onRating(null) },
+        ...[5, 4, 3, 2, 1].map((n) => ({
+          label: `${"★".repeat(n)} ${n} 星及以上`,
+          on: rating === n,
+          check: rating === n,
+          onPick: () => onRating(rating === n ? null : n),
+        })),
+      ],
+    },
+    {
+      label: "格式",
+      meta: activeTag?.startsWith("fmt:") ? "1" : undefined,
+      on: !!activeTag?.startsWith("fmt:"),
+      sub: [
+        { label: "全部格式", on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
+        ...autoOf("fmt").map((t) => ({
+          label: t.name.slice("fmt:".length).toUpperCase(),
+          meta: String(t.count),
+          on: activeTag === t.name,
+          check: activeTag === t.name,
+          onPick: () => pickTag(t.name),
+        })),
+      ],
+    },
+  ];
 
   return (
     <div className="topbar">
@@ -190,9 +323,9 @@ export function TopBar({
       </button>
 
       <button
-        className={`ctl ctl-icon ${kindKey !== "all" ? "on" : ""}`}
+        className={`ctl ctl-icon ${kindKey !== "all" || dirNode || activeTag || rating !== null ? "on" : ""}`}
         onClick={(e) => openMenu(e, "filter")}
-        title={`按类型筛选：${kind.label}`}
+        title="筛选：类型 / 标签 / 文件夹 / 形状 / 评分 / 格式"
         aria-label={`按类型筛选：${kind.label}`}
         aria-pressed={kindKey !== "all"}
       >
@@ -264,33 +397,7 @@ export function TopBar({
                       }))
                     : [{ label: "还没有主色数据，滚一遍缩略图就会算出来", on: false, onPick: () => {} }]),
                 ]
-              : [
-                  /* 结构照 FontManager 的筛选菜单：**段头 + 勾选**。
-                     我们只有一个类型维度，光五行看着像"少了点什么"，
-                     于是把标签也放进来（FontManager 那边是「范围 → 标签」二级菜单，
-                     我们标签本来就在侧栏，这里给一份就近入口，筛的是同一个 tagFilter）。 */
-                  { label: "类型", heading: true },
-                  ...KINDS.map((k) => ({
-                    label: k.label,
-                    on: kindKey === k.key,
-                    check: kindKey === k.key,
-                    onPick: () => onKind(k.key),
-                  })),
-                  ...(tags.length
-                    ? [
-                        { sep: true, label: "" },
-                        { label: "标签", heading: true },
-                        ...tags.map((t) => ({
-                          label: t.name,
-                          dotClass: colorClass(t.color),
-                          meta: String(t.count),
-                          on: activeTag === t.name,
-                          check: activeTag === t.name,
-                          onPick: () => onTag(activeTag === t.name ? null : t.name),
-                        })),
-                      ]
-                    : []),
-                ]
+              : filterItems
           }
         />
       )}

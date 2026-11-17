@@ -825,6 +825,14 @@ pub fn list_assets(c: &Connection, q: &AssetQuery) -> Res<Vec<Asset>> {
         }
     }
 
+    /* 评分下限：0 星不筛（那是"没打过分"，不是最低档），1–5 星走索引 idx_assets_rating */
+    if let Some(n) = q.min_rating {
+        if n > 0 {
+            where_sql.push_str(" AND a.rating >= ? ");
+            args.push(Box::new(n));
+        }
+    }
+
     /* 搜索（0.5.0 起**同时命中标签名**）：
        - 普通词：文件名/备注（FTS trigram）**并上**标签名；
        - `#词`：只搜标签 —— 用户打 `#` 就是明确要找标签，别让文件名噪音混进来；

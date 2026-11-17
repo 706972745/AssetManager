@@ -107,6 +107,8 @@ export default function App() {
   /* 颜色筛选（T24）：色桶键；colorCounts 是侧栏口径的"每种颜色多少张" */
   const [colorFilter, setColorFilter] = useState<string | null>(null);
   const [colorCounts, setColorCounts] = useState<[string, number][]>([]);
+  /** 评分下限（筛选菜单里的「评分」段；1–5 星，null = 不筛） */
+  const [ratingFilter, setRatingFilter] = useState<number | null>(null);
   /* 工具面板（重复 / 丢失引用 / 批量重命名） */
   const [tools, setTools] = useState<{ tab: ToolTab } | null>(null);
   const [tags, setTags] = useState<TagCount[]>([]);
@@ -272,8 +274,9 @@ export default function App() {
       limit: 200,
       tag: tagFilter,
       color: colorFilter,
+      minRating: ratingFilter,
     }),
-    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter]
+    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter, ratingFilter]
   );
 
   const loadPage = useCallback(
@@ -2199,7 +2202,26 @@ export default function App() {
               setTagFilter(n);
               /* 颜色和标签都作用于同一批素材：选标签就把颜色放开，
                  否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表 */
-              if (n) setColorFilter(null);
+              if (n) {
+                setColorFilter(null);
+                setRatingFilter(null);
+              }
+            }}
+            source={source}
+            dirNode={dir}
+            onDir={(n) => {
+              setDir(n);
+              setTagFilter(null);
+              setPage("assets");
+            }}
+            autoTags={autoTagCounts}
+            rating={ratingFilter}
+            onRating={(n) => {
+              setRatingFilter(n);
+              if (n !== null) {
+                setColorFilter(null);
+                setTagFilter(null);
+              }
             }}
           />
 
@@ -2221,6 +2243,16 @@ export default function App() {
               </span>
               {isAutoTag(tagFilter) && <span className="filter-strip-kind">自动标签</span>}
               <button className="btn btn-tiny" onClick={() => setTagFilter(null)}>
+                清除筛选
+              </button>
+            </div>
+          )}
+
+          {ratingFilter !== null && (
+            <div className="filter-strip">
+              <Icon name="star" size={12} stroke={1.5} />
+              <span className="filter-strip-label">评分：{ratingFilter} 星及以上</span>
+              <button className="btn btn-tiny" onClick={() => setRatingFilter(null)}>
                 清除筛选
               </button>
             </div>
