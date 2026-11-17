@@ -582,14 +582,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* 系统级快捷键（F1 截图 / F3 贴剪贴板 / Alt+F1 截图后复制）。
+  /* 系统级快捷键（F1 截图 / F3 贴剪贴板）。
      启动时按用户存的组合注册一次；设置里改完由设置面板自己再调一次。 */
   useEffect(() => {
     const saved = loadHotkeys();
     const list: [string, string][] = [
       [saved.snip, "snip"],
       [saved.clip, "clip_peek"],
-      [saved.snipCopy, "snip_copy"],
     ];
     void source
       .hotkeysSet(list)
@@ -2126,7 +2125,7 @@ export default function App() {
           label: "截图（选完区存到截图目录）",
           icon: "image",
           shortcut: "F1",
-          action: () => void source.snipStart("save").catch((e) => toast(String(e), true)),
+          action: () => void source.snipStart().catch((e) => toast(String(e), true)),
         },
         {
           label: "把剪贴板里的图用无边框看图打开",

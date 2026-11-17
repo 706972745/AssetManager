@@ -1,5 +1,5 @@
 /**
- * 三个**系统级**快捷键（软件不在前台也要能按）。
+ * 两个**系统级**快捷键（软件不在前台也要能按）。
  *
  * 存 localStorage 而不是 `peeks.json`：它属于"界面偏好"，和贴图存档的生命周期不一样 ——
  * 贴图删了不该把键位也丢回默认。
@@ -14,11 +14,12 @@ export interface HotkeySet {
   snip: string;
   /** 贴剪贴板：把剪贴板里的图贴到屏幕上 */
   clip: string;
-  /** 截图后直接进剪贴板（不落盘） */
-  snipCopy: string;
 }
 
-export const DEFAULT_HOTKEYS: HotkeySet = { snip: "F1", clip: "F3", snipCopy: "Alt+F1" };
+/* `Alt+F1`（截完直接进剪贴板）在 0.1.20 删掉了：
+   它的唯一效果就是"框完区就复制并把覆盖层关掉"，用户既看不到工具栏、也没机会加标注，
+   而这正是 owner 反复报的「截图完成后老是自动复制」。复制现在只有截图界面里的 Ctrl+C。 */
+export const DEFAULT_HOTKEYS: HotkeySet = { snip: "F1", clip: "F3" };
 
 const KEY = "am.hotkeys.v1";
 
@@ -30,7 +31,6 @@ export function loadHotkeys(): HotkeySet {
       return {
         snip: v.snip || DEFAULT_HOTKEYS.snip,
         clip: v.clip || DEFAULT_HOTKEYS.clip,
-        snipCopy: v.snipCopy || DEFAULT_HOTKEYS.snipCopy,
       };
     }
   } catch {

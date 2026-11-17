@@ -451,8 +451,8 @@ export interface Source {
   clipPeek(): Promise<void>;
   /** 剪贴板历史：`[路径, 宽, 高]`，最新在前 */
   clipHistory(): Promise<[string, number, number][]>;
-  /** F1 / Alt+F1：开始截图（mode: save | copy） */
-  snipStart(mode?: "save" | "copy"): Promise<void>;
+  /** F1：开始截图（永远进截图界面，不自动交付任何东西） */
+  snipStart(): Promise<void>;
   /** 裁出选区（CSS 像素）→ `[dataURL, 物理宽, 物理高]`，给 canvas 当底图 */
   snipCrop(
     x: number,
@@ -462,9 +462,11 @@ export interface Source {
     scale: number,
   ): Promise<[string, number, number]>;
   /** 交付合成好的整张图（含标注）。action: copy | save | saveas | peek */
+  /** `from` 只进日志（哪个入口触发的交付），用来追"自动复制"这类问题 */
   snipFinish(
     png: string,
     action: "copy" | "save" | "saveas" | "peek",
+    from?: string,
   ): Promise<string | null>;
   snipCancel(): Promise<void>;
   /** 覆盖层底图上屏后调它，窗口这时才显示（先显示会黑闪一下） */

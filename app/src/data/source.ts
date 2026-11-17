@@ -143,10 +143,11 @@ export const tauriSource: Source = {
   saveAs: (src, suggest) => invoke!<string | null>("am_save_as", { src, suggest }),
   clipPeek: () => invoke!<void>("am_clip_peek"),
   clipHistory: () => invoke!<[string, number, number][]>("am_clip_history"),
-  snipStart: (mode) => invoke!<void>("am_snip_start", { mode }),
+  snipStart: () => invoke!<void>("am_snip_start"),
   snipCrop: (x, y, w, h, scale) =>
     invoke!<[string, number, number]>("am_snip_crop", { x, y, w, h, scale }),
-  snipFinish: (png, action) => invoke!<string | null>("am_snip_finish", { png, action }),
+  snipFinish: (png, action, from) =>
+    invoke!<string | null>("am_snip_finish", { png, action, from: from ?? "btn" }),
   snipCancel: () => invoke!<void>("am_snip_cancel"),
   snipReady: () => invoke!<void>("am_snip_ready"),
   snipFull: () => invoke!<string>("am_snip_full"),

@@ -95,7 +95,7 @@ export function Settings({
   const [refSum, setRefSum] = useState<[number, number] | null>(null);
   /* 每个库一个 DB 文件（T28）：用户要能看见"一个库一个文件" */
   const [libFiles, setLibFiles] = useState<[string, string, number][]>([]);
-  /* 系统级快捷键（F1/F3/Alt+F1）：改动立刻注册，注册失败的组合如实回显 */
+  /* 系统级快捷键（F1/F3）：改动立刻注册，注册失败的组合如实回显 */
   const [hotkeys, setHotkeys] = useState<HotkeySet>(() => loadHotkeys());
 
   /** 改一个系统快捷键：存起来 → 立刻重新注册三个 → 失败的单独说 */
@@ -108,7 +108,6 @@ export function Settings({
         const failed = await source.hotkeysSet([
           [next.snip, "snip"],
           [next.clip, "clip_peek"],
-          [next.snipCopy, "snip_copy"],
         ]);
         if (failed.length) {
           onToast(`这些组合被别的软件占了：${failed.join("、")}`, true);
@@ -614,18 +613,6 @@ export function Settings({
               <HotkeyField
                 value={hotkeys.snip}
                 onChange={(v) => void applyHotkey("snip", v)}
-              />
-            ),
-          },
-          {
-            id: "hk-copy",
-            label: "截图后直接复制（不落盘）",
-            hint: "选完区立刻进剪贴板，适合发消息",
-            kw: "截图 复制 剪贴板 alt f1 系统 全局",
-            node: (
-              <HotkeyField
-                value={hotkeys.snipCopy}
-                onChange={(v) => void applyHotkey("snipCopy", v)}
               />
             ),
           },

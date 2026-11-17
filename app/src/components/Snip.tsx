@@ -3,7 +3,8 @@ import { Copy, Eraser, Highlighter, Pencil, Pin, Redo2, Save, Type, Undo2, X } f
 import { source } from "../data/source";
 
 /**
- * 截图覆盖层（F1 / Alt+F1）—— **按 Snipaste 2.11.3 逐项复刻**。
+ * 截图覆盖层（F1）—— **按 Snipaste 2.11.3 逐项复刻**，但交付方式不同：
+ * 本软件**框完不自动交付**，复制 / 保存 / 贴图都必须由用户显式按键。
  *
  * 参照物是用 Snipaste 实机截图量出来的（2026-11-17，2560×1600 @125%）：
  * - 选区边框 1px `#2080f0`，8 颗蓝点把手（白圈）；
@@ -31,7 +32,6 @@ interface SnipBoot {
   y: number;
   w: number;
   h: number;
-  mode: string;
 }
 
 function bootData(): SnipBoot | null {
@@ -148,6 +148,19 @@ export function Snip() {
   const [arrowSolid, setArrowSolid] = useState(true);
   /** 选择工具选中的那条标注（下标；ops 一变就清掉） */
   const [selOp, setSelOp] = useState<number | null>(null);
+  /** 覆盖层底部那句一次性提示（Enter 不再交付之类，说完 2.6s 自己消失） */
+  const [hint, setHint] = useState("");
+  const hintTimer = useRef(0);
+  const say = useCallback((t: string) => {
+    setHint(t);
+    window.clearTimeout(hintTimer.current);
+    hintTimer.current = window.setTimeout(() => setHint(""), 2600);
+  }, []);
+  /** 选区最后一次变动的时刻：**刚框完/刚拖完 350ms 内不接交付**（防手势尾部误触） */
+  const rectBorn = useRef(0);
+  useEffect(() => {
+    if (rect) rectBorn.current = Date.now();
+  }, [rect]);
   const [ops, setOps] = useState<Op[]>([]);
   const [redo, setRedo] = useState<Op[]>([]);
   const [cursor, setCursor] = useState<P>({ x: -999, y: -999 });
@@ -480,7 +493,7 @@ export function Snip() {
   const down = (e: React.MouseEvent) => {
     if (e.button === 1) {
       e.preventDefault();
-      if (rectRef.current) void finish("peek");
+      if (rectRef.current) void finish("peek", "middle-click");
       return;
     }
     if (e.button !== 0) return;
@@ -698,13 +711,27 @@ export function Snip() {
     return c.toDataURL("image/png");
   };
 
-  const finish = async (action: Action) => {
+  /**
+   * 交付：把合成图交给后端。
+   *
+   * `from` 只用来写日志 —— 本软件出过两次「截图完成后自动复制」，查了半天才发现是
+   * **某个没说清的入口**（Alt+F1 / Enter / 双击）在偷偷调它。现在每个调用点都必须
+   * 报自己的名字，日志里 `snip finish action=copy from=ctrl+c` 一眼就能定位。
+   *
+   * 冷却：选区刚变过 350ms 内不接（框选手势尾巴上松开鼠标、拖动结束那一帧都可能
+   * 顺带触发一次点击，谁也不想"刚框完就没了"）。
+   */
+  const finish = async (action: Action, from = "btn") => {
     if (busy) return;
+    if (Date.now() - rectBorn.current < 350) {
+      say("选区刚调整过，松手后再按一次");
+      return;
+    }
     setBusy(true);
     setErr("");
     try {
       const png = await compose();
-      await source.snipFinish(png, action);
+      await source.snipFinish(png, action, from);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -765,12 +792,12 @@ export function Snip() {
       }
       if (mod && low === "c") {
         e.preventDefault();
-        void finish("copy");
+        void finish("copy", "ctrl+c");
         return;
       }
       if (mod && low === "s") {
         e.preventDefault();
-        void finish("save");
+        void finish("save", "ctrl+s");
         return;
       }
       if (mod && low === "a") {
@@ -787,12 +814,11 @@ export function Snip() {
           submitText();
           return;
         }
-        /* **Enter = 保存到截图库**（0.1.19 改）。
-           原来照 Snipaste 设成"复制并退出"，后果是用户觉得按 Enter 是"完成"，
-           结果剪贴板被静默换掉（owner 2026-11-18：「截图完成后老是自动复制」）。
-           本软件的 F1 本来就是"落盘进素材库"这条线，所以完成 = 保存才自洽；
-           要复制请按 Ctrl+C 或点「复制到剪贴板」。 */
-        void finish("save");
+        /* **Enter 什么都不做**（0.1.20 改，最终定案）。
+           历史：0.10.0～0.1.18 是「复制并退出」（照 Snipaste），0.1.19 改成「保存并退出」。
+           但 owner 反复报的「框完就复制、没法加线条文字」，根因是**框选完下意识按 Enter**
+           —— 只要 Enter 还会关窗，他就永远进不到标注那一步。所以 Enter 不再交付任何东西。 */
+        say("Enter 不再结束截图 · 框完直接画标注 · Ctrl+S 保存 / Ctrl+C 复制");
         return;
       }
       if (!mod && (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown")) {
@@ -1112,9 +1138,9 @@ export function Snip() {
           />
           <span className="snip-sep" />
           <BarBtn label="取消" keyHint="Esc" danger onPick={() => void source.snipCancel()} icon={<X size={15} strokeWidth={1.6} />} />
-          <BarBtn label="贴图" keyHint="中键" onPick={() => void finish("peek")} icon={<Pin size={15} strokeWidth={1.5} />} />
-          <BarBtn label="保存到截图库" keyHint="Enter / Ctrl+S" onPick={() => void finish("save")} icon={<Save size={15} strokeWidth={1.5} />} />
-          <BarBtn label="复制到剪贴板" keyHint="Ctrl+C" onPick={() => void finish("copy")} icon={<Copy size={15} strokeWidth={1.5} />} />
+          <BarBtn label="贴图" keyHint="中键" onPick={() => void finish("peek", "btn")} icon={<Pin size={15} strokeWidth={1.5} />} />
+          <BarBtn label="保存到截图库" keyHint="Ctrl+S" onPick={() => void finish("save", "btn")} icon={<Save size={15} strokeWidth={1.5} />} />
+          <BarBtn label="复制到剪贴板" keyHint="Ctrl+C" onPick={() => void finish("copy", "btn")} icon={<Copy size={15} strokeWidth={1.5} />} />
         </div>
       )}
 
@@ -1244,7 +1270,7 @@ export function Snip() {
           <span className="keys">
             <K>Enter</K>
           </span>
-          <span>保存到截图库（不复制）</span>
+          <span>不结束截图（框完直接画标注）</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
@@ -1284,6 +1310,7 @@ export function Snip() {
       )}
 
       {tip && <div className="snip-toast">{tip}</div>}
+      {hint && <div className="snip-hint">{hint}</div>}
       {err && <div className="snip-err">{err}</div>}
       {busy && <div className="snip-toast">处理中…</div>}
     </div>

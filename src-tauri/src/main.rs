@@ -3485,7 +3485,7 @@ fn set_window_alpha(_win: &tauri::WebviewWindow, _alpha: u8) -> Result<(), Strin
     Ok(())
 }
 
-async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
+async fn snip_begin(app: AppHandle) -> Result<(), String> {
     /* 新会话：让上一次迟到的收尾线程（`am_snip_ready` 里那条）失效 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
     /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
@@ -3582,7 +3582,6 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
         "avg": avg,
         "scale": scale,
         "x": vx, "y": vy, "w": vw, "h": vh,
-        "mode": mode,
     });
     let script = format!("window.__AM_SNIP__ = {boot};");
     let win = tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
@@ -3896,7 +3895,19 @@ async fn am_snip_finish(
     app: AppHandle,
     png: String,
     action: String,
+    from: Option<String>,
 ) -> Result<Option<String>, String> {
+    /* 一行审计：谁触发的交付。这个软件出过两次「截完自动复制」，两次都是靠回看
+       某一个入口才定位到的 —— 所以每个交付都记，别只在 copy 记。 */
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!(
+                "snip finish action={action} from={}",
+                from.as_deref().unwrap_or("?")
+            ),
+        );
+    }
     let bytes = png_from_b64(&png)?;
     /* 这条会话到此结束：正在淡入的收尾线程不许再动窗口 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
@@ -4110,9 +4121,11 @@ async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 开一次截图。**没有 mode**：截图界面永远是同一个，交付（复制 / 保存 / 贴图）
+/// 只能由用户在界面里显式触发 —— 见 `am_snip_finish` 的注释。
 #[tauri::command]
-async fn am_snip_start(app: AppHandle, mode: Option<String>) -> Result<(), String> {
-    snip_begin(app, mode.as_deref().unwrap_or("save")).await
+async fn am_snip_start(app: AppHandle) -> Result<(), String> {
+    snip_begin(app).await
 }
 
 /* ---------------- 系统级快捷键（F1 / F3 / Alt+F1） ---------------- */
@@ -4143,8 +4156,7 @@ fn dispatch_hotkey(app: &AppHandle, accel: &str) {
     // **必须 spawn**：快捷键回调在主线程上，而开窗口 / 弹对话框都要回主线程，直接做就是自死锁
     tauri::async_runtime::spawn(async move {
         let r = match action.as_str() {
-            "snip" => snip_begin(app, "save").await,
-            "snip_copy" => snip_begin(app, "copy").await,
+            "snip" => snip_begin(app).await,
             "clip_peek" => clip_peek_begin(app).await,
             _ => Ok(()),
         };
@@ -4340,7 +4352,7 @@ fn main() {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(4000));
                     tauri::async_runtime::spawn(async move {
-                        let _ = snip_begin(h, "save").await;
+                        let _ = snip_begin(h).await;
                     });
                 });
             }

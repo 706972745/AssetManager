@@ -287,7 +287,7 @@ export function Peek() {
       label: "截图",
       icon: "image",
       shortcut: "F1",
-      action: () => void source.snipStart("save").catch(() => {}),
+      action: () => void source.snipStart().catch(() => {}),
     },
     { kind: "separator" },
     {

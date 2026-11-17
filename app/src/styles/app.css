@@ -4240,6 +4240,24 @@ body.snip-body #root {
   color: #1668c8;
 }
 
+/* 覆盖层底部的一次性提示（Enter 不交付之类）：说完自己消失，不挡操作 */
+.snip-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(20, 20, 22, 0.86);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 40;
+}
+
 /* 选中的标注：一圈蓝色虚线（和选区实线区分开，一眼能看出"选中的是这一条"） */
 .snip-opsel {
   position: absolute;

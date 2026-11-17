@@ -248,6 +248,8 @@ mod tests {
             kind,
             size,
             mtime: 0,
+            /* 自动标签只看文件事实，不看入库时间 —— 测试里给 0（= 老数据"未知"） */
+            added_at: 0,
             width: w,
             height: h,
             thumb_key: None,

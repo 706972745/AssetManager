@@ -12,6 +12,8 @@ src-tauri/gen/
 *.log
 _tmp/
 probes/
+# 卸载重装前的数据备份（本地用，别进库）
+_backup-*/
 .shots/
 *.tmp
 # 自测截图（tools/e2e_*.py 生成的 _board1.png / _snip*.png 之类）
