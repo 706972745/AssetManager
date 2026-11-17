@@ -34,6 +34,26 @@ function saveOpenPaths(paths: Set<string>) {
   }
 }
 
+/** 当前"打开着的"那个素材库（存路径，重建索引后 id 会变）。
+ *  FontManager 的字体库是同一个模型：**多个库只开一个**，其余在列表里等着切换。 */
+const ACTIVE_LIB_KEY = "am.lib.active.v1";
+
+function loadActiveLib(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_LIB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveLib(path: string) {
+  try {
+    localStorage.setItem(ACTIVE_LIB_KEY, path);
+  } catch {
+    /* 存不进去就本次会话有效 */
+  }
+}
+
 interface Props {
   source: Source;
   selected: number | null;
@@ -68,6 +88,8 @@ export function Tree({
 }: Props) {
   const [roots, setRoots] = useState<DirNode[]>([]);
   const [kids, setKids] = useState<Map<number, DirNode[]>>(new Map());
+  /* 一次只开一个库：activePath 指的那个展开目录树，其余只留一行「切换」 */
+  const [activePath, setActivePath] = useState<string | null>(loadActiveLib);
   const [open, setOpen] = useState<Set<number>>(new Set());
   /* 展开的目录路径集合（持久化用）；id ↔ path 的映射靠 nodesRef 维护 */
   const openPaths = useRef<Set<string> | null>(loadOpenPaths());
@@ -184,6 +206,69 @@ export function Tree({
     onSelect(n);
   };
 
+  /* 当前库：存的路径还在就认它；被移除/换盘了就退回第一个库 */
+  const activeRoot = roots.find((r) => r.path === activePath) ?? roots[0] ?? null;
+
+  /** 从某个节点往上找到它所属的库根（nodesRef 只存已加载的节点，够用） */
+  const rootOf = (id: number): DirNode | null => {
+    let cur: DirNode | undefined = nodesRef.current.get(id);
+    const seen = new Set<number>();
+    while (cur && cur.parentId !== null && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      cur = nodesRef.current.get(cur.parentId);
+    }
+    return cur ?? null;
+  };
+
+  /* 选中项落在别的库里（右键移除库、外部跳转、快照激活）→ 那个库自动变成"开着的" */
+  useEffect(() => {
+    if (selected == null) return;
+    const r = rootOf(selected);
+    if (r && r.path !== activeRoot?.path) {
+      setActivePath(r.path);
+      saveActiveLib(r.path);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, roots]);
+
+  /** 切库 = 打开它（展开 + 载入子目录）并把列表切到它的库根 */
+  const switchLib = (r: DirNode) => {
+    setActivePath(r.path);
+    saveActiveLib(r.path);
+    void (async () => {
+      if (!open.has(r.id)) {
+        await load(r.id);
+        const next = new Set(open).add(r.id);
+        setOpen(next);
+        const paths = openSet();
+        paths.add(r.path);
+        saveOpenPaths(paths);
+      }
+      onSelect(r);
+    })();
+  };
+
+  /** 非当前库：一行「图标 + 名字 + 数量 + 切换」，点整行就切过去 */
+  const libRow = (r: DirNode) => (
+    <div
+      key={r.id}
+      className="tree-row lib-row"
+      data-dir-path={r.path}
+      data-dir-name={r.name}
+      data-dir-root="1"
+      style={{ paddingLeft: ROW_PAD }}
+      onClick={() => switchLib(r)}
+      title={`${r.path}\n点一下切换到这个素材库`}
+    >
+      <span className="nav-icon lib-off">
+        <Icon name="folder" size={15} stroke={1.5} />
+      </span>
+      <span className="tree-name lib-off">{r.name}</span>
+      <span className="tree-count">{r.assetCnt > 0 ? r.assetCnt : 0}</span>
+      <span className="lib-switch">切换</span>
+    </div>
+  );
+
   const row = (n: DirNode, depth: number) => {
     const isOpen = open.has(n.id);
     const list = kids.get(n.id);
@@ -290,7 +375,8 @@ export function Tree({
               />
             </div>
           )}
-          {sectionOpen && roots.map((r) => row(r, 0))}
+          {sectionOpen &&
+            roots.map((r) => (r.path === activeRoot?.path ? row(r, 0) : libRow(r)))}
         </div>
 
         {/* 快照段 = 本滚动区里的第二个 section，紧跟「素材库」这一段（照 FontManager：
@@ -320,11 +406,11 @@ export function Tree({
           </span>
           <span className="tree-name">回收站</span>
         </div>
-        <div className="tree-row" onClick={onAbout} title="关于 AssetManager">
+        <div className="tree-row" onClick={onAbout} title="关于">
           <span className="nav-icon">
             <Icon name="info" size={15} stroke={1.5} />
           </span>
-          <span className="tree-name">关于 AssetManager</span>
+          <span className="tree-name">关于</span>
         </div>
         <div className="tree-row" onClick={onShortcuts} title="快捷键一览">
           <span className="nav-icon">

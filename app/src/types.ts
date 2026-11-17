@@ -526,6 +526,11 @@ export interface Source {
   relaunch(): Promise<void>;
   /** 打开系统回收站 */
   openRecycle(): Promise<void>;
+  /* 应用内回收站（0.1.6）：删除=搬进 <data>/trash，下面四个管列表与清账 */
+  trashList(): Promise<TrashEntry[]>;
+  trashRestore(ids: string[]): Promise<number>;
+  trashPurge(ids: string[]): Promise<number>;
+  trashEmpty(): Promise<number>;
 }
 
 /** 用户偏好：所有改动即时生效（与 FontManager 同一纪律，没有「保存」按钮），落在 localStorage */
@@ -634,4 +639,14 @@ export function fmtTime(ts: number): string {
   const d = new Date(ts * 1000);
   const p = (x: number) => String(x).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 回收站条目（后端 core::trash::TrashEntry，serde camelCase） */
+export interface TrashEntry {
+  id: string;
+  originalPath: string;
+  trashedPath: string;
+  name: string;
+  size: number;
+  deletedAt: number;
 }

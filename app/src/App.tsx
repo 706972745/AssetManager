@@ -21,10 +21,13 @@ import {
   type ScanProgress,
   type ScanResult,
   type SortKey,
+  type TrashEntry,
 } from "./types";
 import { AssetView, THUMB_PX, type ViewMode } from "./components/Views";
 import { Detail, TitleBar, TopBar } from "./components/Chrome";
 import { HoverHintHost } from "./components/HoverHint";
+import { TrashView } from "./components/TrashView";
+import { AboutView } from "./components/AboutView";
 import { Settings, type SettingsKey } from "./components/Settings";
 import { Shortcuts } from "./components/Shortcuts";
 import { Tools, type ToolTab } from "./components/Tools";
@@ -88,6 +91,9 @@ export default function App() {
   /** 正在改名的素材 id（owner 2026-11-17：改名**只**在详情顶栏就地做，不弹窗）。
    *  右键菜单 / 操作区的「重命名」都只是把它设上，然后聚焦到顶栏那个输入框。 */
   const [renameId, setRenameId] = useState<number | null>(null);
+  /** 主内容区是哪个页面：素材列表 / 回收站 / 关于（侧栏底栏切换） */
+  const [page, setPage] = useState<"assets" | "trash" | "about">("assets");
+  const [trash, setTrash] = useState<TrashEntry[]>([]);
   /** 多选集合（T11）：详情面板盯 `selected`，批量操作作用于这个集合 */
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -1094,7 +1100,7 @@ export default function App() {
               {paths.length > 1 ? `${paths.length} 项，` : ""}共 {fmtNum(st.files)} 个文件（
               {fmtSize(st.bytes)}）。
               <br />
-              删除＝原文件进系统回收站，可以从回收站还原。
+              删除＝移进左侧「回收站」，随时可以还原；清空时才彻底删掉。
               {many && <><br />数量较多，会分批执行，中途可以看进度。</>}
             </p>
           ),
@@ -1121,7 +1127,7 @@ export default function App() {
           }
           setBatch(null);
         }
-        toast(`已移到回收站 ${removed} 项`, false, "原文件已进回收站，可还原");
+        toast(`已移到回收站 ${removed} 项`, false, "在左侧「回收站」里可以还原");
         setSelected(null);
         setSelectedIds(new Set());
         setRefreshKey((k) => k + 1);
@@ -1361,6 +1367,59 @@ export default function App() {
       await source.rename(a.path, name);
       toast("已重命名原文件");
       setRefreshKey((k) => k + 1);
+    } catch (e) {
+      toast(String(e), true);
+    }
+  };
+
+  /* 回收站：进页面时拉一次；还原/彻底删除/清空后自己刷新一遍 */
+  const loadTrash = useCallback(async () => {
+    try {
+      setTrash(await source.trashList());
+    } catch (e) {
+      toast(String(e), true);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (page === "trash") void loadTrash();
+  }, [page, refreshKey, loadTrash]);
+
+  const restoreTrash = async (ids: string[]) => {
+    try {
+      const n = await source.trashRestore(ids);
+      toast(`已还原 ${n} 项`);
+      await loadTrash();
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      toast(String(e), true);
+    }
+  };
+
+  const purgeTrash = async (ids: string[]) => {
+    try {
+      const n = await source.trashPurge(ids);
+      toast(`已彻底删除 ${n} 项`);
+      await loadTrash();
+    } catch (e) {
+      toast(String(e), true);
+    }
+  };
+
+  const emptyTrash = async () => {
+    const ok = await dlg.ask({
+      title: `清空回收站（${trash.length} 项）？`,
+      body: <p>回收站里的文件会被彻底删除（先进系统回收站，还能再捞一次）。</p>,
+      buttons: [
+        { label: "取消", value: null as unknown as string },
+        { label: "清空", value: "ok", tone: "danger" },
+      ],
+    });
+    if (ok !== "ok") return;
+    try {
+      const n = await source.trashEmpty();
+      toast(`回收站已清空（${n} 项）`);
+      await loadTrash();
     } catch (e) {
       toast(String(e), true);
     }
@@ -2041,18 +2100,21 @@ export default function App() {
             // 点目录 = 离开标签视图，否则两个筛选叠在一起会莫名其妙 0 结果
             setDir(n);
             setTagFilter(null);
+            setPage("assets");
           }}
           onDropTo={(n) => {
             if (selPaths.length) void doMove(selPaths, n.path);
           }}
           onAddPath={(p) => void onAddPath(p)}
           onOpenLibrary={onOpenLibrary}
-          onTrash={() =>
-            void source
-              .openRecycle()
-              .catch((e) => toast(String(e), true))
-          }
-          onAbout={() => toast("AssetManager 0.7.0 开发版 · 索引式素材库，不搬动你的原始文件")}
+          onTrash={() => {
+            setSelectedIds(new Set());
+            setPage("trash");
+          }}
+          onAbout={() => {
+            setSelectedIds(new Set());
+            setPage("about");
+          }}
           onShortcuts={() => setShortcutsOpen(true)}
           refreshKey={refreshKey}
           snapshotDock={
@@ -2141,6 +2203,26 @@ export default function App() {
           )}
 
           <div className={`content ${prefs.showTileName ? "" : "no-tile-name"}`}>
+            {/* 回收站 / 关于 是整页替换：铺在内容区上层，切回来时列表状态还在（不重挂载） */}
+            {page !== "assets" && (
+              <div className="page-view">
+                {page === "trash" ? (
+                  <TrashView
+                    items={trash}
+                    onRestore={(ids) => void restoreTrash(ids)}
+                    onPurge={(ids) => void purgeTrash(ids)}
+                    onEmpty={() => void emptyTrash()}
+                    onClose={() => setPage("assets")}
+                  />
+                ) : (
+                  <AboutView
+                    onOpenUrl={(u) =>
+                      void source.openUrl(u).catch((e) => toast(String(e), true))
+                    }
+                  />
+                )}
+              </div>
+            )}
             <AssetView
               items={items}
               view={view}

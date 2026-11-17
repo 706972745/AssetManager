@@ -26,6 +26,7 @@ import type {
   RenameItem,
   RenameResult,
   AutoRule,
+  TrashEntry,
 } from "../types";
 import { mockSource } from "./mock";
 
@@ -123,6 +124,11 @@ export const tauriSource: Source = {
     }),
   relaunch: () => invoke!<void>("am_relaunch"),
   openRecycle: () => invoke!<void>("am_open_recycle"),
+  /* 应用内回收站（0.1.6） */
+  trashList: () => invoke!<TrashEntry[]>("am_trash_list"),
+  trashRestore: (ids: string[]) => invoke!<number>("am_trash_restore", { ids }),
+  trashPurge: (ids: string[]) => invoke!<number>("am_trash_purge", { ids }),
+  trashEmpty: () => invoke!<number>("am_trash_empty"),
   assetsByIds: (ids) => invoke!<Asset[]>("am_assets_by_ids", { ids }),
   peekOpen: (ids, index, longEdge) => invoke!<void>("am_peek_open", { ids, index, longEdge }),
   peekCopyFile: (paths) => invoke!<void>("am_peek_copy_file", { paths }),

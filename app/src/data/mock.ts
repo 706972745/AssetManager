@@ -279,6 +279,18 @@ export const mockSource: Source = {
   async openRecycle() {
     throw new Error("浏览器预览模式不支持打开回收站");
   },
+  async trashList() {
+    return [];
+  },
+  async trashRestore() {
+    return 0;
+  },
+  async trashPurge() {
+    return 0;
+  },
+  async trashEmpty() {
+    return 0;
+  },
   async reveal() {
     throw new Error("浏览器预览模式不支持定位文件");
   },

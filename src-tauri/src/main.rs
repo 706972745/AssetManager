@@ -991,24 +991,18 @@ fn am_move_start(
 fn am_delete(paths: Vec<String>, state: State<AppState>) -> Result<usize, String> {
     let mut app = lock(&state);
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    let n = list.len();
-    {
-        // 一批文件可能跨库（虽然罕见）：取第一个文件的库写 ops 日志就够，
-        // 索引刷新走 refresh_dirs（按目录路径，不受库边界影响）
-        if let Some(first) = list.first() {
-            let ops = fsops::FsOps::new(app.conn_for_path(&first.to_string_lossy())?);
-            ops.delete(&list)?;
-        }
-    }
+    /* 删除 = **搬进应用内回收站**（owner 2026-11-17，照 FontManager）：
+       文件挪到 <数据目录>/trash/ + `.amtrash` 账本，回收站页面能还原 / 彻底删除 / 清空。 */
+    let entries = am_core::trash::put(&app.data_dir, &list)?;
     let dirty: HashSet<PathBuf> = list
         .iter()
         .filter_map(|p| p.parent().map(|x| x.to_path_buf()))
         .collect();
     refresh_dirs(&mut app, &dirty);
-    Ok(n)
+    Ok(entries.len())
 }
 
-/* ---------------- 应用内回收站（0.1.5） ---------------- */
+/* ---------------- 应用内回收站（0.1.6） ---------------- */
 
 #[tauri::command]
 fn am_trash_list(state: State<AppState>) -> Vec<am_core::trash::TrashEntry> {
