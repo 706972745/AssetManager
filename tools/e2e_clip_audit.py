@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""截图四种收尾方式的**剪贴板审计**（owner 报「截图完成后老是自动复制」）。
+"""截图四种收尾方式的**交付语义审计**（owner 反复报的「截图完成后老是自动复制」）。
 
-目的：把「保存 / 中键贴图 / Enter / 双击选区」逐条量一遍，看**哪一种**会写剪贴板。
-每一条都先往剪贴板写一个标记文本，做完再看剪贴板是否被换掉。
+0.1.20 口径（规范 §5.1 G3 / 测试文档 §8.2）：
+  - 保存 Ctrl+S / 中键贴图：落盘 / 贴图，**都不许写剪贴板**；
+  - Enter / 双击选区：**什么都不做** —— 既不许关覆盖层，也不许写剪贴板。
+    这两条是 owner 三次报「框完就复制、没法加标注」的真凶（见 WORKLOG §32）。
+
+仅检查剪贴板是不够的：Enter/双击若错误地"关窗但没复制"，剪贴板检查照样通过，
+所以这里同时断言**覆盖层是否还在** —— 这是本脚本 0.1.20 修的那处"假绿"。
 
 用法：python tools/e2e_clip_audit.py
-输出：终端一行一条结论；退出码 0 = 只有预期的那几种写了剪贴板。
+输出：终端一行一条结论；退出码 0 = 四条全部符合 0.1.20 语义。
 """
 
 import ctypes
@@ -67,8 +72,10 @@ def run_case(hwnd, name: str, do_action) -> dict:
     time.sleep(3.0)
     text, img = snapshot_clip()
     changed = text != f"MARK-{name}" or img
+    # 0.1.20：Enter/双击必须"什么都不做"，所以要看覆盖层是否还在（关窗即交付/取消，都是错的）
+    snip_open = E.find("截图") != 0
     close_snip_if_open()
-    return {"case": name, "text": text, "image": img, "copied": changed}
+    return {"case": name, "text": text, "image": img, "copied": changed, "snip_open": snip_open}
 
 
 def act_save_ctrl_s(x0, y0, x1, y1):
@@ -101,7 +108,7 @@ def act_double_click(x0, y0, x1, y1):
 
 
 def main():
-    # 先把所有实例关掉，保证测的就是 0.1.18 这一个
+    # 先把所有实例关掉，保证测的就是当前安装版这一个
     subprocess.run(["taskkill", "/IM", "assetmanager.exe", "/F"], capture_output=True)
     time.sleep(1.5)
     hwnd = E.ensure_app()
@@ -121,11 +128,26 @@ def main():
             print(f"{name:10s}  ! {r['error']}")
         else:
             tag = "写了剪贴板" if r["copied"] else "没动剪贴板"
-            print(f"{name:10s}  {tag}   文本={r['text']!r} 位图={r['image']}")
+            win = "覆盖层在" if r["snip_open"] else "覆盖层已关"
+            print(f"{name:10s}  {tag}   {win}   文本={r['text']!r} 位图={r['image']}")
 
-    bad = [r["case"] for r in rows if r.get("copied") and r["case"] in ("保存CtrlS", "中键贴图")]
-    print("结论：" + ("保存/贴图都不再动剪贴板" if not bad else f"仍在复制：{bad}"))
-    return 0 if not bad else 1
+    # 0.1.20 判据：四条全都不许写剪贴板；Enter/双击还必须保持覆盖层打开
+    bad = []
+    for r in rows:
+        if "error" in r:
+            bad.append(f"{r['case']}(没跑起来)")
+            continue
+        if r.get("copied"):
+            bad.append(f"{r['case']}写了剪贴板")
+        if r["case"] in ("Enter", "双击选区") and not r["snip_open"]:
+            bad.append(f"{r['case']}关了覆盖层")
+        if r["case"] in ("保存CtrlS", "中键贴图") and r["snip_open"]:
+            bad.append(f"{r['case']}没关覆盖层")
+    if bad:
+        print("结论：不符合 0.1.20 语义 → " + " / ".join(bad))
+        return 1
+    print("结论：四条全部符合 0.1.20（保存/贴图不写剪贴板；Enter/双击什么都不做）")
+    return 0
 
 
 if __name__ == "__main__":
