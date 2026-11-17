@@ -292,9 +292,13 @@ export function Tree({
           )}
           {sectionOpen && roots.map((r) => row(r, 0))}
         </div>
-    </div>
 
-      {snapshotDock}
+        {/* 快照段 = 本滚动区里的第二个 section，紧跟「素材库」这一段（照 FontManager：
+            `.sidebar-scroll` 里放 browse + snapshots 两段）。
+            **不能**放到滚动区外面：`.tree-scroll` 是 flex:1，放到外面会被推到侧栏底部，
+            看着就像「标签」上方多出来的一块底栏（owner 2026-11-17 指出过一次）。 */}
+        {snapshotDock}
+      </div>
 
       {tagDock}
 

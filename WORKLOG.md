@@ -977,3 +977,22 @@ AM_AUTO_SNIP=1 ./target/debug/assetmanager.exe   # 4 秒后自动开一次截图
 
 **验证**：`vite build` 通过；用 dev server + mock 数据（临时）headless 截图确认侧栏顺序与分隔，
 截完已把 mock 还原成空列表（浏览器预览模式本来就没有快照）。打包安装见 §18.7 同一套流程。
+
+---
+
+## §20 · 0.12.2 快照段挪进滚动区，紧跟「素材库」（2026-11-17）
+
+> owner 截图指出：快照段飘在标签上方，应该「在素材库下面」。
+
+上一版把 `{snapshotDock}` 放在 `.tree-scroll` **外面**（`tree` 的直接子节点）。因为 `.tree-scroll` 是
+`flex: 1`，它会把后面的兄弟节点一直推到侧栏底部 —— 于是快照不是「素材库下面」，而是「标签上面」，
+中间还挂着一大片空白。
+
+改法（照 FontManager `.sidebar-scroll` 里 `browse` + `snapshots` 两段的组织方式）：
+
+- `{snapshotDock}` 移进 `.tree-scroll` **内部**、`tree-section`（素材库）之后；
+- `.snap-section` 去掉 `border-top`：与上一段的分隔只靠标题的 14px 上留白（与 `.sidebar-section` 一致）；
+- `.snap-list` 去掉 `max-height / overflow-y`：外层 `.tree-scroll` 已经在滚，再套一层会变成「滚中滚」
+  （在快照区里滚半天，目录树没动）。
+
+结果顺序：**素材库 →（目录树）→ 快照 → 标签 → 底栏**。快照段跟着目录树一起滚，不再被推到标签上。

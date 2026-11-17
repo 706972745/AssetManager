@@ -4027,9 +4027,8 @@ body.snip-body #root {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  /* 与上方目录树之间留一道发丝线：让"这是新的一段"看得出来，而不是树多了一行 */
-  border-top: 1px solid var(--hairline);
-  /* 与下方「标签」dock 之间再留一点气口：两段挨着但**不是一块**（owner 2026-11-17） */
+  /* 在 `.tree-scroll` 里紧跟「素材库」一段（owner 2026-11-17：快照在素材库下面、不在标签上面）。
+     与上一段的分隔只靠标题的 14px 上留白 —— 与 FontManager `.sidebar-section` 一致，不画线。 */
   padding-bottom: 4px;
 }
 .snap-heading {
@@ -4081,9 +4080,8 @@ body.snip-body #root {
   border-color: var(--ui-line);
 }
 .snap-list {
-  max-height: 168px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 不设 max-height：外层 `.tree-scroll` 已经在滚，这里再套一层滚动区会变成"滚中滚"，
+     用户在快照区里滚半天其实没动目录树。 */
   padding-bottom: 4px;
 }
 .snap-empty {
