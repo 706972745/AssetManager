@@ -67,7 +67,7 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
 | 数据 | 用户素材库和 FontManager 的字体库没有任何关系，不共用目录、不共用缓存 |
 | 仓库 | **https://github.com/706972745/AssetManager**（public，默认分支 `main`）。独立仓，与 FontManager 无 CI 关系 |
 | 许可 | **GPL-3.0**（`LICENSE` 为 GNU 官方原文；Cargo/package.json 标 `GPL-3.0-only`） |
-| 发版 | 独立版本号（当前 **0.1.1 正式版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`，挂在本仓 Release（tag `vX.Y.Z`）。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
+| 发版 | 独立版本号（当前 **0.1.1 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`，挂在本仓 Release（tag `vX.Y.Z`）。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
 | 仓库 | **将来是 GitHub 上的另一个仓库**（独立 remote / 独立 tag / 独立 CI）。**令牌共用**（同一账户），但令牌只做认证，绝不写进任何会提交的文件，也绝不往 FontManager 的 remote 推 |
 | 唯一共用 | 便携工具链 `../FontManager/Fonts工程文件/env.sh`（Rust/MSVC/SDK，宿主目录在 FontManager 下，见上两级 `工作区总览与规则.md` §2），以及「界面视觉语言」这一层设计审美 |
 
