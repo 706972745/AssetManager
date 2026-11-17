@@ -166,6 +166,11 @@ export const mockSource: Source = {
     return tree.nodes.filter((n) => n.parentId === null).length;
   },
 
+  /* 浏览器预览里没有"软件自己的截图目录"，内置库为空 */
+  async builtinRoots() {
+    return [];
+  },
+
   async removeLib() {
     return 0;
   },

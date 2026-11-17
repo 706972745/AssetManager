@@ -1,12 +1,23 @@
 import { useRef, useEffect, useState, type ReactNode } from "react";
+import { motion } from "motion/react";
 import type { DirNode, Source } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
 
 /** 侧栏行：图标 15 + 文字，与 FontManager .nav-row 同一套内距（行内 11 起、文字 35 起）。 */
 const ROW_PAD = 11;
 const DEPTH_STEP = 14;
-/** 最多几个素材库（与 App 的 MAX_LIBS 同值；标题上的 x/3 用它） */
+/** 最多几个素材库（与 App 的 MAX_LIBS 同值；标题上的 x/3 用它）。
+ *  **只算用户自己的库** —— 内置截图库不占名额（owner 2026-11-17）。 */
 const MAX_LIBS = 3;
+
+/** 切库时"选中的那个挪到最上面"的动效：略带回弹的弹簧，跟 FontManager 同一手感。 */
+const LIB_SPRING = { type: "spring", stiffness: 460, damping: 36, mass: 0.7 } as const;
+
+/** 路径比较口径（与后端 same_path 一致）：斜杠统一、去尾分隔符、小写。 */
+function samePath(a: string, b: string) {
+  const f = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return f(a) === f(b);
+}
 
 /** 展开状态持久化的 key（T14）。
  *  存**路径**而不是目录 id：重建索引后 id 会变，存 id 就会把不相干的目录
@@ -105,6 +116,17 @@ export function Tree({
   const [adding, setAdding] = useState(false);
   const [addPath, setAddPath] = useState("");
   const closedRef = useRef(false);
+  /* 内置库（软件自己的截图目录）：不占名额、不能移除、永远在列表里 */
+  const [builtin, setBuiltin] = useState<string[]>([]);
+
+  useEffect(() => {
+    void source
+      .builtinRoots()
+      .then(setBuiltin)
+      .catch(() => setBuiltin([]));
+  }, [source]);
+
+  const isBuiltin = (p: string) => builtin.some((b) => samePath(b, p));
 
   const openAdd = () => {
     closedRef.current = false;
@@ -207,7 +229,13 @@ export function Tree({
   };
 
   /* 当前库：存的路径还在就认它；被移除/换盘了就退回第一个库 */
-  const activeRoot = roots.find((r) => r.path === activePath) ?? roots[0] ?? null;
+  /* **截图（内置）单独一段**（owner 2026-11-17：和快照一样，不是素材库的一行）：
+     它不参与"一次只开一个"的切库，也不占名额，所以先把两类库拆开。 */
+  const shotRoot = roots.find((r) => isBuiltin(r.path)) ?? null;
+  const userRoots = roots.filter((r) => !isBuiltin(r.path));
+  const [shotOpen, setShotOpen] = useState(true);
+
+  const activeRoot = userRoots.find((r) => r.path === activePath) ?? userRoots[0] ?? null;
 
   /** 从某个节点往上找到它所属的库根（nodesRef 只存已加载的节点，够用） */
   const rootOf = (id: number): DirNode | null => {
@@ -224,7 +252,8 @@ export function Tree({
   useEffect(() => {
     if (selected == null) return;
     const r = rootOf(selected);
-    if (r && r.path !== activeRoot?.path) {
+    /* 内置截图库不是"打开着的素材库"，别把 activePath 改到它头上 */
+    if (r && !isBuiltin(r.path) && r.path !== activeRoot?.path) {
       setActivePath(r.path);
       saveActiveLib(r.path);
     }
@@ -248,79 +277,143 @@ export function Tree({
     })();
   };
 
-  /** 非当前库：一行「图标 + 名字 + 数量 + 切换」，点整行就切过去 */
-  const libRow = (r: DirNode) => (
-    <div
-      key={r.id}
-      className="tree-row lib-row"
-      data-dir-path={r.path}
-      data-dir-name={r.name}
-      data-dir-root="1"
-      style={{ paddingLeft: ROW_PAD }}
-      onClick={() => switchLib(r)}
-      title={`${r.path}\n点一下切换到这个素材库`}
-    >
-      <span className="nav-icon lib-off">
-        <Icon name="folder" size={15} stroke={1.5} />
+  /** 内置库小标：一眼看出"这行不是你加的" */
+  const builtinChip = (bi: boolean, active: boolean) =>
+    bi ? (
+      <span
+        className={`lib-builtin${active ? " on" : ""}`}
+        title="软件自己的截图目录：不占素材库名额，也不能移除"
+      >
+        内置
       </span>
-      <span className="tree-name lib-off">{r.name}</span>
-      <span className="tree-count">{r.assetCnt > 0 ? r.assetCnt : 0}</span>
-      <span className="lib-switch">切换</span>
-    </div>
-  );
+    ) : null;
+
+  /** 非当前库：一行「图标 + 名字 + 数量 + 切换」，点整行就切过去 */
+  const libRow = (r: DirNode) => {
+    const bi = isBuiltin(r.path);
+    return (
+      <div
+        key={r.id}
+        className="tree-row lib-row"
+        data-dir-path={r.path}
+        data-dir-name={r.name}
+        data-dir-root="1"
+        /* 内置库：右键菜单靠它不给「从素材库移除」 */
+        data-dir-builtin={bi ? "1" : undefined}
+        style={{ paddingLeft: ROW_PAD }}
+        onClick={() => switchLib(r)}
+        title={`${r.path}\n点一下切换到这个素材库${
+          bi ? "\n（软件自己的截图目录，不占素材库名额）" : ""
+        }`}
+      >
+        <span className="nav-icon lib-off">
+          <Icon name="folder" size={15} stroke={1.5} />
+        </span>
+        {/* 内置库显示成「截图」：目录名 screenshots 是英文，用户看不出这是软件自己的 */}
+        <span className="tree-name lib-off">{bi ? "截图" : r.name}</span>
+        {builtinChip(bi, false)}
+        <span className="tree-count">{r.assetCnt > 0 ? r.assetCnt : 0}</span>
+        <span className="lib-switch">切换</span>
+      </div>
+    );
+  };
+
+  /** 一行目录（**只画自己这一行**；子目录由 row / libBlock 铺） */
+  const rowSelf = (n: DirNode, depth: number) => {
+    const isOpen = open.has(n.id);
+    const bi = n.parentId === null && isBuiltin(n.path);
+    return (
+      <div
+        className={`tree-row ${selected === n.id ? "sel" : ""} ${hover === n.id ? "drop-hover" : ""}`}
+        data-dir-path={n.path}
+        data-dir-name={n.name}
+        /* 库根标记：右键菜单靠它决定要不要给「从素材库移除」（子目录没有这一项） */
+        data-dir-root={n.parentId === null ? "1" : undefined}
+        data-dir-builtin={bi ? "1" : undefined}
+        style={{ paddingLeft: ROW_PAD + depth * DEPTH_STEP }}
+        onClick={() => selectNode(n)}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setHover(n.id);
+        }}
+        onDragLeave={() => setHover(null)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setHover(null);
+          // 只认「应用内拖动」这个自定义类型：从资源管理器拖进来的文件
+          // 不该把当前选中的素材搬走（那是两个完全不同的意图）
+          if (!e.dataTransfer.types.includes("application/x-am-assets")) return;
+          onDropTo(n);
+        }}
+        title={n.path}
+      >
+        {/* 箭头压在左内距里（绝对定位），这样图标/文字与参照物同一列 */}
+        <span
+          className={`tree-caret ${isOpen ? "open" : ""}`}
+          style={{
+            left: depth * DEPTH_STEP,
+            visibility: n.hasChildren ? "visible" : "hidden",
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (n.hasChildren) void toggle(n);
+          }}
+        >
+          <Icon name="chevron" size={10} stroke={2} />
+        </span>
+        <span className="nav-icon">
+          <Icon name="folder" size={15} stroke={1.5} />
+        </span>
+        <span className="tree-name">{bi ? "截图" : n.name}</span>
+        {builtinChip(bi, true)}
+        <span className="tree-count">{n.assetCnt > 0 ? n.assetCnt : 0}</span>
+      </div>
+    );
+  };
 
   const row = (n: DirNode, depth: number) => {
     const isOpen = open.has(n.id);
     const list = kids.get(n.id);
     return (
       <div key={n.id}>
-        <div
-          className={`tree-row ${selected === n.id ? "sel" : ""} ${hover === n.id ? "drop-hover" : ""}`}
-          data-dir-path={n.path}
-          data-dir-name={n.name}
-          /* 库根标记：右键菜单靠它决定要不要给「从素材库移除」（子目录没有这一项） */
-          data-dir-root={n.parentId === null ? "1" : undefined}
-          style={{ paddingLeft: ROW_PAD + depth * DEPTH_STEP }}
-          onClick={() => selectNode(n)}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setHover(n.id);
-          }}
-          onDragLeave={() => setHover(null)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setHover(null);
-            // 只认「应用内拖动」这个自定义类型：从资源管理器拖进来的文件
-            // 不该把当前选中的素材搬走（那是两个完全不同的意图）
-            if (!e.dataTransfer.types.includes("application/x-am-assets")) return;
-            onDropTo(n);
-          }}
-          title={n.path}
-        >
-          {/* 箭头压在左内距里（绝对定位），这样图标/文字与参照物同一列 */}
-          <span
-            className={`tree-caret ${isOpen ? "open" : ""}`}
-            style={{
-              left: depth * DEPTH_STEP,
-              visibility: n.hasChildren ? "visible" : "hidden",
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (n.hasChildren) void toggle(n);
-            }}
-          >
-            <Icon name="chevron" size={10} stroke={2} />
-          </span>
-          <span className="nav-icon">
-            <Icon name="folder" size={15} stroke={1.5} />
-          </span>
-          <span className="tree-name">{n.name}</span>
-          <span className="tree-count">{n.assetCnt > 0 ? n.assetCnt : 0}</span>
-        </div>
+        {rowSelf(n, depth)}
         {isOpen && list?.map((c) => row(c, depth + 1))}
       </div>
     );
   };
+
+  /** 一个库 = 一块（行 + 它展开的子树）。
+   *
+   * 为什么要按「块」包一层 `motion.div layout`：owner 2026-11-17 要求
+   * **切到哪个库，哪个库就挪到最上面，并且要有移动上去的动画**。
+   * 用 motion 的 layout 动画，顺序一变浏览器就做 FLIP 位移 ——
+   * 手写 transform 得自己测前后位置、还要跟着子树高度变化走，容易抖。 */
+  const libBlock = (r: DirNode) => {
+    const isActive = r.path === activeRoot?.path;
+    return (
+      <motion.div
+        key={r.path}
+        layout
+        transition={LIB_SPRING}
+        className="lib-block"
+        /* 子树高度变化（展开/收起）时不缩放文字，只做位移 */
+        style={{ position: "relative" }}
+      >
+        {isActive ? rowSelf(r, 0) : libRow(r)}
+        {isActive && open.has(r.id) && kids.get(r.id)?.map((c) => row(c, 1))}
+      </motion.div>
+    );
+  };
+
+  /* 顺序：**当前库永远第一**，其余按加入次序排队。切库时这一行会滑到顶上。 */
+  const orderedRoots = (() => {
+    const act = userRoots.find((r) => r.path === activeRoot?.path);
+    if (!act) return userRoots;
+    return [act, ...userRoots.filter((r) => r.id !== act.id)];
+  })();
+
+  /* 名额只数用户自己的库：内置截图库一直存在，算进去等于只剩 2 个位置 */
+  const userLibCount = userRoots.length;
 
   return (
     <aside className="tree">
@@ -335,9 +428,13 @@ export function Tree({
               <Icon name="chevron" size={10} stroke={2} className="rot90" />
             </span>
             <span className="grow">素材库</span>
-            {/* 多库上限（最多 3 个）写在标题上：用户不用点开菜单就知道还能加几个 */}
-            <span className="lib-quota mono" title={`已加入 ${roots.length} / ${MAX_LIBS} 个素材库`}>
-              {roots.length}/{MAX_LIBS}
+            {/* 多库上限（最多 3 个）写在标题上：用户不用点开菜单就知道还能加几个。
+                **内置截图库不计入** —— 否则三个自己的库只能挂两个。 */}
+            <span
+              className="lib-quota mono"
+              title={`已加入 ${userLibCount} / ${MAX_LIBS} 个素材库（软件自己的截图目录不计入）`}
+            >
+              {userLibCount}/{MAX_LIBS}
             </span>
             <button
               className="side-add"
@@ -375,9 +472,49 @@ export function Tree({
               />
             </div>
           )}
-          {sectionOpen &&
-            roots.map((r) => (r.path === activeRoot?.path ? row(r, 0) : libRow(r)))}
+          {sectionOpen && orderedRoots.map(libBlock)}
         </div>
+
+        {/* 截图（内置）：**单独一段**，和「快照」并列，不是素材库里的一行
+            （owner 2026-11-17 原话：「截图哪个单独一个，和快照一样」）。
+            它不占那 3 个名额、也不能移除 —— 混在素材库里就会被当成"用户第 3 个库"，
+            用户再加自己的库时莫名其妙被顶掉。 */}
+        {shotRoot && (
+          <div className="tree-section">
+            <div
+              className="tree-heading-row shot-head"
+              data-dir-path={shotRoot.path}
+              data-dir-name={shotRoot.name}
+              data-dir-root="1"
+              data-dir-builtin="1"
+              title={`${shotRoot.path}\n软件截图存放目录（内置，不占素材库名额）`}
+              onClick={() => {
+                /* 点段头 = 打开这个库：展开子目录 + 列表切到它（和点一行目录同一个结果） */
+                void (async () => {
+                  if (!open.has(shotRoot.id)) {
+                    await load(shotRoot.id);
+                    setOpen(new Set(open).add(shotRoot.id));
+                  }
+                  onSelect(shotRoot);
+                })();
+              }}
+            >
+              <span
+                className={`caret ${shotOpen ? "" : "closed"}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShotOpen((v) => !v);
+                }}
+              >
+                <Icon name="chevron" size={10} stroke={2} className="rot90" />
+              </span>
+              <span className="grow">截图</span>
+              <span className="lib-builtin">内置</span>
+              <span className="tree-count">{shotRoot.assetCnt > 0 ? shotRoot.assetCnt : 0}</span>
+            </div>
+            {shotOpen && kids.get(shotRoot.id)?.map((c) => row(c, 0))}
+          </div>
+        )}
 
         {/* 快照段 = 本滚动区里的第二个 section，紧跟「素材库」这一段（照 FontManager：
             `.sidebar-scroll` 里放 browse + snapshots 两段）。

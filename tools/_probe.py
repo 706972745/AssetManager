@@ -21,6 +21,8 @@ user32.SetProcessDPIAware()
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 
 
 def hwnd_of(title: str) -> int:
@@ -75,6 +77,16 @@ def main() -> None:
             user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -120 if n > 0 else 120, 0)
             time.sleep(0.03)
         return
+    if cmd == "rclick":
+        x, y = int(sys.argv[2]), int(sys.argv[3])
+        user32.SetCursorPos(r.left + x, r.top + y)
+        time.sleep(0.05)
+        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        time.sleep(0.03)
+        user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+        print("RCLICK", x, y)
+        return
+
     if cmd == "click":
         x, y = int(sys.argv[2]), int(sys.argv[3])
         user32.SetCursorPos(r.left + x, r.top + y)

@@ -148,15 +148,32 @@ fn am_children(parent: Option<i64>, state: State<AppState>) -> Result<Vec<DirNod
     lock(&state).tree(parent)
 }
 
-/// 已加入的库根数量（前端加库前先问一次，最多 3 个）。
+/// 已加入的**用户**库根数量（前端加库前先问一次，最多 3 个）。
+///
+/// 内置截图库不算名额：它一直存在，算进去等于用户只有 2 个位置。
 #[tauri::command]
 fn am_lib_count(state: State<AppState>) -> Result<i64, String> {
-    lock(&state).lib_count()
+    let app = lock(&state);
+    let n = app.lib_count()?;
+    let has_builtin = app
+        .lib_roots()?
+        .iter()
+        .any(|r| is_builtin_root(r));
+    Ok(if has_builtin { (n - 1).max(0) } else { n })
+}
+
+/// 内置库的路径（前端据此：不计入 3 个名额、右键不给「移除」、永远显示）。
+#[tauri::command]
+fn am_builtin_roots() -> Vec<String> {
+    vec![shot_dir().to_string_lossy().to_string()]
 }
 
 /// 从素材库移除一个库根：只清索引，磁盘上的文件一个都不动。
 #[tauri::command]
 fn am_remove_lib(path: String, state: State<AppState>) -> Result<usize, String> {
+    if is_builtin_root(&path) {
+        return Err("这是软件自己的截图目录（内置库），不能移除 —— 截图、贴图、灵感板粘贴都往这里存。".into());
+    }
     lock(&state).remove_lib(&path)
 }
 
@@ -1509,6 +1526,39 @@ fn shot_dir() -> PathBuf {
     exe_dir().join("screenshots")
 }
 
+/// 路径比较口径（与 core 的 `norm_path` 一致）：反斜杠、去尾分隔符、小写。
+fn same_path(a: &str, b: &str) -> bool {
+    let f = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    f(a) == f(b)
+}
+
+/// **内置素材库**：软件自己的截图目录（`screenshots`，与 `assetmanager.exe` 同级）。
+///
+/// 它不是用户指定的素材库 —— owner 2026-11-17 定：**不占那 3 个名额、不能移除、
+/// 侧栏永远留着**。截图（F1）、灵感板粘贴、剪贴板贴图都往这里落，
+/// 把它当成"用户第 N 个库"来算名额，用户加第三个自己的库时就会被莫名其妙顶掉。
+///
+/// 判定为什么按「同名 + 同级有 exe」而不是只和当前 `shot_dir()` 比：
+/// 同一个软件会有 debug / release / 已安装三种 exe，各自的截图目录都是它自己生成的。
+/// 只认当前那条的话，换个构建跑一次，旧的那种就又变回"用户库"了（实测：release
+/// 目录那行一直占着名额，用户加第三个库时被顶掉）。
+fn is_builtin_root(path: &str) -> bool {
+    if same_path(path, &shot_dir().to_string_lossy()) {
+        return true;
+    }
+    let p = Path::new(path);
+    let named = p
+        .file_name()
+        .map(|n| n.eq_ignore_ascii_case("screenshots"))
+        .unwrap_or(false);
+    if !named {
+        return false;
+    }
+    p.parent()
+        .map(|d| d.join("assetmanager.exe").exists())
+        .unwrap_or(false)
+}
+
 fn clip_cache_dir() -> PathBuf {
     exe_dir().join("clipboard-cache")
 }
@@ -2810,9 +2860,9 @@ fn remember_shot_dir(app: &AppHandle) {
         refresh_dirs(&mut a, &set);
         return;
     }
-    if a.lib_count().unwrap_or(0) >= 3 {
-        return; // 库满了：截图照样存盘，只是不自动进库
-    }
+    /* 内置库**不占用户那 3 个名额**（owner 2026-11-17）：以前这里判 `lib_count >= 3`
+       就 return，于是用户挂满 3 个自己的库之后，截图目录就再也进不来了 ——
+       剪了图、贴了图，软件里找不到（"截图去哪了"）。现在永远登记。 */
     if let Err(e) = a.scan(&dir, |_p| {}) {
         if let Some(d) = LOG_DIR.get() {
             log_runtime(d, &format!("截图目录加入素材库失败：{e}"));
@@ -3172,6 +3222,18 @@ fn main() {
             });
             app.manage(AppState(Mutex::new(st)));
 
+            /* 内置截图库：**启动就登记**。owner 2026-11-17 的原话是「要随时可以显示的」——
+               它不能等用户截过一张图才出现在侧栏。放后台线程：目录里截图攒到几千张时
+               扫描要几百毫秒，别去拖首屏。登记完发一次 fs://changed，侧栏自己会重读库列表。 */
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(600));
+                    remember_shot_dir(&h);
+                    let _ = h.emit("fs://changed", Vec::<String>::new());
+                });
+            }
+
             // 启动增量扫描（T06）：等界面先画出来，再拿索引里记的 mtime 比对磁盘。
             // 不递归、不全量，所以几万目录也就一两秒；有变化才推 fs://changed。
             let handle = app.handle().clone();
@@ -3360,6 +3422,7 @@ fn main() {
             am_set_source,
             am_open_url,
             am_lib_count,
+            am_builtin_roots,
             am_remove_lib,
             am_children,
             am_list,

@@ -316,6 +316,8 @@ export interface Source {
   roots(): Promise<DirNode[]>;
   /** 已加入的库根数量（最多 3 个库，与 FontManager 的多库上限一致） */
   libCount(): Promise<number>;
+  /** 内置库路径（软件自己的截图目录）：不占 3 个名额、不能移除、永远显示 */
+  builtinRoots(): Promise<string[]>;
   /** 从素材库移除一个库根：只清索引，磁盘文件不动 */
   removeLib(path: string): Promise<number>;
   children(parent: number | null): Promise<DirNode[]>;

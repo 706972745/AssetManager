@@ -5623,8 +5623,10 @@ body.board-body #root {
 }
 .about-link-sub {
   grid-column: 1 / -1;
-  font-size: var(--fs-10);
-  color: var(--text-3);
+  /* 地址是「要照着敲」的信息 → 等宽 + 11px（FontManager 同款口径；10px 加等宽在小尺寸上连字）。
+     颜色用次文字色而不是弱文字色：压在浅底上 3:1 的小字会糊成一条灰影。 */
+  font-size: var(--fs-11);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5641,4 +5643,60 @@ body.board-body #root {
   display: flex;
   flex-direction: column;
   background: var(--ui-bg);
+}
+
+/* ---- 内置库（软件自己的截图目录 · owner 2026-11-17）----
+   它出现在「素材库」列表里，但**不是用户加的**：不占 3 个名额、不能移除、
+   永远在列表里。行尾那个小标就是解释"为什么这行没有 ×"。 */
+.lib-builtin {
+  flex: none;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: var(--r-4);
+  font-size: var(--fs-9);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  background: var(--e2);
+  /* 未选中时它是唯一能解释这行的东西，别让它在悬停里忽明忽暗 */
+  pointer-events: none;
+}
+.lib-builtin.on {
+  color: var(--text-2);
+  background: var(--e3);
+}
+
+/* 一个库 = 一块（行 + 展开的子树）：切库时整块用 motion 的 layout 滑到顶上。
+   `min-width: 0` 防子项把块撑宽；`will-change` 让 WebView2 提前分层，长树也不掉帧。 */
+.lib-block {
+  min-width: 0;
+  will-change: transform;
+}
+
+/* ---- 截图段（内置 · 单独一段，和快照并列 · owner 2026-11-17）----
+   它借用了 `.tree-heading-row`（和「素材库」「快照」同一个段头），
+   但段头本身能点（点了就打开这个库），所以要给一点可点的反馈：
+   悬停标题变亮 + 右侧数量跟着提一档，别做整块底色 —— 段头不是行。 */
+.shot-head {
+  cursor: default;
+  user-select: none;
+}
+.shot-head:hover {
+  color: var(--text-2);
+}
+.shot-head:hover .tree-count {
+  color: var(--text-2);
+}
+/* 段头里的「内置」比行里的小一档：段头字号本来就是 10px */
+.shot-head .lib-builtin {
+  height: 15px;
+  line-height: 15px;
+  font-size: var(--fs-9);
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+/* 段头后面的子目录比段头缩进一点，读起来才像"这一段里面的东西" */
+.shot-head + .tree-row {
+  margin-top: 1px;
 }

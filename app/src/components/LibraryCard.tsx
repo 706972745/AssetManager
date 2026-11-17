@@ -38,6 +38,21 @@ export function LibraryCard({
   const [roots, setRoots] = useState<DirNode[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /* 内置库（软件自己的截图目录）：不占名额、不给移除（owner 2026-11-17） */
+  const [builtin, setBuiltin] = useState<string[]>([]);
+
+  useEffect(() => {
+    void source
+      .builtinRoots()
+      .then(setBuiltin)
+      .catch(() => setBuiltin([]));
+  }, [source]);
+
+  const samePath = (a: string, b: string) => {
+    const f = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    return f(a) === f(b);
+  };
+  const isBuiltin = (p: string) => builtin.some((b) => samePath(b, p));
 
   const reload = useCallback(() => {
     if (!source.desktop) {
@@ -63,7 +78,8 @@ export function LibraryCard({
   useEffect(() => onAppEvent("scan://done", () => reload()), [reload]);
 
   const max = 3;
-  const count = roots?.length ?? 0;
+  /* 只数用户自己的库：内置截图库一直存在，算进去等于只剩 2 个位置 */
+  const count = roots?.filter((r) => !isBuiltin(r.path)).length ?? 0;
   const full = count >= max;
 
   return (
@@ -114,6 +130,11 @@ export function LibraryCard({
               <Icon name="folder" size={14} stroke={1.5} className="lib-row-icon" />
               <span className="lib-path mono">{r.path}</span>
               <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
+              {isBuiltin(r.path) && (
+                <span className="lib-builtin on" title="软件自己的截图目录：不占名额，不能移除">
+                  内置
+                </span>
+              )}
               <button
                 className="dr-act"
                 title="在资源管理器中打开"
@@ -121,9 +142,11 @@ export function LibraryCard({
               >
                 <Icon name="reveal" size={12} stroke={1.5} />
               </button>
+              {/* 内置库不给 ×：删了索引，截图就"凭空消失"了 */}
               <button
                 className="dr-act"
-                title="从素材库移除（不删文件）"
+                title={isBuiltin(r.path) ? "内置库不能移除" : "从素材库移除（不删文件）"}
+                disabled={isBuiltin(r.path)}
                 onClick={async () => {
                   setBusy(true);
                   try {

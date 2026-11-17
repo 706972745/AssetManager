@@ -2,7 +2,9 @@
  * 关于（**照 FontManager 的 AboutView 版式**，owner 2026-11-17）。
  *
  * 结构：图标 → 名称 → 版本 + 许可 → 一句话说明 → 能力网格 → 技术栈 chips → 链接卡。
- * 链接：现阶段只有主仓库，插件仓库还没建，所以只留一张卡（owner：先用 GitHub 主页占位）。
+ * 链接（照 FontManager 两张卡的做法）：**本项目仓库** + **GitHub 主页**。
+ * 两张卡图标必须不同 —— 都画 GitHub 字形会看着像重复（FontManager 那条注释同理）。
+ * 插件仓库还没建，等建了再加第三张（用拼图图标）。
  */
 import {
   ArrowUpRight,
@@ -13,6 +15,7 @@ import {
   Sparkles,
   Star,
   Tags,
+  UserRound,
   Zap,
 } from "lucide-react";
 
@@ -30,7 +33,40 @@ const FEATURES: { label: string; icon: React.ReactNode }[] = [
 
 const STACK = ["Tauri v2", "Rust", "React 18", "TypeScript", "Vite", "SQLite"];
 
-const REPO = "https://github.com/706972745";
+/** GitHub 字形（官方 mark）。两张卡里给「仓库」用，主页那张改用头像图标区分。 */
+function GithubGlyph() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.25 5.67.41.35.77 1.05.77 2.12 0 1.53-.01 2.76-.01 3.14 0 .3.2.66.8.55A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+    </svg>
+  );
+}
+
+interface LinkItem {
+  label: string;
+  sub: string;
+  url: string;
+  icon: React.ReactNode;
+}
+
+const REPO = "https://github.com/706972745/AssetManager";
+const HOME = "https://github.com/706972745";
+
+const LINKS: LinkItem[] = [
+  {
+    label: "本项目仓库",
+    sub: "github.com/706972745/AssetManager",
+    url: REPO,
+    icon: <GithubGlyph />,
+  },
+  {
+    label: "GitHub 主页",
+    sub: "github.com/706972745",
+    url: HOME,
+    // 头像图标：和上面那张的 GitHub 字形拉开，一眼能分清"项目"和"人"
+    icon: <UserRound size={16} strokeWidth={1.5} />,
+  },
+];
 
 export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
   return (
@@ -66,16 +102,14 @@ export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
         <span className="about-section-title">本项目仓库</span>
       </div>
       <div className="about-links">
-        <button className="about-link" onClick={() => onOpenUrl(REPO)}>
-          <span className="about-link-icon">
-            <svg width={16} height={16} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.25 5.67.41.35.77 1.05.77 2.12 0 1.53-.01 2.76-.01 3.14 0 .3.2.66.8.55A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
-            </svg>
-          </span>
-          <span className="about-link-label">GitHub 主页</span>
-          <ArrowUpRight size={14} strokeWidth={1.5} className="about-link-arrow" />
-          <span className="about-link-sub mono">github.com/706972745</span>
-        </button>
+        {LINKS.map((l) => (
+          <button key={l.url} className="about-link" onClick={() => onOpenUrl(l.url)}>
+            <span className="about-link-icon">{l.icon}</span>
+            <span className="about-link-label">{l.label}</span>
+            <ArrowUpRight size={14} strokeWidth={1.5} className="about-link-arrow" />
+            <span className="about-link-sub mono">{l.sub}</span>
+          </button>
+        ))}
       </div>
     </div>
   );

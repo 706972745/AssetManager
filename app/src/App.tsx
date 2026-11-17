@@ -1199,13 +1199,17 @@ export default function App() {
       const n = await source.libCount();
       if (n >= MAX_LIBS) {
         const roots = await source.roots().catch(() => []);
+        /* 内置截图库也在 roots 里，但它不占名额 —— 不列出来，否则用户会数出 4 个 */
+        const bi = await source.builtinRoots().catch(() => [] as string[]);
+        const norm2 = (s: string) => s.replace(/[\\/]+$/, "").toLowerCase();
+        const userRoots = roots.filter((r) => !bi.some((b) => norm2(b) === norm2(r.path)));
         await dlg.ask({
           title: `已经有 ${MAX_LIBS} 个素材库了`,
           body: (
             <div className="grow">
               <p>最多同时挂 {MAX_LIBS} 个。想加新的，先从下面某一个移除：</p>
               <p className="mono" style={{ marginTop: 6, opacity: 0.75, whiteSpace: "pre-line" }}>
-                {roots.map((r) => r.path).join("\n")}
+                {userRoots.map((r) => r.path).join("\n")}
               </p>
               <p style={{ marginTop: 8 }}>
                 移除方法：在左侧列表里<b>右键那个库</b> → 「从素材库移除（不删文件）」。
@@ -1634,17 +1638,29 @@ export default function App() {
             icon: "plus",
             action: () => void onNewSubfolder(p),
           },
-          /* 只有库根才有「移除」：子目录用「移到回收站」处理，不该有库级动作 */
+          /* 只有库根才有「移除」：子目录用「移到回收站」处理，不该有库级动作。
+             内置库（软件自己的截图目录）不给移除 —— 截图/贴图/灵感板粘贴都往那儿存，
+             删了索引用户就"截了图找不着"。给一条禁用项写明原因，比菜单里干脆没有更好懂。 */
           ...(dirRow.dataset.dirRoot === "1"
-            ? [
-                { kind: "separator" as const },
-                {
-                  label: "从素材库移除（不删文件）",
-                  icon: "database",
-                  danger: true,
-                  action: () => void onRemoveLib(p),
-                },
-              ]
+            ? dirRow.dataset.dirBuiltin === "1"
+              ? [
+                  { kind: "separator" as const },
+                  {
+                    label: "软件截图目录（内置库，不能移除）",
+                    icon: "database",
+                    disabled: true,
+                    action: () => {},
+                  },
+                ]
+              : [
+                  { kind: "separator" as const },
+                  {
+                    label: "从素材库移除（不删文件）",
+                    icon: "database",
+                    danger: true,
+                    action: () => void onRemoveLib(p),
+                  },
+                ]
             : []),
         ]);
         return;
