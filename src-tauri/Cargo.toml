@@ -1,6 +1,6 @@
 [package]
 name = "assetmanager"
-version = "0.10.0"
+version = "0.11.0"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"
@@ -22,6 +22,9 @@ rfd = "0.17.2"
 # F1/F3/Alt+F1 是**系统级**快捷键（软件不在前台也要能截），必须走系统注册
 tauri-plugin-global-shortcut = "2"
 drag = "2.1.1"
+# 截图的裁剪结果走 base64 回前端当 canvas 底图（data: URL 不会污染画布，
+# 跨域的自定义协议会把 toDataURL 卡死）
+base64 = "0.22"
 
 [profile.release]
 codegen-units = 1

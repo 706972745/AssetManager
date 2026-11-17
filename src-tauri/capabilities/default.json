@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗 + 截图覆盖层 + 所有无边框看图窗。注意 `peek-*`：贴图是多开窗口（label 是 peek-1/peek-2…），只写 `peek` 匹配不上 —— 曾经因此拖不动窗口（拖拽要 core:window:allow-start-dragging）。",
-  "windows": ["main", "snip", "peek", "peek-*"],
+  "description": "主窗 + 截图覆盖层 + 所有无边框看图窗 + 灵感板窗。注意 `peek-*` / `board-*`：两者都是多开窗口（label 是 peek-1 / board-3…），只写单个名字匹配不上 —— 曾经因此拖不动窗口（拖拽要 core:window:allow-start-dragging）。",
+  "windows": ["main", "snip", "peek", "peek-*", "board-*"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

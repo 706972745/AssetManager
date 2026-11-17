@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AssetManager",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "identifier": "com.assetmanager.desktop",
   "build": {
-    "beforeDevCommand": "npm --prefix app run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1430",
-    "beforeBuildCommand": "npm --prefix app run build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../app/dist"
   },
   "app": {

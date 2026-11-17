@@ -289,11 +289,14 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 /**
- * 详情预览：**固定 1:1 的方框**，图片按"铺满短边"放大，超出方框的部分滚动查看。
+ * 详情预览：**固定 1:1 的方框**，图片宽度正好铺满方框（`2026-11-17` 改：纵向滚，永不横向溢出）。
  *
- * 为什么不用 `object-fit: contain`：那样只会得到一张缩得很小的图 + 大片留白，
- * 想看细节只能开大图。Eagle 的做法是方框 + 可滚，我们照它，但**不裁切**：
- * 图像素一比一铺进方框，多出来的部分用滚动条看，任何时候都不丢内容。
+ * 为什么不 `object-fit: contain`：那样只会得到一张缩得很小的图 + 大片留白，
+ * 想看细节只能开大图。Eagle 的做法是方框 + 可滚，我们照它，但**不裁切**。
+ *
+ * 为什么**只允许纵向滚**：横向多出来那段既没有滚动条也拖不动（面板宽度是固定的），
+ * 图就被右边切掉一块，用户看到的是"图不完整"而不是"可以滚"。
+ * 现在宽度恒等于方框宽 → 左右永远完整，高的部分往下滚。
  */
 function SquarePreview({
   src,
@@ -306,36 +309,24 @@ function SquarePreview({
   onPressStart: (e: React.MouseEvent) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
 
+  /* 尺寸全交给 CSS（`width:100%; height:auto` + 方框 `aspect-ratio:1/1` + `overflow-y:auto`）。
+     之前用 JS 算像素高度，超长图（例如 1080×6555）会把 flex 行撑坏、预览整块消失 ——
+     宽度交给 CSS 反而是最稳的：**横向永远不会溢出**，纵向由方框自己滚。 */
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    const calc = () => {
-      const b = el.clientWidth || 240;
-      const a = aspect > 0 ? aspect : 1;
-      // cover 语义：短边铺满方框，长边溢出 → 横向或纵向滚动
-      setSize(a >= 1 ? { w: Math.round(b * a), h: b } : { w: b, h: Math.round(b / a) });
-    };
-    calc();
-    const ro = new ResizeObserver(calc);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [aspect]);
+    el.scrollTop = 0;
+  }, [src, aspect]);
 
   return (
     <div
       ref={box}
       className="detail-art"
-      title="按住拖动 = 把原文件拖到 PS / 资源管理器；滚轮可看其余部分"
+      title="按住拖动 = 把原文件拖到 PS / 资源管理器；竖着的部分滚轮往下看"
       onMouseDown={onPressStart}
     >
-      <img
-        src={src}
-        alt=""
-        draggable={false}
-        style={size ? { width: size.w, height: size.h } : undefined}
-      />
+      <img src={src} alt="" draggable={false} />
     </div>
   );
 }

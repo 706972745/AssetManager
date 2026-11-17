@@ -1485,6 +1485,12 @@ fn clip_cache_dir() -> PathBuf {
     exe_dir().join("clipboard-cache")
 }
 
+/// 中键「贴图」用的落盘位置。**不能放截图目录**（会污染素材库），
+/// 也不能放剪贴板缓存（那边按 10 张剪枝，贴图重启要能还原，不能被剪掉）。
+fn peek_cache_dir() -> PathBuf {
+    exe_dir().join("peek-cache")
+}
+
 fn mime_of(p: &Path) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
         "jpg" | "jpeg" | "jpe" | "jfif" => "image/jpeg",
@@ -1711,6 +1717,10 @@ async fn spawn_peek(
     .minimizable(false)
     .always_on_top(rec.top)
     .skip_taskbar(true)
+    /* **先不显示**：WebView2 建窗后到首帧之间会闪一下默认底色（黑）。
+       中键把截图变无边框看图时这一下特别明显（owner 2026-11-17 反馈"黑屏一下"）。
+       现在等前端把图画上去再 `am_peek_ready` 显示；下面还有兜底定时器，前端崩了也不会留个隐形窗口。 */
+    .visible(false)
     .initialization_script(&script);
     let win = b.build();
     // build() 失败**不能 `?` 提前返回**：窗口可能已经建了一半，错误又被前端 toast 吞掉
@@ -1760,8 +1770,16 @@ async fn spawn_peek(
         });
     }
     let _ = scale;
-    let _ = win.show();
-    let _ = win.set_focus();
+    /* 兜底：前端如果没能报到 ready（脚本报错 / 图片解码失败），3.5 秒后自己显示出来 ——
+       否则用户按了键却"什么都没发生"，比闪一下黑更糟。 */
+    let w2 = win.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(3500));
+        if !w2.is_visible().unwrap_or(false) {
+            let _ = w2.show();
+            let _ = w2.set_focus();
+        }
+    });
     Ok(())
 }
 
@@ -1799,6 +1817,14 @@ async fn am_peek_open(
     peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
     save_peeks();
     spawn_peek(&app, item, rec, false).await
+}
+
+/// 前端把图画上去了 → 现在显示窗口（首帧已经就绪，不会闪黑）
+#[tauri::command]
+async fn am_peek_ready(win: Window) -> Result<(), String> {
+    win.show().map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
+    Ok(())
 }
 
 /// 缩放窗口（连窗口一起缩放，锚定中心）
@@ -1929,6 +1955,249 @@ async fn restore_peeks(app: AppHandle) {
     }
 }
 
+/* ---------------- 灵感板（标签 → 无限画布，照 PureRef） ----------------
+
+   一个标签 = 一块板。板是**无边界画布**：图可以随便摆，画布跟着拖，滚轮缩放，
+   不存位置（这是临时视图，不是文档 —— 重启不开，和 PureRef 的 .pur 文件不是一回事）。
+   要做成"存下来 + 重启还原"就得先有 board 表，等 owner 明确要再加。 */
+
+/// 一块板最多放多少张。2000 张 1024 档缩略图在 WebView2 里还能拖动得动，
+/// 再多就开始掉帧；超出的部分不是悄悄丢掉，窗口里会写明"只放了前 N 张"。
+const BOARD_MAX: usize = 2000;
+static BOARD_SEQ: AtomicU64 = AtomicU64::new(1);
+/// label → 标签名。同一个标签重复点「打开灵感板」不该开第二块，聚焦已有那块。
+static BOARD_TAGS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn board_tags() -> &'static Mutex<HashMap<String, String>> {
+    BOARD_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Serialize)]
+struct BoardItem {
+    id: i64,
+    src: String,
+    w: u32,
+    h: u32,
+    name: String,
+    /// 复制原文件用（右键菜单）
+    path: String,
+}
+
+/// 按标签取全量素材（keyset 分页，单页上限 1000）。返回 `(条目, 命中总数)`。
+fn board_items(app: &App, tag: &str) -> Result<(Vec<BoardItem>, usize), String> {
+    let mut out: Vec<BoardItem> = Vec::new();
+    let mut cursor: Option<(i64, i64)> = None;
+    let mut total = 0usize;
+    loop {
+        let q = AssetQuery {
+            tag: Some(tag.to_string()),
+            limit: Some(1000),
+            cursor,
+            sort: Some("mtime_desc".into()),
+            ..Default::default()
+        };
+        let rows = app.list(&q)?;
+        if rows.is_empty() {
+            break;
+        }
+        total += rows.len();
+        for r in &rows {
+            let (w, h) = (
+                r.width.unwrap_or(0).max(0) as u32,
+                r.height.unwrap_or(0).max(0) as u32,
+            );
+            out.push(BoardItem {
+                id: r.id,
+                /* 板上按 1024 档取缩略图：放到两三倍还看得清，又不至于把内存吃光。
+                   `r` 带上 mtime，文件改了 URL 就变，WebView 缓存自动失效。 */
+                src: format!("http://thumb.localhost/{}?px=1024&r={}", r.id, r.mtime),
+                w,
+                h,
+                name: r.name.clone(),
+                path: r.path.clone(),
+            });
+        }
+        if out.len() >= BOARD_MAX {
+            break;
+        }
+        match rows.last() {
+            Some(last) => cursor = Some((last.mtime, last.id)),
+            None => break,
+        }
+    }
+    Ok((out, total))
+}
+
+/// 开一块灵感板。同一个标签已经开着就直接聚焦，不重复开。
+#[tauri::command]
+async fn am_board_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tag: String,
+    title: Option<String>,
+) -> Result<usize, String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("没有指定标签".into());
+    }
+    {
+        // 已经开着这块板 → 抬到前面
+        let map = board_tags().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((label, _)) = map.iter().find(|(_, t)| **t == tag) {
+            if let Some(w) = app.get_webview_window(label) {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+                return Ok(0);
+            }
+        }
+    }
+    let (items, total) = {
+        let a = lock(&state);
+        board_items(&a, &tag)?
+    };
+    /* 空标签也开板：板子的第二个用法就是"往空画布上粘图"（Ctrl+V 会存进截图目录
+       并打上这个标签）。原来这里直接报「下面还没有素材」，等于把这条路堵死了。 */
+    let shown = items.len();
+    let label = format!("board-{}", BOARD_SEQ.fetch_add(1, Ordering::Relaxed));
+    let title = title.unwrap_or_else(|| format!("灵感板 · {tag}"));
+    let boot = serde_json::json!({
+        "label": label,
+        "tag": tag,
+        "title": title,
+        "items": items,
+        "more": total > shown,
+        "total": total,
+    });
+    let script = format!("window.__AM_BOARD__ = {boot};");
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title(&title)
+    .inner_size(1280.0, 860.0)
+    .min_inner_size(720.0, 520.0)
+    .decorations(false)
+    .transparent(false)
+    .resizable(true)
+    .center()
+    .initialization_script(&script)
+    .build()
+    .map_err(|e| {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("board build FAIL {e}"));
+        }
+        format!("灵感板窗口创建失败：{e}")
+    })?;
+    board_tags()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label.clone(), tag.clone());
+    // 窗口没了就把映射清掉，否则下次点同一个标签会去聚焦一个不存在的窗口
+    let lbl = label.clone();
+    win.on_window_event(move |ev| {
+        if matches!(ev, tauri::WindowEvent::Destroyed) {
+            board_tags().lock().unwrap_or_else(|e| e.into_inner()).remove(&lbl);
+        }
+    });
+    let _ = win.set_focus();
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("board {label} tag={tag} items={shown}/{total}"));
+    }
+    Ok(shown)
+}
+
+#[tauri::command]
+async fn am_board_close(win: Window) -> Result<(), String> {
+    win.close().map_err(|e| e.to_string())
+}
+
+/// 同一秒里连粘两张会撞名（时间戳精确到秒）：`粘贴 2026-11-17 12-42-11.png`
+/// → `… (2).png`。**绝不覆盖已有文件**（截图目录里都是用户的东西）。
+fn free_path(dir: &Path, stem: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}.png"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..1000 {
+        let p = dir.join(format!("{stem} ({n}).png"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{stem}-{}.png", std::process::id()))
+}
+
+/// 灵感板里 Ctrl+V：剪贴板图片 → **截图目录** → 入库 → 打上这块板的标签 → 上板。
+///
+/// 顺序不能换：先落盘、再入库、最后打标签。
+/// - 落盘失败 = 什么都没发生（用户还能再按一次 Ctrl+V，不会留下半截文件）；
+/// - 入库失败时文件**已经在盘上了**，必须把路径说出来，别装没发生；
+/// - 标签是这块板的标签（一块板 = 一个标签），所以粘进来的图下次打开同一块板还在。
+///
+/// 返回的是**新入库那张素材**的信息，前端拿它直接贴到视口中心。
+#[tauri::command]
+async fn am_board_paste(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tag: String,
+) -> Result<BoardItem, String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("这块灵感板没有对应的标签".into());
+    }
+    let (cw, ch, png) = clipimg::get_png()
+        .map_err(|e| format!("{e}。Ctrl+V 只认剪贴板里的图片（复制文件请用右键菜单）"))?;
+
+    let dir = shot_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("建不了截图目录 {}：{e}", dir.display()))?;
+    let (stamp, _) = screen::local_stamp();
+    let target = free_path(&dir, &format!("粘贴 {stamp}"));
+    std::fs::write(&target, &png)
+        .map_err(|e| format!("写图片失败 {}：{e}", target.display()))?;
+    let saved = target.to_string_lossy().to_string();
+
+    // 截图目录自动进库（库满 3 个就只存盘、不进库 —— 下面会明确告出来，不静默）
+    remember_shot_dir(&app);
+
+    let (lib_id, local) = {
+        let a = lock(&state);
+        let lib_id = a.lib_for_path(&saved).ok_or_else(|| {
+            format!(
+                "图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次没打上「{tag}」标签"
+            )
+        })?;
+        let local = db::asset_id_by_path(a.conn_for_path(&saved)?, &saved)?
+            .ok_or_else(|| format!("图片已存到 {saved}，但索引里还没找到它 —— 稍等一下再按一次 Ctrl+V"))?;
+        (lib_id, local)
+    };
+    let g = am_core::gid(lib_id, local);
+    let asset = {
+        let mut a = lock(&state);
+        a.tag_assets(&[g], &tag)?;
+        a.asset(g)?
+    };
+    let asset = asset.ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
+
+    // 主窗的列表要立刻能看到这张新图（走的是「外部变更」那条刷新链路，400ms 去抖）
+    let _ = app.emit("fs://changed", vec![dir.to_string_lossy().to_string()]);
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("board paste tag={tag} -> {saved}"));
+    }
+
+    Ok(BoardItem {
+        id: g,
+        src: format!("http://thumb.localhost/{}?px=1024&r={}", asset.id, asset.mtime),
+        // 扫描没填上宽高时用剪贴板自己的尺寸，别让板上出现一张 0×0 的方块
+        w: asset.width.unwrap_or(cw as i64).max(0) as u32,
+        h: asset.height.unwrap_or(ch as i64).max(0) as u32,
+        name: asset.name.clone(),
+        path: asset.path.clone(),
+    })
+}
+
 /* ---------------- 复制 / 另存 ---------------- */
 
 /// 复制**原文件**（CF_HDROP：粘到 PS / 资源管理器是文件，不是位图）
@@ -1944,8 +2213,16 @@ fn am_clip_text(text: String) -> Result<(), String> {
 }
 
 /// 另存为：把 `src` 拷到用户选的位置。返回最终路径（取消 = None）
+///
+/// **弹框前必须先取消本窗置顶**：无边框看图默认置顶，文件对话框没有 owner，
+/// 会被稳稳压在下面 —— 用户看到的就是"按了 Ctrl+S 什么都没发生"
+/// （owner 2026-11-17 反馈）。存完再恢复置顶。
 #[tauri::command]
-async fn am_save_as(src: String, suggest: Option<String>) -> Result<Option<String>, String> {
+async fn am_save_as(
+    win: Window,
+    src: String,
+    suggest: Option<String>,
+) -> Result<Option<String>, String> {
     let from = PathBuf::from(&src);
     if !from.is_file() {
         return Err("原文件已经不在了".into());
@@ -1954,7 +2231,18 @@ async fn am_save_as(src: String, suggest: Option<String>) -> Result<Option<Strin
         .filter(|s| !s.trim().is_empty())
         .or_else(|| from.file_name().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_else(|| "image.png".to_string());
-    let picked = rfd::AsyncFileDialog::new().set_file_name(&name).save_file().await;
+    let was_top = win.is_always_on_top().unwrap_or(false);
+    if was_top {
+        let _ = win.set_always_on_top(false);
+    }
+    let picked = rfd::AsyncFileDialog::new()
+        .set_file_name(&name)
+        .set_directory(from.parent().unwrap_or(Path::new(".")))
+        .save_file()
+        .await;
+    if was_top {
+        let _ = win.set_always_on_top(true);
+    }
     let Some(handle) = picked else { return Ok(None) };
     let to = handle.path().to_path_buf();
     if to != from {
@@ -2041,11 +2329,21 @@ fn am_clip_history() -> Result<Vec<(String, u32, u32)>, String> {
         .collect())
 }
 
-/* ---------------- 截图（F1 / Alt+F1） ---------------- */
+/* ---------------- 截图（F1 / Alt+F1） ----------------
+
+   两段式：`am_snip_crop` 把选区从冻住的整屏里裁出来（base64 回前端），
+   前端在 canvas 上画标注，再把**合成好的整张**交给 `am_snip_finish` 保存 / 复制 / 贴图。
+
+   为什么裁剪和落盘要拆开：标注（箭头 / 文字 / 马赛克）在 canvas 上做最省事也最准，
+   但 canvas 只能用同源图片当底 —— 所以底图走 base64（`data:` URL 不污染画布），
+   而不是 `peekfile://`。拆开之后前端也不必为了"先画一笔"就跑一次落盘。 */
 
 struct SnipState {
     shot: screen::Shot,
-    mode: String,
+    /// 截图临时文件（裁剪完就没人要了，取消/完成时删掉）
+    tmp: PathBuf,
+    /// 截屏前被藏起来的贴图窗口（截完原样显示回来）
+    hidden: Vec<String>,
 }
 
 static SNIP: OnceLock<Mutex<Option<SnipState>>> = OnceLock::new();
@@ -2054,15 +2352,90 @@ fn snip_slot() -> &'static Mutex<Option<SnipState>> {
     SNIP.get_or_init(|| Mutex::new(None))
 }
 
+/// 截屏前把所有无边框看图藏起来。
+///
+/// 不藏的话它们会被**截进下一张截图**：用户按 F1 是想截背后的东西，
+/// 结果贴图糊在上面，还得手动避开（0.10.x 就是这样）。
+fn hide_peeks(app: &AppHandle) -> Vec<String> {
+    let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
+    let mut out = Vec::new();
+    for l in labels {
+        if !l.starts_with("peek") {
+            continue;
+        }
+        if let Some(w) = app.get_webview_window(&l) {
+            if w.hide().is_ok() {
+                out.push(l);
+            }
+        }
+    }
+    out
+}
+
+fn show_peeks(app: &AppHandle, labels: &[String]) {
+    for l in labels {
+        if let Some(w) = app.get_webview_window(l) {
+            let _ = w.show();
+        }
+    }
+}
+
 async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
+    /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
+       `am_snip_cancel` 不会执行，slot 一直占着 → 之后每次按 F1 都回"上一次截图还没结束"，
+       永久失效，用户只会说"F1 坏了"。有窗口才算真在进行中。 */
+    {
+        let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_some() {
+            if app.get_webview_window("snip").is_some() {
+                return Err("上一次截图还没结束".into());
+            }
+            if let Some(s) = g.take() {
+                show_peeks(&app, &s.hidden);
+                let _ = std::fs::remove_file(&s.tmp);
+            }
+        }
+    }
+    /* 残留窗口（状态空了但窗口还没销毁完）：**必须等它真的消失**。
+       `close()` 是排进消息队列的，紧接着 `build()` 同一个 label 会撞
+       "a webview with label `snip` already exists"（2026-11-17 实测日志）。 */
+    if let Some(old) = app.get_webview_window("snip") {
+        let _ = old.close();
+        for _ in 0..60 {
+            if app.get_webview_window("snip").is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let hidden = hide_peeks(&app);
+    /* 藏完要等 DWM 交一帧：hide() 立刻 BitBlt 有时还能抓到贴图残影。
+       90ms 人感觉不到，但足够合成器把这批窗口移出画面。 */
+    std::thread::sleep(Duration::from_millis(90));
+
     // 截屏要在开覆盖窗**之前**：覆盖窗一开，截到的就是它自己
-    let shot = screen::capture_virtual()?;
-    let png = shot.png()?;
+    let shot = match screen::capture_virtual() {
+        Ok(s) => s,
+        Err(e) => {
+            show_peeks(&app, &hidden);
+            return Err(e);
+        }
+    };
+    let png = match shot.png() {
+        Ok(p) => p,
+        Err(e) => {
+            show_peeks(&app, &hidden);
+            return Err(e);
+        }
+    };
     let tmp = std::env::temp_dir().join(format!(
         "am-snip-{}.png",
         std::process::id() as u64 * 1000 + (db::now_ts() as u64 % 1000)
     ));
-    std::fs::write(&tmp, &png).map_err(|e| format!("写截图临时文件失败：{e}"))?;
+    if let Err(e) = std::fs::write(&tmp, &png) {
+        show_peeks(&app, &hidden);
+        return Err(format!("写截图临时文件失败：{e}"));
+    }
 
     let scale = app
         .get_webview_window("main")
@@ -2070,7 +2443,7 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
         .unwrap_or(1.0);
     let (vx, vy, vw, vh) = (shot.x, shot.y, shot.w, shot.h);
     *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(SnipState { shot, mode: mode.to_string() });
+        Some(SnipState { shot, tmp: tmp.clone(), hidden });
 
     if let Some(old) = app.get_webview_window("snip") {
         let _ = old.close();
@@ -2098,6 +2471,11 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
             if let Some(d) = LOG_DIR.get() {
                 log_runtime(d, &format!("snip build FAIL {e}"));
             }
+            let mut g = snip_slot().lock().unwrap_or_else(|x| x.into_inner());
+            if let Some(s) = g.take() {
+                show_peeks(&app, &s.hidden);
+                let _ = std::fs::remove_file(&s.tmp);
+            }
             format!("截图窗口创建失败：{e}")
         })?;
     Ok(())
@@ -2123,99 +2501,184 @@ fn remember_shot_dir(app: &AppHandle) {
     }
 }
 
-/// 确认选区。`x/y/w/h` 是截图窗口里的 CSS 像素，这里换算成屏幕物理像素再裁。
+/// 解 base64 并确认它真是 PNG（前端 canvas 的 `toDataURL` 一定给 PNG）。
+fn png_from_b64(data: &str) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let body = data.split_once(',').map(|(_, b)| b).unwrap_or(data);
+    let bytes = STANDARD.decode(body.trim()).map_err(|e| format!("图片数据坏了：{e}"))?;
+    if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err("拿到的不是 PNG".into());
+    }
+    Ok(bytes)
+}
+
+/// 裁出选区（**只裁不存**）。`x/y/w/h` 是截图窗口里的 CSS 像素，
+/// `scale` 是覆盖窗的缩放比（前端从 boot 里带过来，比事后查窗口稳）。
+///
+/// 返回 `data:image/png;base64,…` + 物理像素宽高：前端拿它当 canvas 底图。
+/// 用 data URL 而不是 `peekfile://`，是因为**跨域图片会把 canvas 污染掉**，
+/// 一污染 `toDataURL` 就抛错，标注就导不出来了。
 #[tauri::command]
-async fn am_snip_commit(
-    app: AppHandle,
+fn am_snip_crop(
     x: f64,
     y: f64,
     w: f64,
     h: f64,
-    save_as: Option<bool>,
-) -> Result<Option<String>, String> {
-    let (shot, mode) = {
-        let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
-        match g.take() {
-            Some(s) => (s.shot, s.mode),
-            None => return Err("截图数据已经过期，请重新按一次快捷键".into()),
-        }
+    scale: f64,
+) -> Result<(String, u32, u32), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = g.as_ref() else {
+        return Err("截图数据已经过期，请重新按一次快捷键".into());
     };
-    let scale = app
-        .get_webview_window("snip")
-        .and_then(|v| v.scale_factor().ok())
-        .unwrap_or(1.0);
-    let img = shot
+    let sc = if scale > 0.0 { scale } else { 1.0 };
+    let img = s
+        .shot
         .crop(
-            (x * scale).round() as i32,
-            (y * scale).round() as i32,
-            (w * scale).round() as i32,
-            (h * scale).round() as i32,
+            (x * sc).round() as i32,
+            (y * sc).round() as i32,
+            (w * sc).round() as i32,
+            (h * sc).round() as i32,
         )
         .ok_or_else(|| "选区太小了".to_string())?;
     let png = screen::png_of(&img)?;
+    Ok((
+        format!("data:image/png;base64,{}", STANDARD.encode(&png)),
+        img.width(),
+        img.height(),
+    ))
+}
 
-    /* 顺序很重要：**先落盘/进剪贴板，成功了才关窗**。
-       反过来的话，任何一步失败都会表现为"窗口一闪就没了、什么都没留下"，
-       用户完全无从判断（我就是这么被坑了一次）。失败时保持覆盖层不关，
-       前端把原因显示在提示条上。 */
-    if mode == "copy" {
-        clipimg::set_png(&png).map_err(|e| {
-            if let Some(d) = LOG_DIR.get() {
-                log_runtime(d, &format!("snip copy FAIL {e}"));
+/// 收下前端合成好的整张图（含标注），按 `action` 处理：
+/// `copy` 进剪贴板 / `save` 存到截图目录 / `saveas` 让用户选位置 / `peek` 直接贴到屏幕上。
+///
+/// 顺序很重要：**先落盘/进剪贴板，成功了才关窗**。反过来的话任何一步失败都表现为
+/// "窗口一闪就没了、什么都没留下"，用户完全无从判断（0.9.x 就是这么被坑的）。
+#[tauri::command]
+async fn am_snip_finish(
+    app: AppHandle,
+    png: String,
+    action: String,
+) -> Result<Option<String>, String> {
+    let bytes = png_from_b64(&png)?;
+
+    let win = app.get_webview_window("snip");
+    let close_snip = || {
+        if let Some(w) = app.get_webview_window("snip") {
+            let _ = w.close();
+        }
+        let (hidden, tmp) = {
+            let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+            match g.take() {
+                Some(s) => (s.hidden, s.tmp),
+                None => (Vec::new(), PathBuf::new()),
             }
-            e
-        })?;
-        if let Some(win) = app.get_webview_window("snip") {
-            let _ = win.close();
+        };
+        show_peeks(&app, &hidden);
+        if !tmp.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        return Ok(None);
-    }
-
-    let dir = shot_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        if let Some(d) = LOG_DIR.get() {
-            log_runtime(d, &format!("snip mkdir FAIL {dir:?} {e}"));
-        }
-        format!("建不了截图目录 {}：{e}", dir.display())
-    })?;
-    let (stamp, _) = screen::local_stamp();
-    let default_name = format!("截图 {}.png", stamp);
-    let target = if save_as.unwrap_or(false) {
-        let picked = rfd::AsyncFileDialog::new()
-            .set_directory(&dir)
-            .set_file_name(&default_name)
-            .save_file()
-            .await;
-        match picked {
-            Some(h) => h.path().to_path_buf(),
-            None => return Ok(None),
-        }
-    } else {
-        dir.join(&default_name)
     };
-    std::fs::write(&target, &png).map_err(|e| {
-        if let Some(d) = LOG_DIR.get() {
-            log_runtime(d, &format!("snip write FAIL {target:?} {e}"));
-        }
-        format!("写截图失败 {}：{e}", target.display())
-    })?;
-    let saved = target.to_string_lossy().to_string();
-    if let Some(win) = app.get_webview_window("snip") {
-        let _ = win.close();
-    }
 
-    // 顺手进剪贴板（Snipaste 的行为：截完就能直接粘）
-    let _ = clipimg::set_png(&png);
-    remember_shot_dir(&app);
-    let _ = app.emit("shot://saved", saved.clone());
-    Ok(Some(saved))
+    match action.as_str() {
+        "copy" => {
+            clipimg::set_png(&bytes).map_err(|e| {
+                if let Some(d) = LOG_DIR.get() {
+                    log_runtime(d, &format!("snip copy FAIL {e}"));
+                }
+                e
+            })?;
+            close_snip();
+            Ok(None)
+        }
+        "peek" => {
+            let dir = peek_cache_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| format!("建不了贴图缓存目录：{e}"))?;
+            let (stamp, _) = screen::local_stamp();
+            let path = dir.join(format!("peek-{}.png", stamp.replace(' ', "_").replace(':', "-")));
+            std::fs::write(&path, &bytes).map_err(|e| format!("写贴图失败：{e}"))?;
+            let Some(item) = item_of_file(&path) else {
+                return Err("贴图生成失败".into());
+            };
+            let rec = PeekRecall {
+                label: next_label(),
+                kind: "file".into(),
+                path: path.to_string_lossy().to_string(),
+                long_edge: PEEK_LONG_EDGE,
+                ..Default::default()
+            };
+            peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
+            save_peeks();
+            // 先关覆盖层再开贴图：两个都是置顶窗，顺序反了贴图会被压在截图底下
+            close_snip();
+            let _ = clipimg::set_png(&bytes);
+            spawn_peek(&app, item, rec, false).await?;
+            Ok(None)
+        }
+        _ => {
+            let dir = shot_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                if let Some(d) = LOG_DIR.get() {
+                    log_runtime(d, &format!("snip mkdir FAIL {dir:?} {e}"));
+                }
+                format!("建不了截图目录 {}：{e}", dir.display())
+            })?;
+            let (stamp, _) = screen::local_stamp();
+            let default_name = format!("截图 {}.png", stamp);
+            let target = if action == "saveas" {
+                /* 覆盖层是置顶窗：弹对话框前必须**先取消置顶**，
+                   否则文件对话框被压在它下面 —— 用户看到的就是"点了保存什么都没发生"
+                   （owner 2026-11-17 反馈）。 */
+                if let Some(w) = &win {
+                    let _ = w.set_always_on_top(false);
+                }
+                let picked = rfd::AsyncFileDialog::new()
+                    .set_directory(&dir)
+                    .set_file_name(&default_name)
+                    .save_file()
+                    .await;
+                if let Some(w) = &win {
+                    let _ = w.set_always_on_top(true);
+                }
+                match picked {
+                    Some(h) => h.path().to_path_buf(),
+                    None => return Ok(None), // 用户取消：留在覆盖层上继续编辑
+                }
+            } else {
+                dir.join(&default_name)
+            };
+            std::fs::write(&target, &bytes).map_err(|e| {
+                if let Some(d) = LOG_DIR.get() {
+                    log_runtime(d, &format!("snip write FAIL {target:?} {e}"));
+                }
+                format!("写截图失败 {}：{e}", target.display())
+            })?;
+            let saved = target.to_string_lossy().to_string();
+            close_snip();
+            // 顺手进剪贴板（Snipaste 的行为：截完就能直接粘）
+            let _ = clipimg::set_png(&bytes);
+            remember_shot_dir(&app);
+            let _ = app.emit("shot://saved", saved.clone());
+            Ok(Some(saved))
+        }
+    }
 }
 
 #[tauri::command]
 async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
-    *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let (hidden, tmp) = {
+        let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+        match g.take() {
+            Some(s) => (s.hidden, s.tmp),
+            None => (Vec::new(), PathBuf::new()),
+        }
+    };
     if let Some(win) = app.get_webview_window("snip") {
         let _ = win.close();
+    }
+    show_peeks(&app, &hidden);
+    if !tmp.as_os_str().is_empty() {
+        let _ = std::fs::remove_file(&tmp);
     }
     Ok(())
 }
@@ -2234,6 +2697,9 @@ fn hotkey_slot() -> &'static Mutex<Vec<(String, String)>> {
 }
 
 fn dispatch_hotkey(app: &AppHandle, accel: &str) {
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("hotkey fired {accel}"));
+    }
     let action = hotkey_slot()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2263,20 +2729,45 @@ fn dispatch_hotkey(app: &AppHandle, accel: &str) {
     });
 }
 
+/// 注册串行化。前端一次启动会调两遍（StrictMode 双跑），两个命令交错执行时
+/// 会出现「A unregister → B unregister → A register ok → B register 被自己占掉」，
+/// 于是表被清空、按 F1 变成 `没有对应动作`（2026-11-17 实测日志里就是这个）。
+/// 用原子标志而不是 Mutex：**不能持 std 锁跨 await**，而这条命令必须留在 async 里跑
+/// （同步命令会占住 IPC 线程，热键注册就收不到消息了 —— 实测过，见 WORKLOG）。
+static REG_BUSY: AtomicBool = AtomicBool::new(false);
+
 /// 设置面板改键后调这个：先全注销再按新表注册。返回注册失败的 accelerators。
 #[tauri::command]
 async fn am_hotkeys_set(app: AppHandle, list: Vec<(String, String)>) -> Result<Vec<String>, String> {
+    while REG_BUSY.swap(true, Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let out = register_hotkeys(&app, list);
+    REG_BUSY.store(false, Ordering::SeqCst);
+    out
+}
+
+fn register_hotkeys(app: &AppHandle, list: Vec<(String, String)>) -> Result<Vec<String>, String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    // 幂等：表没变就别折腾。反复 unregister/register 在 Windows 上会偶发
+    // "刚注销的键还被认为占用"，直接把 F1 弄成永久失效。
+    let want: Vec<(String, String)> = list
+        .iter()
+        .map(|(a, b)| (a.trim().to_string(), b.clone()))
+        .filter(|(a, _)| !a.is_empty())
+        .collect();
+    {
+        let cur = hotkey_slot().lock().unwrap_or_else(|e| e.into_inner());
+        if !cur.is_empty() && *cur == want {
+            return Ok(Vec::new());
+        }
+    }
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
 
     let mut ok_list: Vec<(String, String)> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for (accel, action) in list {
-        let a = accel.trim().to_string();
-        if a.is_empty() {
-            continue;
-        }
+    for (a, action) in want {
         match a.parse::<tauri_plugin_global_shortcut::Shortcut>() {
             Ok(sc) => match gs.register(sc) {
                 Ok(_) => ok_list.push((a, action)),
@@ -2400,6 +2891,35 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(900));
                 tauri::async_runtime::spawn(async move { restore_peeks(h).await });
             });
+            /* 自测入口（只 debug）：`AM_AUTO_SNIP=1` 启动 4 秒后自动开一次截图。
+               为什么要这个：F1 是系统级热键，被 Snipaste 之类用低级钩子的软件抢走后
+               自动化脚本按不动（RegisterHotKey 成功但收不到 WM_HOTKEY），
+               截图覆盖层就永远没法自动验证。**release 包里没有这段**。 */
+            #[cfg(debug_assertions)]
+            if std::env::var("AM_AUTO_SNIP").is_ok() {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(4000));
+                    tauri::async_runtime::spawn(async move {
+                        let _ = snip_begin(h, "save").await;
+                    });
+                });
+            }
+            /* 自测入口（只 debug）：`AM_AUTO_BOARD=<标签名>` 启动 4 秒后自动开一块灵感板。
+               标签面板的右键菜单在自动化里很难点准（要先展开侧栏再找准行），
+               所以给板窗口留一个直接入口。 */
+            #[cfg(debug_assertions)]
+            if let Ok(tag) = std::env::var("AM_AUTO_BOARD") {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(4000));
+                    tauri::async_runtime::spawn(async move {
+                        // 走和菜单完全一样的那条命令（不另写一份逻辑）
+                        let st = h.state::<AppState>();
+                        let _ = am_board_open(h.clone(), st, tag, None).await;
+                    });
+                });
+            }
             Ok(())
         })
         // 缩略图走自定义协议：字节永不经过 IPC（IPC 会序列化成 JSON 数组）
@@ -2577,8 +3097,13 @@ fn main() {
             am_clip_peek,
             am_clip_history,
             am_snip_start,
-            am_snip_commit,
+            am_snip_crop,
+            am_snip_finish,
             am_snip_cancel,
+            am_peek_ready,
+            am_board_open,
+            am_board_close,
+            am_board_paste,
             am_save_as,
             am_hotkeys_set,
             am_meta_missing,

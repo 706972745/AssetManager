@@ -138,6 +138,17 @@ export interface AutoRule {
   needDims: boolean;
 }
 
+/** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
+export interface BoardPastedItem {
+  id: number;
+  /** `thumb://` 地址：板上看到的永远是缩略图，复制/打开一律走 path 的源文件 */
+  src: string;
+  w: number;
+  h: number;
+  name: string;
+  path: string;
+}
+
 /** 标签 + 使用数（侧栏用） */
 export interface TagCount {
   name: string;
@@ -372,8 +383,19 @@ export interface Source {
   clipHistory(): Promise<[string, number, number][]>;
   /** F1 / Alt+F1：开始截图（mode: save | copy） */
   snipStart(mode?: "save" | "copy"): Promise<void>;
-  /** 确认选区（CSS 像素）；saveAs = 弹保存对话框 */
-  snipCommit(x: number, y: number, w: number, h: number, saveAs?: boolean): Promise<string | null>;
+  /** 裁出选区（CSS 像素）→ `[dataURL, 物理宽, 物理高]`，给 canvas 当底图 */
+  snipCrop(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    scale: number,
+  ): Promise<[string, number, number]>;
+  /** 交付合成好的整张图（含标注）。action: copy | save | saveas | peek */
+  snipFinish(
+    png: string,
+    action: "copy" | "save" | "saveas" | "peek",
+  ): Promise<string | null>;
   snipCancel(): Promise<void>;
   /** 注册系统级快捷键，返回注册失败的组合 */
   hotkeysSet(list: [string, string][]): Promise<string[]>;
@@ -386,7 +408,17 @@ export interface Source {
   /** 按新图比例改窗口尺寸（长边不变） */
   peekRatio(w: number, h: number): Promise<void>;
   peekClose(): Promise<void>;
+  /** 开一块灵感板：该标签下所有素材铺到无限画布上。返回张数（0 = 已有那块被聚焦） */
+  boardOpen(tag: string, title?: string): Promise<number>;
+  boardClose(): Promise<void>;
+  /**
+   * 灵感板里 Ctrl+V：剪贴板图片存进**程序目录\screenshots**、入库、打上这块板的标签，
+   * 返回刚入库的那张（前端直接贴到视口中心）。
+   */
+  boardPaste(tag: string): Promise<BoardPastedItem>;
   peekTop(on: boolean): Promise<boolean>;
+  /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
+  peekReady(): Promise<void>;
 
   /* ---------------- T24 主色板 / T25 查重 / T26 引用 / T33 批量重命名 ---------------- */
   /** 按一批全局 id 取素材（查重/引用面板要显示缩略图） */

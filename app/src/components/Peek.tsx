@@ -15,6 +15,10 @@ import { ContextMenu, type CtxItem } from "./ContextMenu";
  * - `Ctrl+滚轮`：整张贴图的不透明度
  * - 左键拖：移动窗口；中键拖：图内平移（放大后才有意义）
  * - 双击：撕掉这张贴图
+ *
+ * **窗口里除了图什么都没有**（owner 2026-11-17：右上角 X、底部信息条全撤掉）——
+ * 关闭走双击 / Esc / 右键菜单。同理窗口本身必须真透明，否则 Ctrl+滚轮降不透明度时
+ * 露出来的是窗口自己的深色底（看起来就是"变黑"，而不是看到背后的东西）。
  */
 interface PeekItem {
   src: string;
@@ -44,32 +48,10 @@ function bootData(): { items: PeekItem[]; i: number; opacity: number } {
 }
 
 /** 16px 线性图标（只用一个，不值得为它引依赖） */
-function Ico({ d, size = 12 }: { d: string[]; size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {d.map((p, i) => (
-        <path d={p} key={i} />
-      ))}
-    </svg>
-  );
-}
-const ICO_CLOSE = ["M18 6 6 18", "M6 6l12 12"];
-
 export function Peek() {
   const boot = useMemo(bootData, []);
   const [idx, setIdx] = useState(boot.i);
   const [pinned, setPinned] = useState(true); // 默认置顶（owner 要求）
-  const [hover, setHover] = useState(false);
   const [err] = useState("");
   const [opac, setOpac] = useState(boot.opacity);
   /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点 */
@@ -79,8 +61,25 @@ export function Peek() {
   const root = useRef<HTMLDivElement>(null);
   const busy = useRef(false);
   const pan = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  /* 窗口建出来是**不可见**的（后端 `.visible(false)`），首帧真画上去了才让它露面 ——
+     否则 WebView2 会先闪一下自己的默认底色，中键贴图时那一闪特别难看。 */
+  const shown = useRef(false);
+  const markReady = useCallback(() => {
+    if (shown.current) return;
+    shown.current = true;
+    // 双 rAF：等这一帧真的合成完，再让窗口显示
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => void source.peekReady().catch(() => {}))
+    );
+  }, []);
 
   const cur = boot.items[idx];
+
+  /* 图可能已经在缓存里（onLoad 不会再触发），所以再挂一道兜底 */
+  useEffect(() => {
+    const t = setTimeout(markReady, 400);
+    return () => clearTimeout(t);
+  }, [markReady]);
 
   useEffect(() => {
     document.body.classList.add("peek-body");
@@ -240,6 +239,13 @@ export function Peek() {
     },
     { kind: "separator" },
     {
+      label: "截图",
+      icon: "image",
+      shortcut: "F1",
+      action: () => void source.snipStart("save").catch(() => {}),
+    },
+    { kind: "separator" },
+    {
       label: `${pinned ? "✓ " : ""}窗口置顶`,
       icon: "star",
       action: () => void source.peekTop(!pinned).then(setPinned).catch(() => {}),
@@ -261,8 +267,6 @@ export function Peek() {
       ref={root}
       className="peek-root"
       data-tauri-drag-region
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       onDoubleClick={close}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -276,6 +280,8 @@ export function Peek() {
           alt=""
           draggable={false}
           data-tauri-drag-region
+          onLoad={markReady}
+          onError={markReady}
           style={{
             opacity: opac,
             transform:
@@ -287,26 +293,6 @@ export function Peek() {
       )}
 
       {err && <div className="peek-err">{err}</div>}
-
-      {cur && (
-        <div className={`peek-meta ${hover ? "on" : ""}`} data-tauri-drag-region>
-          <span className="mono peek-name">{cur.name}</span>
-          {cur.w > 0 && (
-            <span className="mono peek-dim">
-              {cur.w}×{cur.h}
-            </span>
-          )}
-          {view.s > 1 && <span className="mono peek-dim">{Math.round(view.s * 100)}%</span>}
-          {opac < 0.999 && <span className="mono peek-dim">{Math.round(opac * 100)}%</span>}
-        </div>
-      )}
-
-      {/* 只剩一个关闭键（置顶/全屏图标按 owner 要求撤掉，置顶默认开） */}
-      <div className={`peek-tools ${hover ? "on" : ""}`}>
-        <button className="peek-btn" title="关闭（Esc / 双击）" onClick={close}>
-          <Ico d={ICO_CLOSE} />
-        </button>
-      </div>
 
       {menu && (
         <ContextMenu

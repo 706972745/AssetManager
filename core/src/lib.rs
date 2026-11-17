@@ -1578,4 +1578,42 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// 灵感板粘贴那条链（0.11.0）：
+    /// 图片落进**截图目录** → 扫描入库 → 按**绝对路径**点查素材 id → 打上这块板的标签 → 按标签能查回来。
+    /// 这条链断哪一环，用户看到的现象都是「粘进去了，下次开板那张图不在」，所以值得单测钉住。
+    #[test]
+    fn pasted_file_is_lookupable_by_path_and_tagged() {
+        let d = tmp("paste");
+        let shots = d.join("screenshots");
+        std::fs::create_dir_all(&shots).unwrap();
+        // 真的写一张能解码的 PNG（不是几个随便的字节）：扫描要读文件头拿宽高
+        let f = shots.join("粘贴 2026-11-17 12-00-00.png");
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([200, 30, 30, 255]))
+            .save(&f)
+            .unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&shots.to_string_lossy(), |_| {}).unwrap();
+
+        let path = f.to_string_lossy().to_string();
+        let lib = app.lib_for_path(&path).expect("截图目录扫描后应当就是库根");
+        let local = db::asset_id_by_path(app.conn_for_path(&path).unwrap(), &path)
+            .unwrap()
+            .expect("按绝对路径必须能点查到刚入库的那张");
+        let g = gid(lib, local);
+        app.tag_assets(&[g], "灵感板·参考").unwrap();
+
+        let q = model::AssetQuery {
+            tag: Some("灵感板·参考".into()),
+            limit: Some(10),
+            ..Default::default()
+        };
+        let rows = app.list(&q).unwrap();
+        assert_eq!(rows.len(), 1, "粘贴后打上的标签必须能把它筛出来");
+        assert_eq!(rows[0].id, g);
+        assert_eq!((rows[0].width, rows[0].height), (Some(4), Some(3)));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

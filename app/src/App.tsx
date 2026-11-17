@@ -558,6 +558,13 @@ export default function App() {
         y,
         items: [
           {
+            label: "打开灵感板（无限画布）",
+            icon: "expand",
+            action: () =>
+              void source.boardOpen(tag).catch((e) => toast(String(e))),
+          },
+          { kind: "separator" },
+          {
             label: on ? "取消这个筛选" : `只看「${label}」`,
             icon: "funnel",
             action: () => {
@@ -582,7 +589,7 @@ export default function App() {
         ],
       });
     },
-    [tagFilter, deleteTagEverywhere]
+    [tagFilter, deleteTagEverywhere, toast]
   );
 
   const groupMenu = useCallback((name: string, x: number, y: number) => {

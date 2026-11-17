@@ -65,7 +65,7 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
 | 代码 | 不 import / 不复制 FontManager 的源码。`tokens.css`、`app.css`、`ui.tsx` 是**照数值重写**的，注释里写清来源，改数值只改自己这份 |
 | 配置 | 独立 `identifier: com.assetmanager.desktop`、独立数据目录 `%LOCALAPPDATA%\AssetManager`、独立 dev 端口 `1430`。**不许复用 FontManager 的 state.json / api.json / 插件目录** |
 | 数据 | 用户素材库和 FontManager 的字体库没有任何关系，不共用目录、不共用缓存 |
-| 发版 | 独立版本号（当前 **0.10.0 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
+| 发版 | 独立版本号（当前 **0.11.0 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
 | 仓库 | **将来是 GitHub 上的另一个仓库**（独立 remote / 独立 tag / 独立 CI）。**令牌共用**（同一账户），但令牌只做认证，绝不写进任何会提交的文件，也绝不往 FontManager 的 remote 推 |
 | 唯一共用 | 便携工具链 `../FontManager/Fonts工程文件/env.sh`（Rust/MSVC/SDK，宿主目录在 FontManager 下，见上两级 `工作区总览与规则.md` §2），以及「界面视觉语言」这一层设计审美 |
 
@@ -85,6 +85,10 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
 - **无边框看图可以多开**（`B` / 中键）：想贴几张贴几张，各自独立；关软件/重启电脑后，
   上次没手动关的全部自己回来（位置/大小/不透明度都记着）；`Shift+滚轮` 图内缩放、
   `Ctrl+滚轮` 调不透明度、双击撕掉、右键有复制原图/复制显示尺寸/另存。
+- **灵感板（无限画布）**：**任意标签右键** → 「打开灵感板」，把该标签下所有软件能出图的格式铺到一块
+  无边界画布上（照 PureRef）：拖 = 移、右下角手柄 / `Alt+滚轮` = 改大小、滚轮 = 锚定指针缩放、`F` = 全部适应。
+  板上复制/打开/定位/另存**一律是源文件**，缩略图只用来在板上看。板内 `Ctrl+V` 把剪贴板图片存进
+  `程序目录\screenshots`、自动入库并打上这块板的标签。
 - **截图与剪贴板**：`F1` 选区存到 `程序目录\screenshots`（自动进素材库）· `Alt+F1` 截完直接进剪贴板 ·
   `F3` 把剪贴板图片用无边框看图打开（留最近 10 张）。三个键都是系统级、可在设置里改。
 - **无边框看图**的手感：窗口就是那张图（无标题栏/无边框，长边 342 DIP 起），滚轮连窗口一起缩放、

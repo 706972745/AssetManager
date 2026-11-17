@@ -398,7 +398,10 @@ export const mockSource: Source = {
   async snipStart() {
     throw new Error("浏览器预览模式没有截图");
   },
-  async snipCommit() {
+  async snipCrop() {
+    throw new Error("浏览器预览模式没有截图");
+  },
+  async snipFinish() {
     return null;
   },
   async snipCancel() {},
@@ -411,9 +414,17 @@ export const mockSource: Source = {
   async peekZoom() {},
   async peekRatio() {},
   async peekClose() {},
+  async boardOpen() {
+    throw new Error("浏览器预览模式没有灵感板");
+  },
+  async boardClose() {},
+  async boardPaste() {
+    throw new Error("浏览器预览模式没有灵感板");
+  },
   async peekTop(on: boolean) {
     return on;
   },
+  async peekReady() {},
   async assetsByIds(ids: number[]) {
     return assets.filter((a) => ids.includes(a.id));
   },
