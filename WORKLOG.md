@@ -1067,7 +1067,7 @@ TagDock:  const open = pinned || !!hold;   // hold = 「标签面板保持展开
 建仓 → `git remote add origin`（fetch 不带凭据、pushurl 带）→ 推 `main` → 打 tag → 建 draft release →
 传资产 → `PATCH draft:false`。
 
-**README 重写**：原来是"只指路"的三行；现在照 FontManager 首页的骨架写 —— 아이콘 + 一句话 +
+**README 重写**：原来是"只指路"的三行；现在照 FontManager 首页的骨架写 —— 图标 + 一句话 +
 badges + 链接行 + 0.12.4 主界面截图 + 「这是什么」+ 能力表 + 快捷键表 + 构建命令 + 已知限制 +
 与 FontManager 的关系 + 文档索引。正文仍以 `AssetManager-项目说明.md` 为准，README 只做门面。
 
