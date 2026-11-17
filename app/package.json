@@ -2,7 +2,7 @@
   "name": "assetmanager-app",
   "private": true,
   "license": "GPL-3.0-only",
-  "version": "0.1.22",
+  "version": "0.1.25",
   "type": "module",
   "scripts": {
     "dev": "vite",

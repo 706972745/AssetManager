@@ -164,6 +164,8 @@ export function Snip() {
   useEffect(() => {
     if (rect) rectBorn.current = Date.now();
   }, [rect]);
+  /* 「Ctrl+C 是不是真人按的」不在这里判断：键盘消息进了 WebView 分不出注入还是人按，
+     所以闸门放在 Rust 侧（core/src/keywatch.rs 低级键盘钩子 + am_snip_finish 里的校验）。 */
   const [ops, setOps] = useState<Op[]>([]);
   const [redo, setRedo] = useState<Op[]>([]);
   const [cursor, setCursor] = useState<P>({ x: -999, y: -999 });

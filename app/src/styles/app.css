@@ -2722,78 +2722,60 @@
   border-color: rgba(var(--ink-rgb), 0.22);
 }
 
-/* ---------------------------------------------------------------- 侧栏分区
-   标签面板是侧栏里的一个**真分区**（不是浮层）：头部永远在，展开时只压缩目录树，
-   不盖住任何东西，所以「素材库 / 回收站永远看得见」这条不需要靠时序去保证。 */
-/* 结构：**内容在上、头部在下**（用 `order` 交换，仍然是正常的自上而下文档流），
-   容器用**固定像素高度**（`min(320px, 45vh)`）—— 这样展开时头部一动不动，
-   鼠标停在头部上可以放心点，不会出现"点下去落到别的行"。
-   踩过的三个坑，别改回去：
-   1) `column-reverse`（头在下、向上长）——溢出的内容在命中测试上不可靠，
-      会出现"看得见、点不到，点下去落到目录树上"；
+/* ---------------------------------------------------------------- 侧栏停靠面板
+   分组 / 标签两块面板**逐项照 FontManager 2.3.x**（owner 2026-11-18：
+   「分组和标签的界面样式和展开高度要和 FontManager 一模一样，包括里面的显示效果」）。
+   数值来源：`ZFontManager/src/app.css` 的 `.tag-dock` / `.tag-row` / `.coll-*` 那几段。
+
+   结构：**内容在上、头部在下**（用 `order` 交换，仍然是正常的自上而下文档流），
+   容器用**固定像素高度**。踩过的三个坑，别改回去：
+   1) `column-reverse`（头在下、向上长）—— 溢出的内容在命中测试上不可靠，
+      会出现「看得见、点不到，点下去落到目录树上」；
    2) 容器 `height: clamp(190px, 42%, 460px)` —— 侧栏是 flex 项、height:auto，
       百分比无法解析会让整条声明失效（类加上了、高度却不动）；
-   3) 高度过渡 >100ms —— 实机能明显感觉"慢半拍"。
-   所以：固定 px 上限 + 110ms 过渡 + **头部不是点击目标**（固定按钮放在工具行里），
-   悬停展开时头部上移也不会让人误点到别的行。 */
+   3) 高度过渡 >110ms —— 实机能明显感觉「慢半拍」。
+
+   **展开只认 `.open`，不用 CSS `:hover`**：分组与标签上下相邻，各自 :hover 时
+   从标签移到分组会让标签先收起、把分组整体推走，指针脱靶，分组永远展不开。
+   悬停由 `lib/dockHover.ts` 的全局单值驱动（离开延迟 200ms，两个面板同一帧交接）。 */
 .tag-dock {
-  flex: none;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
+  /* 收起时正好只有头部那 32px；别用百分比（侧栏是 flex 项、height:auto，解析不出值） */
   height: 32px;
-  /* ⚠️ 必须写：flex 项的 min-height 默认是 auto（= min-content），
-     不加这句 height:32px 会被内容顶开 —— 收起时"工具行漏在头部下面"就是这个。 */
   min-height: 0;
-  margin: 0 -10px 0 -10px;
-  padding: 0 10px;
   overflow: hidden;
-  background: var(--ui-bg);
-  transition: height var(--t-dock) cubic-bezier(0.25, 0.8, 0.35, 1);
+  margin-top: 4px;
+  /* 与「打开库 / 回收站」那一列同一条线（0.05）：它们是同一列里的兄弟行，线一深一浅就露馅 */
+  border-top: 1px solid rgba(var(--ink-rgb), 0.05);
+  transition: height 110ms ease;
 }
-/* 头部钉在底栏上方不动：展开时只有内容块在变高 */
-.tag-dock-head {
-  order: 2;
-}
-.tag-dock-body {
-  order: 1;
-}
-.tag-dock:hover,
 .tag-dock.open {
-  /* 与 FontManager .tag-dock.open 同值：300px / 42vh */
+  /* 分组面板（.coll-dock）必须用**同一个值**：两边高度不同的话，从标签移到分组时
+     面板高度一变，指针会被甩出去 */
   height: min(300px, 42vh);
+  /* 展开时这条边界再深一档：它此刻是「内容区 / 面板」的分界 */
+  border-top-color: rgba(var(--ink-rgb), 0.12);
 }
-/* 两个停靠面板（分组 / 标签）同时展开时各让一步：
-   照 FontManager 的 `.half`（各约 220px）——否则下面那块会把上面那块挤成一条缝。 */
-.tag-dock.open.half {
-  height: min(220px, 32vh);
+/* 两块同时展开各让一步（`.half` 由 `lib/dockOpen.ts` 判定，两边都上报才生效）：
+   两个都 min(300px,42vh) 就是 600px，目录树被压到接近零、底栏被挤出可视区 */
+.tag-dock.open.half,
+.coll-dock.open.half {
+  height: min(220px, 30vh);
 }
-/* ── 分组面板（0.2.x）：与标签面板同一个壳，只有行首图标不同 ──
-   照 FontManager `.coll-row`：文件夹图标 + 名字 + 行尾数字，图标灰、悬停/选中提亮。 */
-.coll-row {
-  gap: 7px;
-}
-.coll-icon {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-3);
-}
-.coll-row:hover .coll-icon,
-.coll-row.sel .coll-icon {
-  color: var(--text-2);
-}
-/* 头部**盒模型整段照 .nav-row**（FontManager 设计统一 §2.1）：
-   32 高 / gap 10 / padding 0 11 / 直角 / 11px / 500 字重 / 图标 15。
-   它和「打开库 / 回收站 / 关于」是同一列里的兄弟行，差一点都看得出来。 */
+
 .tag-dock-head {
+  order: 2; /* 钉在底栏上方（见上面的说明） */
+  /* 盒模型整段照 .tree-row：32px 高、gap 10、直角、500 字重、图标 15。
+     它和「打开库 / 回收站」是同一列里的兄弟行，差一点都看得出来。 */
   flex: 0 0 32px;
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 32px;
   padding: 0 11px;
-  border-top: 1px solid var(--hairline);
   border-radius: 0;
+  /* 和行同字号（11px），主次靠字重区分 —— 13px 会比行大两档 */
   font-size: var(--fs-11);
   font-weight: 500;
   color: var(--text-2);
@@ -2808,44 +2790,42 @@
   flex-shrink: 0;
   opacity: 0.75;
 }
-.tag-dock-head:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.tag-dock-head .grow {
+.tag-dock-title {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-dock-count {
+  font-size: var(--fs-11);
+  font-weight: 400;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 .tag-dock-caret {
-  display: grid;
-  place-items: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  transform: rotate(90deg);
+  transition: transform 110ms ease;
   color: var(--text-3);
-  transition: transform var(--t-quick);
 }
 .tag-dock-caret.closed {
-  /* 头部在底部：收起时内容在"上面"，箭头朝上；悬停或固定展开后朝下 */
-  transform: rotate(180deg);
+  transform: rotate(0deg);
 }
-.tag-dock:hover .tag-dock-caret,
-.tag-dock.open .tag-dock-caret {
-  transform: none;
-}
-/* 头部里的筛选胶囊：收起状态也看得见「正在按什么筛」 */
+/* 收起时也要看得见「正在按什么筛」，否则筛选状态被藏起来 */
 .tag-dock-filter {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 132px;
-  height: 19px;
-  padding: 0 3px 0 6px;
-  border: 1px solid var(--tcline, var(--ui-line));
-  border-radius: var(--r-pill);
-  background: var(--tcs, var(--e1));
-  font-size: var(--fs-9);
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--text-1);
+  gap: 5px;
+  max-width: 110px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: var(--fs-10);
+  font-weight: 500;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--tc, var(--text-3)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tc, var(--text-3)) 28%, transparent);
 }
 .tag-dock-filter-name {
   overflow: hidden;
@@ -2859,206 +2839,313 @@
   width: 13px;
   height: 13px;
   border-radius: 50%;
+  cursor: pointer;
   color: var(--text-3);
-  cursor: default;
 }
 .tag-dock-filter-x:hover {
-  background: var(--ui-hover);
-  color: var(--danger);
+  background: var(--e2);
+  color: var(--text-1);
 }
 
 .tag-dock-body {
-  flex: 1;
+  order: 1; /* 内容在头部上方长高 */
+  flex: 1 1 auto;
   min-height: 0;
-  display: flex;
   flex-direction: column;
-  gap: 2px;
-  overflow: hidden;
-  padding-bottom: 4px;
+  padding-top: 6px;
+  /* 收起时必须整块不画：内容在头部上方，只留 32px（头部高度）的话露出来的是**内容区的顶部**，
+     而不是用户要找的那一行「标签」。展开条件与高度过渡写成同一组，避免「展开了但内容不出现」。 */
+  display: none;
+}
+.tag-dock.open .tag-dock-body {
+  display: flex;
 }
 .tag-dock-tools {
-  flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px 5px 10px;
+  gap: 4px;
+  padding: 0 8px 6px;
 }
-.tag-search {
+.tag-dock-search {
+  flex: 1;
+  min-width: 0;
+}
+.tag-dock-search input {
   width: 100%;
-  height: 22px;
+  height: 24px;
   padding: 0 8px;
+  border-radius: 5px;
   border: 1px solid var(--ui-line);
-  border-radius: var(--r-pill);
+  background: var(--e1);
   outline: none;
-  background: var(--ui-bg);
+  font-size: var(--fs-11);
   color: var(--text-1);
-  font: inherit;
-  font-size: var(--fs-10);
 }
-.tag-search::placeholder {
-  color: var(--text-3);
-}
-.tag-search:focus {
+.tag-dock-search input:focus {
   border-color: var(--accent);
 }
 .tag-tool-btn {
-  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  height: 22px;
+  gap: 4px;
+  height: 24px;
   padding: 0 7px;
-  border: 1px dashed var(--ui-line);
-  border-radius: var(--r-pill);
+  border-radius: 5px;
+  border: 1px solid transparent;
   background: transparent;
+  font-size: var(--fs-10);
   color: var(--text-3);
-  font-size: var(--fs-9);
-  cursor: default;
+  white-space: nowrap;
+  cursor: pointer;
 }
 .tag-tool-btn:hover {
-  border-color: var(--ui-line-hover);
-  color: var(--text-1);
+  background: var(--e1);
+  color: var(--text-2);
 }
-/* 固定在展开状态：实心描边 + 一个实心圆点，一眼看出"它现在不会自己收" */
 .tag-tool-btn.on {
-  border-style: solid;
-  border-color: var(--accent);
-  background: var(--accent-a);
-  color: var(--accent);
+  color: var(--text-1);
+  border-color: var(--ui-line);
+  background: var(--e1);
 }
 .tag-pin-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: currentColor;
-  opacity: 0.5;
+  border: 1px solid currentColor;
 }
 .tag-tool-btn.on .tag-pin-dot {
-  opacity: 1;
+  background: currentColor;
 }
+.tag-group-add {
+  padding: 0 8px 6px;
+}
+.tag-group-add input {
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--ui-line);
+  background: var(--e1);
+  outline: none;
+  font-size: var(--fs-11);
+  color: var(--text-1);
+}
+
 .tag-dock-scroll {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  margin-right: -10px;
-  padding-right: 10px;
+  padding: 0 4px 6px;
+  margin-right: -6px;
+  padding-right: 6px;
 }
-.tag-dock-empty {
-  padding: 10px 10px 6px 11px;
-  font-size: var(--fs-10);
-  color: var(--text-3);
-  line-height: 1.85;
-}
-.tag-dock-empty b {
-  color: var(--text-2);
-  font-weight: 600;
-}
-.tag-group {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
+
+/* ── 行：25px 高 / 内距 0 7 / 圆角 5 / gap 7 / 11px 500 ──
+   与侧栏 32px 的导航行**刻意不同**：面板里是密集列表，参照物（FontManager）就是 25。 */
+.tag-row,
 .tag-group-row {
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 27px;
-  padding: 0 8px;
-  border-radius: var(--r-4);
-  color: var(--text-2);
+  height: 25px;
+  padding: 0 7px;
+  border-radius: 5px;
   font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--text-2);
   cursor: default;
+  position: relative;
   user-select: none;
 }
+.tag-row:hover,
 .tag-group-row:hover {
   background: var(--ui-hover);
   color: var(--text-1);
 }
-.tag-group-row .caret {
-  display: grid;
-  place-items: center;
-  color: var(--text-3);
-  transition: transform var(--t-quick);
+/* 选中行：与本软件侧栏 `.tree-row.sel` 同一套表现 —— 浅灰底 + 2px 强调色竖线 */
+.tag-row.sel {
+  background: var(--ui-hover);
+  color: var(--text-1);
 }
-.tag-group-row .caret.closed {
-  transform: rotate(-90deg);
+.tag-row.sel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  z-index: 1;
 }
-.tag-group-row .tree-name {
+/* 没配色的标签选中时圆点走强调色；配过色的仍用自己的颜色（那是标签的身份） */
+.tag-row.sel.tc-gray {
+  --tc: var(--accent);
+}
+.tag-row.sel .tag-dot {
+  background: var(--tc, var(--text-1));
+  border-color: transparent;
+}
+/* 配了颜色的标签：**行名 + 圆点 + 选中竖线**一律用标签自己的颜色 */
+.tag-row:not(.tc-gray),
+.tag-row:not(.tc-gray):hover,
+.tag-row:not(.tc-gray).sel {
+  color: var(--tc);
+}
+.tag-row:not(.tc-gray).sel::before {
+  background: var(--tc);
+}
+.tag-group-row {
+  font-weight: 500;
+}
+.tag-row-name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
 }
-.tag-group-add {
-  margin: 0 4px 4px 4px;
-}
-.tag-ns {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-/* 选中行：**中性灰底 + 2px 竖线**（FontManager 2.3.1 定版，owner 2026-11-17 截图指定）。
-   以前用标签自己的淡色垫底：一屏里几个彩色标签就像打翻了调色盘，而且没配色的标签
-   淡色会混成一块深灰，比任何选中行都重。现在选中只靠「竖线 + 灰底」表达。 */
-.tag-row.sel {
-  background: var(--ui-hover);
-}
-/* 配过色的标签：**行名 + 竖线 + 圆点**一律用标签自己的颜色（同 FontManager 2.3.1）。
-   `tc-gray` = 没设颜色，保持「灰字 + 蓝竖线」，否则一屏全是彩色字反而看不出选中。 */
-.tag-row:not(.tc-gray) .tree-name {
-  color: var(--tc);
-}
-.tag-row:not(.tc-gray) .tag-dot {
-  background: var(--tc);
-  border-color: transparent;
-}
-.tag-row:not(.tc-gray).sel::before {
-  background: var(--tc);
-}
-.tag-row.sel.tc-gray::before {
-  background: var(--ui-accent);
-}
-/* 自动标签的维度小标题（格式/类型/像素/比例/体积） */
-.tag-ns-row,
-.tag-subheading {
-  padding: 7px 8px 1px 20px;
-  font-size: var(--fs-9);
-  letter-spacing: 0.08em;
+/* 与行名**同字号**（11px），主次只靠颜色和字重区分 —— 10px 的数字在缩放后笔画发虚，
+   一列里「4」和「1491」看着就像两种粗细 */
+.tag-row-count {
+  flex: none;
+  font-size: var(--fs-11);
+  font-weight: 400;
   color: var(--text-3);
-  user-select: none;
+  font-variant-numeric: tabular-nums;
 }
-.tag-subheading {
-  padding-left: 8px;
-  padding-top: 10px;
-}
-/* 标签行上的「⋯」：平时不露面，悬停才出，避免一行三个图标打架 */
 .tag-row-more {
   flex: none;
-  display: none;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   padding: 0;
   border: 0;
-  border-radius: var(--r-4);
+  border-radius: 4px;
   background: transparent;
   color: var(--text-3);
-  cursor: default;
+  opacity: 0;
+  transition: opacity 90ms ease;
+  cursor: pointer;
 }
 .tag-row:hover .tag-row-more,
-.tag-group-row:hover .tag-row-more {
-  display: inline-flex;
+.tag-group-row:hover .tag-row-more,
+.tag-row-more:focus-visible {
+  opacity: 1;
 }
 .tag-row-more:hover {
   background: var(--e2);
   color: var(--text-1);
+}
+/* 圆点：手工标签实色、自动标签空心虚线（一眼分得清「你打的」和「软件猜的」） */
+.tag-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tc, currentColor);
+}
+.tag-row.auto .tag-dot {
+  background: transparent;
+  border: 1px dashed currentColor;
+}
+/* 选中的自动标签必须压过上面那条（同特异度、它写在后面） */
+.tag-row.auto.sel .tag-dot,
+.tag-row.sel.tc-gray .tag-dot {
+  background: var(--tc, var(--accent));
+  border-style: solid;
+  border-color: transparent;
+}
+.tag-caret {
+  flex-shrink: 0;
+  display: inline-flex;
+  transform: rotate(90deg);
+  transition: transform 100ms ease;
+  color: var(--text-3);
+}
+.tag-caret.closed {
+  transform: rotate(0deg);
+}
+/* 分组行的序号（照 FontManager：图标 + 序号 + 名字 + 数字，用户点名要保留） */
+.coll-row {
+  gap: 6px;
+}
+.coll-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+}
+.coll-row:hover .coll-icon,
+.coll-row.sel .coll-icon {
+  color: var(--text-2);
+}
+.coll-no {
+  flex: none;
+  min-width: 11px;
+  font-size: var(--fs-11);
+  font-weight: 400;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tag-subheading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 7px 3px;
+  font-size: var(--fs-9);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.tag-subheading-toggle {
+  cursor: pointer;
+}
+.tag-ns-row {
+  padding: 6px 7px 2px;
+  font-size: var(--fs-9);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.tag-dock-empty {
+  padding: 10px 8px;
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.tag-dock-empty b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+.tag-dock-empty-inline {
+  padding: 2px 7px 4px 21px;
+}
+/* 就地新建 / 改名（照 FontManager `.collection-input`）：32 高、强调色描边 + 3px 光晕 */
+.collection-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 5px 11px;
+  border-radius: 5px;
+  border: 1px solid var(--accent-glow);
+  background: var(--e1);
+  box-shadow: 0 0 0 3px var(--accent-glow-soft);
+  color: var(--text-3);
+  margin: 1px 0;
+}
+.collection-input input {
+  width: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-1);
+  font-size: var(--fs-13);
 }
 
 

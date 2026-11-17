@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use am_core::fsops::MovePolicy;
 use am_core::model::{Asset, AssetQuery, DirNode, ScanStats};
-use am_core::{clipimg, db, fsops, scan, screen, thumb, watch, App};
+use am_core::{clipimg, db, fsops, keywatch, scan, screen, thumb, watch, App};
 use serde::{Deserialize, Serialize};
 use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -3517,6 +3517,21 @@ fn set_window_alpha(_win: &tauri::WebviewWindow, _alpha: u8) -> Result<(), Strin
 async fn snip_begin(app: AppHandle) -> Result<(), String> {
     /* 新会话：让上一次迟到的收尾线程（`am_snip_ready` 里那条）失效 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
+    /* 这次会话期间要判断「Ctrl+C 是真人按的还是别的程序注入的」——
+       见 core/src/keywatch.rs。钩子必须装在有消息泵的**主线程**上，所以走 run_on_main_thread；
+       装不上也不影响功能（real_key_within 会放行）。 */
+    keywatch::reset();
+    {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if !keywatch::install() {
+                if let Some(d) = LOG_DIR.get() {
+                    log_runtime(d, "keywatch install FAILED（注入判定降级为放行）");
+                }
+            }
+            drop(app2);
+        });
+    }
     /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
        `am_snip_cancel` 不会执行，slot 一直占着 → 之后每次按 F1 都回"上一次截图还没结束"，
        永久失效，用户只会说"F1 坏了"。有窗口才算真在进行中。 */
@@ -3928,12 +3943,40 @@ async fn am_snip_finish(
 ) -> Result<Option<String>, String> {
     /* 一行审计：谁触发的交付。这个软件出过两次「截完自动复制」，两次都是靠回看
        某一个入口才定位到的 —— 所以每个交付都记，别只在 copy 记。 */
+    /* 闸门（2026-11-18）：快捷键交付必须是**真人**按键。
+       本机有程序会向当前前台窗口注入 Ctrl+C（`core/src/keywatch.rs` 的低级键盘钩子抓到
+       带 `INJECTED` 标记的 Ctrl↓ + C↓ 同一毫秒对），覆盖层一收到就复制并关窗 ——
+       用户看到的就是「框完 / 画完一条线，它自己复制了」。
+       判据：最近 1.2 秒内**真人按下的键是不是那颗 C / S**。
+       注入键带 `LLKHF_INJECTED`，不进这条记录，所以它伪造不了这个事实。
+       按钮与中键是物理动作、且不经过这里，不受影响。 */
+    let expect_vk = match from.as_deref() {
+        Some("ctrl+c") => Some(0x43u32), // 'C'
+        Some("ctrl+s") => Some(0x53u32), // 'S'
+        _ => None,
+    };
+    if let Some(vk) = expect_vk {
+        if !keywatch::real_key_matches(vk, 1200) {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(
+                    d,
+                    &format!(
+                        "snip BLOCK auto-deliver action={action} from={} last_real={:?}",
+                        from.as_deref().unwrap_or("?"),
+                        keywatch::last_real_key()
+                    ),
+                );
+            }
+            return Err("检测到非本机键盘输入，已忽略这次交付（要复制请点下面的按钮，或自己按一次 Ctrl+C）".into());
+        }
+    }
     if let Some(d) = LOG_DIR.get() {
         log_runtime(
             d,
             &format!(
-                "snip finish action={action} from={}",
-                from.as_deref().unwrap_or("?")
+                "snip finish action={action} from={} last_real={:?}",
+                from.as_deref().unwrap_or("?"),
+                keywatch::last_real_key()
             ),
         );
     }
@@ -3943,6 +3986,8 @@ async fn am_snip_finish(
 
     let win = app.get_webview_window("snip");
     let close_snip = || {
+        /* 钩子必须在装它的线程（主线程）上卸 */
+        let _ = app.run_on_main_thread(|| keywatch::uninstall());
         /* 底图必须一起撤：它是全屏 topmost 的原生窗口，忘了会一直挡着桌面 */
         splash_close();
         if let Some(w) = app.get_webview_window("snip") {
@@ -4133,6 +4178,12 @@ async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
         let _ = win.hide();
     }
     let app2 = app.clone();
+    /* 会话结束：卸掉「真实按键」监视钩子（必须在装它的主线程上卸） */
+    let app_hook = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        keywatch::uninstall();
+        drop(app_hook);
+    });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(80));
         if let Some(w) = app2.get_webview_window("snip") {

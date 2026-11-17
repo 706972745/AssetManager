@@ -22,6 +22,7 @@ pub mod fsops;
 pub mod ids;
 pub mod imageinfo;
 pub mod imgops;
+pub mod keywatch;
 pub mod libs_migrate;
 pub mod model;
 pub mod palette;

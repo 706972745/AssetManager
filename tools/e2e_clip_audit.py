@@ -115,7 +115,8 @@ def main():
     print("已启动安装版（先杀掉全部旧实例）")
 
     cases = [
-        ("保存CtrlS", act_save_ctrl_s),
+        # 保存改成「点按钮」之前先别测 Ctrl+S：0.1.25 起快捷键交付只认**真人**按键，
+        # 脚本发的是注入键，一定被挡（见 tools/e2e_noauto.py）。那一条挪去做手测。
         ("中键贴图", act_middle),
         ("Enter", act_enter),
         ("双击选区", act_double_click),
@@ -141,12 +142,12 @@ def main():
             bad.append(f"{r['case']}写了剪贴板")
         if r["case"] in ("Enter", "双击选区") and not r["snip_open"]:
             bad.append(f"{r['case']}关了覆盖层")
-        if r["case"] in ("保存CtrlS", "中键贴图") and r["snip_open"]:
+        if r["case"] == "中键贴图" and r["snip_open"]:
             bad.append(f"{r['case']}没关覆盖层")
     if bad:
         print("结论：不符合 0.1.20 语义 → " + " / ".join(bad))
         return 1
-    print("结论：四条全部符合 0.1.20（保存/贴图不写剪贴板；Enter/双击什么都不做）")
+    print("结论：符合（中键贴图不写剪贴板并关窗；Enter/双击什么都不做）")
     return 0
 
 
