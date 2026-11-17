@@ -33,5 +33,11 @@ desktop.ini
 Thumbs.db
 .DS_Store
 
-# ===== 内部过程文档（沿用 FontManager 纪律：过程留在本地）=====
-UI待定问题清单.md
+# ===== 内部过程文档：只在本机维护，不进公库 =====
+# 理由（owner 2026-11-17）：这些是开发账本与方案稿，公开仓库只放 README / 源码 / 截图。
+/AssetManager-*.md
+/AssetManager-*.html
+/WORKLOG.md
+/标签系统方案.md
+/UI待定问题清单.md
+/docs/AssetManager-*.md

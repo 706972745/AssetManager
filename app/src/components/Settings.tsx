@@ -8,7 +8,7 @@ import { LibraryCard } from "./LibraryCard";
 import { onAppEvent } from "../data/source";
 
 /**
- * 设置面板：排布照 Eagle 的偏好设置（左列导航 + 右侧分组卡片 + 右下角「应用 / 保存设置」），
+ * 设置面板：左列导航 + 右侧分组卡片 + 右下角「应用 / 保存设置」，
  * 但**语言是 FontManager 的**——0 圆角侧栏行、2px 蓝竖线选中、1px 发丝线卡片、
  * 全局那套「平时 1px、靠近 6px」的滚动条（见 tokens.css 的 *::-webkit-scrollbar）。
  *
@@ -665,7 +665,7 @@ export function Settings({
           {
             id: "what",
             label: "定位",
-            hint: "对标 Eagle 的素材管理器，主场是百万级库的流畅度。索引式库：不搬动、不复制你的原文件。",
+            hint: "素材管理器，主场是百万级库的流畅度。索引式库：不搬动、不复制你的原文件。",
             kw: "说明 介绍 定位",
             node: <span className="set-value">索引式素材库</span>,
           },
