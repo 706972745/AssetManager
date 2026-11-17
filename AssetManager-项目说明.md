@@ -65,7 +65,7 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
 | 代码 | 不 import / 不复制 FontManager 的源码。`tokens.css`、`app.css`、`ui.tsx` 是**照数值重写**的，注释里写清来源，改数值只改自己这份 |
 | 配置 | 独立 `identifier: com.assetmanager.desktop`、独立数据目录 `%LOCALAPPDATA%\AssetManager`、独立 dev 端口 `1430`。**不许复用 FontManager 的 state.json / api.json / 插件目录** |
 | 数据 | 用户素材库和 FontManager 的字体库没有任何关系，不共用目录、不共用缓存 |
-| 发版 | 独立版本号（当前 **0.8.0 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
+| 发版 | 独立版本号（当前 **0.9.0 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
 | 仓库 | **将来是 GitHub 上的另一个仓库**（独立 remote / 独立 tag / 独立 CI）。**令牌共用**（同一账户），但令牌只做认证，绝不写进任何会提交的文件，也绝不往 FontManager 的 remote 推 |
 | 唯一共用 | 便携工具链 `../FontManager/Fonts工程文件/env.sh`（Rust/MSVC/SDK，宿主目录在 FontManager 下，见上两级 `工作区总览与规则.md` §2），以及「界面视觉语言」这一层设计审美 |
 
@@ -82,6 +82,8 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
   单个库坏了不拖垮别的库，整库备份只要拷一个文件。老库首次启动自动拆分（先备份到 `trash-libs/`）。
 - 详情面板照 Eagle 排：预览（**固定 1:1 方框，可滚动看其余部分**）→ 尺寸/体积/类型 → 原文件 →
   标签 → 我的（评分 / **主色板** / 注释 / 来源）→ 操作 → 显示层 → 引用。
+- **无边框看图**（`B`）：另开一扇"就是那张图"的窗口（无标题栏/无边框，长边 342 DIP），
+  滚轮连窗口一起缩放、整窗可拖、可置顶 —— 专门配合屏幕截图（照果核看图的「无边框模式」）。
 - 工具面板（`Ctrl+K` 搜「重复 / 引用 / 重命名」）：重复检测（xxh3 精确 + aHash 相似）、
   丢失的引用、批量重命名（规则 + 预览 + 可撤销）。
 - 窗口尺寸 **1280×820 / min 900×600**，出厂**深色**主题（浅色可在设置 → 外观切换；`?theme=light`

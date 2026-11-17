@@ -355,6 +355,17 @@ export interface Source {
   /** 看一眼目录里有什么（判断用户是不是把素材目录当成数据文件夹了） */
   probeDir(dir: string): Promise<DirProbe>;
 
+  /* ---------------- 无边框看图窗口（0.9.0） ---------------- */
+  /** 开一扇无边框窗口，`ids` 是整个浏览集合，`index` 是当前那张 */
+  peekOpen(ids: number[], index: number, longEdge?: number): Promise<void>;
+  /** 缩放窗口本身（连窗口一起缩放，锚定中心） */
+  peekZoom(step: number): Promise<void>;
+  /** 按新图比例改窗口尺寸（长边不变） */
+  peekRatio(w: number, h: number): Promise<void>;
+  peekClose(): Promise<void>;
+  peekTop(on: boolean): Promise<boolean>;
+  peekFullscreen(on: boolean): Promise<boolean>;
+
   /* ---------------- T24 主色板 / T25 查重 / T26 引用 / T33 批量重命名 ---------------- */
   /** 按一批全局 id 取素材（查重/引用面板要显示缩略图） */
   assetsByIds(ids: number[]): Promise<Asset[]>;

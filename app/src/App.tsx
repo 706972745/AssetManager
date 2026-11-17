@@ -1048,6 +1048,26 @@ export default function App() {
     }
   };
 
+  /* 无边框看图：开一扇"就是那张图"的独立窗口（照果核看图的无边框模式）。
+     为什么不在主窗里做：截图时主窗的侧栏/顶栏/详情栏都会进画面。
+     `items` 整个带过去，方向键在里面直接翻。 */
+  const openPeek = useCallback(
+    (a: Asset) => {
+      const list = items.length ? items : [a];
+      const i = Math.max(0, list.findIndex((v) => v.id === a.id));
+      // 记住上次缩放到的长边（同一个 origin，localStorage 两个窗口共用）
+      const last = Number(localStorage.getItem("am.peek.longEdge") ?? "") || undefined;
+      void source
+        .peekOpen(
+          list.map((v) => v.id),
+          i,
+          last
+        )
+        .catch((e) => toast(String(e), true));
+    },
+    [items, toast]
+  );
+
   /* ---------------- 右键菜单 ----------------
      一处接管全窗口：
      · 页面任意处右键都 preventDefault，WebView2 那套「返回/刷新/另存为/打印」不再出现；
@@ -1086,6 +1106,12 @@ export default function App() {
         show([
           { label: n > 1 ? `用默认程序打开（${n} 个）` : "用默认程序打开", icon: "image", action: () => void onOpenDefault(a) },
           {
+            label: "无边框看图（可以拖到任意位置截图）",
+            icon: "expand",
+            shortcut: "B",
+            action: () => openPeek(a),
+          },
+          {
             label: "预览大图",
             icon: "play",
             shortcut: "空格",
@@ -1110,6 +1136,29 @@ export default function App() {
                 .writeText(paths.join("\r\n"))
                 .then(() => toast(n > 1 ? `已复制 ${n} 条路径` : "已复制完整路径"))
                 .catch(() => toast("复制失败，可在详情面板里选中", true));
+            },
+          },
+          /* 「复制更多」里的那几样（照果核看图）：文件名 / 分辨率。
+             单张时才有分辨率可言，多选就只给文件名 */
+          {
+            label: n > 1 ? `复制 ${n} 个文件名` : "复制文件名",
+            icon: "copy",
+            action: () => {
+              void navigator.clipboard
+                .writeText(paths.map((pp) => pp.split(/[\\/]/).pop() ?? pp).join("\r\n"))
+                .then(() => toast(n > 1 ? `已复制 ${n} 个文件名` : "已复制文件名"))
+                .catch(() => toast("复制失败", true));
+            },
+          },
+          {
+            label: "复制分辨率",
+            icon: "copy",
+            disabled: n > 1 || !a.width || !a.height,
+            action: () => {
+              void navigator.clipboard
+                .writeText(`${a.width}×${a.height}`)
+                .then(() => toast(`已复制 ${a.width}×${a.height}`))
+                .catch(() => toast("复制失败", true));
             },
           },
           { kind: "separator" },
@@ -1201,7 +1250,7 @@ export default function App() {
     document.addEventListener("contextmenu", onCtx, true);
     return () => document.removeEventListener("contextmenu", onCtx, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, view, settingsOpen, dir, selected, busy, selectedIds, selPaths]);
+  }, [items, view, settingsOpen, dir, selected, busy, selectedIds, selPaths, openPeek]);
 
   // 键盘：空格预览、方向键切换、Esc、Ctrl+Z、Ctrl+,
   useEffect(() => {
@@ -1254,6 +1303,12 @@ export default function App() {
             lastPick.current = a.id;
           }
         }
+      } else if (e.key.toLowerCase() === "b" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // B = 无边框看图（Borderless）。对着参考图改稿/截图时最顺手的入口
+        if (selected) {
+          e.preventDefault();
+          openPeek(selected);
+        }
       } else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         // T = 给当前选中（多选就整批）打标签，和 FontManager 同一个键
         const ids = selectedIds.size ? [...selectedIds] : selected ? [selected.id] : [];
@@ -1269,7 +1324,7 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds]);
+  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek]);
 
   /* 打开标签编辑卡时把它的自动规则一起取回来（T34） */
   useEffect(() => {
@@ -1451,6 +1506,14 @@ export default function App() {
     }
 
     if (selected) {
+      out.push({
+        id: "peek",
+        label: "无边框看图（可拖到任意位置截图）",
+        hint: "B",
+        icon: "expand",
+        keywords: "无边框 看图 截图 borderless peek 参考图",
+        run: () => openPeek(selected),
+      });
       out.push({
         id: "preview",
         label: "全屏预览选中的素材",

@@ -380,6 +380,18 @@ export const mockSource: Source = {
     return "%LOCALAPPDATA%\\AssetManager（浏览器预览为假路径）";
   },
   /* ---- T24/T25/T26/T33：浏览器预览下给空数据，界面排版照常能看 ---- */
+  async peekOpen() {
+    throw new Error("浏览器预览模式没有独立的无边框窗口");
+  },
+  async peekZoom() {},
+  async peekRatio() {},
+  async peekClose() {},
+  async peekTop(on: boolean) {
+    return on;
+  },
+  async peekFullscreen(on: boolean) {
+    return on;
+  },
   async assetsByIds(ids: number[]) {
     return assets.filter((a) => ids.includes(a.id));
   },

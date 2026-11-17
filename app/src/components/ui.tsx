@@ -14,6 +14,7 @@ import {
   Copy,
   Database,
   Eye,
+  Expand,
   FileText,
   Film,
   Filter,
@@ -132,6 +133,10 @@ const ICONS: Record<string, Glyph> = {
   tag: ({ size, stroke, className }) => <Tag size={size} strokeWidth={stroke} className={className} />,
   info: ({ size, stroke, className }) => <Info size={size} strokeWidth={stroke} className={className} />,
   play: ({ size, stroke, className }) => <Eye size={size} strokeWidth={stroke} className={className} />,
+  /* 无边框看图（照果核看图）：四角向外的箭头 */
+  expand: ({ size, stroke, className }) => (
+    <Expand size={size} strokeWidth={stroke} className={className} />
+  ),
   sort: ({ size, stroke, className }) => (
     <ArrowUpDown size={size} strokeWidth={stroke} className={className} />
   ),

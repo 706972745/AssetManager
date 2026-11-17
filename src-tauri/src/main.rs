@@ -1389,6 +1389,225 @@ fn not_found() -> Response<Vec<u8>> {
         .unwrap()
 }
 
+/* ---------------- 无边框看图窗口（0.9.0，照果核看图的「无边框模式」） ----------------
+   果核看图最值得抄的一点不是渲染，而是**窗口形态**：它能把窗口变成"就是那张图"——
+   没有标题栏、没有边框、没有工具条，长边固定 342 DIP，窗口尺寸按图片比例算。
+   拖到截图里、贴在素材旁边比对时，它不占地方也不穿帮。
+
+   这里照它做一扇同样形态的窗口。差别在于我们用的是 WebView2（不是 D2D 直接画），
+   所以必须：
+   · `transparent(true)` —— 不然圆角外面是一块白/黑底；
+   · `shadow(false)` —— 系统阴影只会画成方框，圆角就白做了；
+   · 前端 body 透明（`body.peek-body`）；
+   · 缩放**改窗口尺寸**而不是改 CSS transform —— 这才是"连窗口一起缩放"的手感，
+     也是截图时最需要的行为（窗口边缘始终贴着图）。 */
+
+/// 无边框窗口的默认长边（DIP）。和果核看图同一个数：342。
+const PEEK_LONG_EDGE: f64 = 342.0;
+/// 长边允许范围（逻辑像素）：再小点不到、再大就是放大糊图
+const PEEK_MIN_EDGE: f64 = 96.0;
+const PEEK_MAX_EDGE: f64 = 4096.0;
+
+/// 图片比例 → 窗口逻辑尺寸。未知尺寸按 4:3 兜底（和瓦片骨架同一口径）。
+fn peek_size_for(w: u32, h: u32, long_edge: f64) -> (f64, f64) {
+    let (w, h) = if w > 0 && h > 0 { (w as f64, h as f64) } else { (4.0, 3.0) };
+    let long = long_edge.clamp(PEEK_MIN_EDGE, PEEK_MAX_EDGE);
+    if w >= h {
+        (long, (long * h / w).max(24.0))
+    } else {
+        ((long * w / h).max(24.0), long)
+    }
+}
+
+/// 把窗口居中到鼠标所在的那块屏（双屏用户常在副屏截图，居中到主屏就跑到另一边去了）
+fn peek_center_on_cursor(win: &tauri::WebviewWindow) {
+    let Ok(cur) = win.cursor_position() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let monitors = win.available_monitors().unwrap_or_default();
+    let m = monitors.iter().find(|m| {
+        let p = m.position();
+        let s = m.size();
+        cur.x >= p.x as f64
+            && cur.x < (p.x + s.width as i32) as f64
+            && cur.y >= p.y as f64
+            && cur.y < (p.y + s.height as i32) as f64
+    });
+    let (cx, cy) = match m {
+        Some(m) => {
+            let p = m.position();
+            let s = m.size();
+            (
+                p.x as f64 + (s.width as f64 - size.width as f64) / 2.0,
+                p.y as f64 + (s.height as f64 - size.height as f64) / 2.0,
+            )
+        }
+        None => (
+            cur.x - size.width as f64 / 2.0,
+            cur.y - size.height as f64 / 2.0,
+        ),
+    };
+    let _ = win.set_position(tauri::PhysicalPosition::new(cx.round(), cy.round()));
+}
+
+/// 从 `ids` 里截出最多 `cap` 个，并让 `index` 落在窗口内。
+fn trim_around(ids: &[i64], index: usize, cap: usize) -> (Vec<i64>, usize) {
+    let i = index.min(ids.len().saturating_sub(1));
+    if ids.len() <= cap {
+        return (ids.to_vec(), i);
+    }
+    let half = cap / 2;
+    let start = i.saturating_sub(half).min(ids.len() - cap);
+    (ids[start..start + cap].to_vec(), i - start)
+}
+
+/// 开一扇无边框看图窗口。`ids` 是这次浏览的整个集合（方向键在其中切换），`index` 是当前那张。
+///
+/// **必须是 `async fn`**（六个 peek 命令都是）：同步命令跑在主线程上，
+/// 而 `WebviewWindowBuilder::build()` / `set_size()` / `set_position()` 都要回主线程执行，
+/// 于是它们等自己 —— 自死锁。症状很迷惑：窗口对象被建出来了（能枚举、能截图），
+/// 但里面什么都不渲染、`on_page_load` 永不触发、命令也永不返回（日志停在调用前一行）。
+#[tauri::command]
+async fn am_peek_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    index: usize,
+    // 上次用的长边（DIP）；前端从 localStorage 里带过来，没有就用默认 342
+    long_edge: Option<f64>,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("没有可看的素材".into());
+    }
+    /* 上限 600 个，且**围着当前这张截窗**：直接 `take(600)` 会把"第 800 个"截成第 599 个，
+       用户按 B 看到的是一张完全不相干的图（而且不报错）。 */
+    let (ids, i) = trim_around(&ids, index, 600);
+    // 只在锁里取尺寸，拿到立刻放开 —— 建窗口要走主线程，别在持锁期间干慢事
+    let (w, h) = {
+        let a = lock(&state);
+        match a.asset(ids[i])? {
+            Some(x) => (x.width.unwrap_or(0).max(0) as u32, x.height.unwrap_or(0).max(0) as u32),
+            None => return Err("这张素材已经不在库里了".into()),
+        }
+    };
+    let (lw, lh) = peek_size_for(w, h, long_edge.unwrap_or(PEEK_LONG_EDGE));
+    if let Some(old) = app.get_webview_window("peek") {
+        let _ = old.close();
+    }
+    /* 启动数据用**初始化脚本**注入，不走 URL。
+       踩过两次：`WebviewUrl::App` 收的是 PathBuf，`index.html#/peek?ids=…` 与
+       `index.html?peek=1&ids=…` 都让新窗口全透明、连 on_page_load 都不触发
+       （runtime.log 里只有 `peek open`，没有 `peek page`）。
+       换成纯 `index.html` + `initialization_script` 之后导航正常，
+       而且省掉了 URL 长度限制（一屏 200 个 id 就是 3 KB 的查询串）。 */
+    let ids_js = ids.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let boot = format!("window.__AM_PEEK__ = {{ ids: [{ids_js}], i: {i} }};");
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("peek open n={} i={i}", ids.len()));
+    }
+    let win = tauri::WebviewWindowBuilder::new(&app, "peek", tauri::WebviewUrl::App("index.html".into()))
+        .title("看图")
+        .inner_size(lw, lh)
+        .decorations(false)
+        /* **不透明**：窗口尺寸就是图片尺寸、图正好铺满，没有任何地方需要透出桌面。
+           反而 `transparent(true)` 在"运行中新建的窗口"上不工作（实测：窗口有了、
+           全透明，webview 却连 on_page_load 都不触发）。果核看图的窗口也是方的。 */
+        .transparent(false)
+        .shadow(false)
+        .resizable(true)
+        .maximizable(false)
+        .minimizable(false)
+        .initialization_script(&boot)
+        .build();
+    // build() 失败**不能 `?` 提前返回**：窗口对象可能已经建了一半（实测能枚举到窗口，
+    // 但里面什么都没有），错误又被前端 toast 吞掉，排查时完全不可见。先留证。
+    let win = match win {
+        Ok(w) => w,
+        Err(e) => {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("peek build FAIL {e}"));
+            }
+            return Err(format!("无边框窗口创建失败：{e}"));
+        }
+    };
+    peek_center_on_cursor(&win);
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// 缩放窗口（**连窗口一起缩放**，锚定窗口中心）—— 滚轮走这里。
+#[tauri::command]
+async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
+    if !(0.5..=2.0).contains(&step) {
+        return Err("缩放步长不合法".into());
+    }
+    let size = win.outer_size().map_err(|e| e.to_string())?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+
+    let mut w = size.width as f64 * step;
+    let mut h = size.height as f64 * step;
+    let long = w.max(h);
+    let min = PEEK_MIN_EDGE * scale;
+    let max = PEEK_MAX_EDGE * scale;
+    // 撞到上下限时按同一比例回拉，形状不能变
+    let k = if long < min {
+        min / long
+    } else if long > max {
+        max / long
+    } else {
+        1.0
+    };
+    w = (w * k).round().max(24.0);
+    h = (h * k).round().max(24.0);
+    let nx = (pos.x as f64 + (size.width as f64 - w) / 2.0).round();
+    let ny = (pos.y as f64 + (size.height as f64 - h) / 2.0).round();
+    let r = win.set_size(tauri::PhysicalSize::new(w, h)).and_then(|_| {
+        win.set_position(tauri::PhysicalPosition::new(nx, ny))
+    });
+    if let Err(e) = &r {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("peek zoom FAIL {e}"));
+        }
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// 换图时按新图比例改窗口尺寸（长边保持当前大小，中心不动）。
+#[tauri::command]
+async fn am_peek_ratio(win: tauri::Window, w: u32, h: u32) -> Result<(), String> {
+    let size = win.outer_size().map_err(|e| e.to_string())?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let long = (size.width.max(size.height)) as f64;
+    let (nw, nh) = peek_size_for(w, h, long);
+    let nx = (pos.x as f64 + (size.width as f64 - nw) / 2.0).round();
+    let ny = (pos.y as f64 + (size.height as f64 - nh) / 2.0).round();
+    win.set_size(tauri::PhysicalSize::new(nw.round(), nh.round()))
+        .map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(nx, ny))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn am_peek_close(win: tauri::Window) -> Result<(), String> {
+    win.close().map_err(|e| e.to_string())
+}
+
+/// 置顶（对着参考图改稿时，它必须压在 PS 上面）
+#[tauri::command]
+async fn am_peek_top(win: tauri::Window, on: bool) -> Result<bool, String> {
+    win.set_always_on_top(on).map_err(|e| e.to_string())?;
+    Ok(on)
+}
+
+/// 无边框窗口里双击 / 按 F11 的"铺满屏幕"（不抢任务栏，仍可 Esc 退出）
+#[tauri::command]
+async fn am_peek_fullscreen(win: tauri::Window, on: bool) -> Result<bool, String> {
+    win.set_fullscreen(on).map_err(|e| e.to_string())?;
+    Ok(on)
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(WatchState(Mutex::new(None)))
@@ -1600,6 +1819,12 @@ fn main() {
             am_cache_stat,
             am_cache_gc,
             am_assets_by_ids,
+            am_peek_open,
+            am_peek_zoom,
+            am_peek_ratio,
+            am_peek_close,
+            am_peek_top,
+            am_peek_fullscreen,
             am_meta_missing,
             am_fill_palette,
             am_color_counts,

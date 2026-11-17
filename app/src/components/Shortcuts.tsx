@@ -29,6 +29,7 @@ const LEFT: Group[] = [
     title: "浏览",
     rows: [
       { keys: ["Space"], label: "全屏预览选中的素材" },
+      { keys: ["B"], label: "无边框看图", hint: "只剩那张图，拖到任意位置截图；滚轮缩窗口" },
       { keys: ["←", "→"], label: "上一个 / 下一个", hint: "大图里翻页，网格里换选中" },
       { keys: ["Esc"], label: "关大图 / 取消多选" },
       { keys: ["双击"], label: "用默认程序打开原文件" },
@@ -63,6 +64,7 @@ const RIGHT: Group[] = [
     rows: [
       { keys: ["Ctrl", "K"], label: "命令面板", hint: "所有操作都能搜到" },
       { keys: ["Ctrl", ","], label: "设置" },
+      { keys: ["Esc"], label: "关无边框窗口（在里面）" },
       { keys: ["Esc"], label: "关闭当前浮层" },
     ],
   },
