@@ -16,6 +16,7 @@ import {
   type TagCount,
   type TagGroup,
   type SnapshotRow,
+  type CollRow,
   type Query,
   type AutoRule,
   type ScanProgress,
@@ -37,6 +38,7 @@ import { Icon, Toaster, type ToastItem } from "./components/ui";
 import { ContextMenu, type CtxItem, type CtxState } from "./components/ContextMenu";
 import { TagPrompt } from "./components/TagPrompt";
 import { TagDock } from "./components/TagDock";
+import { CollDock } from "./components/CollDock";
 import { SnapshotDock } from "./components/SnapshotDock";
 import { SnapshotPrompt } from "./components/SnapshotPrompt";
 import { TagEdit } from "./components/TagEdit";
@@ -100,6 +102,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState<{ done: number; total: number; label?: string } | null>(null);
   const [lightbox, setLightbox] = useState<number | null>(null);
+  /** 灯箱的换图入口（由 Lightbox 注册，带逐帧闸门）。全局方向键都从这里走 */
+  const lightNav = useRef<((dir: number) => void) | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   /* ---------- 标签（2026-11-16）：手动落库、自动运行时推导 ---------- */
   /** 正在按哪个标签筛（null = 不筛）。设了标签就跨目录看，和 FontManager 的标签导航一致 */
@@ -113,6 +117,10 @@ export default function App() {
   const [tools, setTools] = useState<{ tab: ToolTab } | null>(null);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
+  /* 分组（0.2.x）：侧栏里紧贴标签面板上方那一段（位置/样式照 FontManager）。
+     筛选语义同标签：点了就**跨目录**看这一撮素材。 */
+  const [colls, setColls] = useState<CollRow[]>([]);
+  const [collFilter, setCollFilter] = useState<number | null>(null);
   /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
   const [snaps, setSnaps] = useState<SnapshotRow[]>([]);
   /* 新建 / 改名都是**侧栏就地输入**（照 FontManager，不弹窗）：状态放这里，
@@ -207,12 +215,21 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     void source.roots().then((rs) => {
-      if (alive && !dirRef.current && rs[0]) setDir(rs[0]);
+      /* 只有在「没有任何跨目录筛选」时才自动落到第一个库。
+         没有这半个条件就是一个真 bug（owner 2026-11-17 报「标签明明有、点了不出图」）：
+         点标签会把目录清空（= 跨目录看这个标签），紧接着这里又按"当前没选目录"
+         把第一个库选回来 —— 查询立刻变成「这个库 AND 这个标签」，
+         而那个标签的 400 张图在**另一个库**里 → 永远空列表。
+         截图当时的状态就是：筛选条写着标签、侧栏第一个库高亮、网格空白。 */
+      if (!alive || dirRef.current || !rs[0]) return;
+      if (tagFilter !== null || collFilter !== null) return;
+      setDir(rs[0]);
     });
     return () => {
       alive = false;
     };
-  }, [refreshKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey, tagFilter, collFilter]);
 
   /** 设置面板里的任何改动都走这里：落盘 + 立刻把默认档位与视图套到当前界面 */
   const applyPrefs = useCallback((p: Prefs) => {
@@ -275,13 +292,25 @@ export default function App() {
       tag: tagFilter,
       color: colorFilter,
       minRating: ratingFilter,
+      collection: collFilter,
     }),
-    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter, ratingFilter]
+    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter, ratingFilter, collFilter]
   );
 
   const loadPage = useCallback(
     async (reset: boolean) => {
-      if (reset && !dir) {
+      /* 「没有当前目录就不查」只对**浏览目录**成立。
+         标签 / 分组 / 颜色 / 评分 这些是**跨目录**筛选：点标签时目录被清空（这是对的），
+         但如果这里仍然短路，就永远不会去查 —— 表现正是 owner 报的
+         「标签明明有 400 张，点了以后网格空白」（2026-11-17，P0）。
+         判定"有没有筛选"要看这几个维度，不能只看 dir。 */
+      const scoped =
+        tagFilter !== null ||
+        collFilter !== null ||
+        colorFilter !== null ||
+        ratingFilter !== null ||
+        !!debounced;
+      if (reset && !dir && !scoped) {
         setItems([]);
         setDone(true);
         return;
@@ -323,7 +352,7 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buildQuery, cursor, dir, sort, toast]
+    [buildQuery, cursor, dir, sort, toast, tagFilter, collFilter, colorFilter, ratingFilter, debounced]
   );
 
   // 查询条件变化 → 重新拉第一页
@@ -332,7 +361,7 @@ export default function App() {
     setDone(false);
     void loadPage(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter]);
+  }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter, ratingFilter, collFilter]);
 
   /* 颜色计数（顶栏色板菜单用）：只在"库里可能变了"的时候拉，不跟着滚动刷新 */
   useEffect(() => {
@@ -456,11 +485,18 @@ export default function App() {
 
   /* 截图保存后刷新（截图目录可能已自动进库，列表要立刻看到这张新图） */
   useEffect(() => {
-    const off = onAppEvent<string | null>("shot://saved", (p) => {
+    const offSaved = onAppEvent<string | null>("shot://saved", (p) => {
       setRefreshKey((k) => k + 1);
       if (p) toast(`截图已保存：${p.split(/[\\/]/).pop() ?? p}`, false, "Ctrl+S 可以另选位置");
     });
-    return () => off();
+    /* 复制这条要说一句：截图窗一关，用户看不到剪贴板里有没有东西 */
+    const offCopied = onAppEvent<null>("shot://copied", () => {
+      toast("截图已复制到剪贴板", false, "直接 Ctrl+V 就能贴");
+    });
+    return () => {
+      offSaved();
+      offCopied();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -519,6 +555,7 @@ export default function App() {
     void source.tagGroups().then(setTagGroups).catch(() => {});
     void source.autoTags().then(setAutoTagCounts).catch(() => {});
     void source.snapshotList().then(setSnaps).catch(() => {});
+    void source.collList().then(setColls).catch(() => {});
   }, [refreshKey, tagPrompt, tagEdit, snapPrompt]);
 
   // 当前页的手工标签（详情面板 + 后面的批量操作都要用）
@@ -837,8 +874,149 @@ export default function App() {
     [snaps, toast]
   );
 
-  /** 标签 → 快照那层弹窗里"写个新名字直接建好并加入" */
-  const createAndTagSnapshot = useCallback(
+  /* ---------------- 分组（0.2.x） ----------------
+     位置与样式照 FontManager：侧栏底栏上方、标签面板之上；新建和改名都是**就地输入**。
+     分组只记「哪几张」（id 名单），不搬文件、不改素材 —— 删分组只删名单。 */
+
+  const createCollInline = useCallback(
+    async (name: string) => {
+      const n = name.trim();
+      if (!n) return;
+      try {
+        const id = await source.collCreate(n);
+        setColls(await source.collList());
+        setCollFilter(id);
+        setDir(null);
+        setTagFilter(null);
+        setPage("assets");
+        toast(`分组「${n}」已建立`, false, "选中素材右键 →「加入分组」就能往里放");
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const renameCollInline = useCallback(
+    async (id: number, name: string) => {
+      const n = name.trim();
+      if (!n) return;
+      try {
+        await source.collRename(id, n);
+        setColls(await source.collList());
+        toast(`已改名为「${n}」`);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  const deleteColl = useCallback(
+    async (row: CollRow) => {
+      const v = await askRef.current({
+        title: `删除分组「${row.name}」？`,
+        body: (
+          <p className="dlg-hint">
+            只删这份名单（{row.count} 项）。素材本身和磁盘上的文件一个都不动。
+          </p>
+        ),
+        buttons: [
+          { label: "删除分组", value: "go", tone: "danger" },
+          { label: "取消", value: "no" },
+        ],
+      });
+      if (v !== "go") return;
+      try {
+        await source.collDelete(row.id);
+        if (collFilter === row.id) setCollFilter(null);
+        setColls(await source.collList());
+        toast(`已删除分组「${row.name}」`);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [collFilter, toast]
+  );
+
+  const collMenu = useCallback(
+    (row: CollRow, x: number, y: number) => {
+      setCtx({
+        x,
+        y,
+        items: [
+          {
+            label: `只看「${row.name}」`,
+            icon: "funnel",
+            action: () => {
+              setCollFilter(collFilter === row.id ? null : row.id);
+              setDir(null);
+              setTagFilter(null);
+              setPage("assets");
+            },
+          },
+          { kind: "heading", label: "双击这一行可以改名" },
+          { kind: "separator" },          { label: "删除分组（不删素材）", icon: "trash", danger: true, action: () => void deleteColl(row) },
+        ],
+      });
+    },
+    [collFilter, deleteColl]
+  );
+
+  /** 把一批素材加进某个分组（返回真正新增的条数，用于 toast） */
+  const addToColl = useCallback(
+    async (collId: number, ids: number[]) => {
+      try {
+        const n = await source.collAdd(collId, ids);
+        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        setColls(await source.collList());
+        toast(
+          n > 0 ? `已加入「${name}」${n} 项` : `这些已经在「${name}」里了`,
+          false,
+          n > 0 ? undefined : "重复加入不会产生两份"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [colls, toast]
+  );
+
+  /** 「加入分组…」的第二级菜单（右键 / 批量条共用） */
+  const collPickMenu = useCallback(
+    (ids: number[], x: number, y: number) => {
+      if (!colls.length) {
+        setCtx({
+          x,
+          y,
+          items: [
+            { kind: "heading", label: "还没有分组" },
+            {
+              label: "在侧栏「分组」里点 + 新建",
+              icon: "plus",
+              action: () => setCtx(null),
+            },
+          ],
+        });
+        return;
+      }
+      setCtx({
+        x,
+        y,
+        items: [
+          { kind: "heading", label: `加入分组（${ids.length} 项）` },
+          ...colls.map((c) => ({
+            label: c.name,
+            icon: "folder-open",
+            action: () => void addToColl(c.id, ids),
+          })),
+        ],
+      });
+    },
+    [colls, addToColl]
+  );
+
+  /** 标签 → 快照那层弹窗里"写个新名字直接建好并加入" */  const createAndTagSnapshot = useCallback(
     async (name: string) => {
       const p = snapPrompt;
       if (!p) return;
@@ -1348,6 +1526,49 @@ export default function App() {
     }
   };
 
+  /* 另存为：走系统保存对话框，原样复制字节（动图/RAW/PSD 都成立） */
+  const onSaveAs = async (a: Asset) => {
+    try {
+      const dst = await source.saveAs(a.path, a.name);
+      if (dst) toast("已另存为", false, dst);
+    } catch (e) {
+      toast(String(e), true);
+    }
+  };
+
+  /* 调整尺寸（T38）：长边三档 → 选位置 → 重新编码另存。
+     原图一个字节都不动（这是"另存一份"，不是编辑器）。 */
+  const onResize = async (a: Asset) => {
+    const pick = await dlg.ask({
+      title: "调整尺寸另存为",
+      body: (
+        <div className="dlg-note">
+          当前 {a.width || "?"} × {a.height || "?"}，选一个长边上限。
+          <br />
+          只缩不放；原图不会被改动，输出到你在下一步选的位置。
+        </div>
+      ),
+      buttons: [
+        { label: "长边 512", value: "512" },
+        { label: "长边 1024", value: "1024" },
+        { label: "长边 2048", value: "2048", tone: "accent" },
+      ],
+    });
+    if (!pick) return;
+    try {
+      const out = await source.resizeSave(a.path, Number(pick), "png");
+      if (out) {
+        toast(
+          `已另存 ${out.width} × ${out.height}`,
+          false,
+          `${(out.bytes / 1024).toFixed(0)} KB · ${out.path}`
+        );
+      }
+    } catch (e) {
+      toast(String(e), true);
+    }
+  };
+
   const onCopyFile = async (paths: string[]) => {
     try {
       await source.copyFile(paths);
@@ -1552,7 +1773,30 @@ export default function App() {
             },
           },
           { kind: "separator" },
+          {
+            label: n > 1 ? `加入分组…（${n} 项）` : "加入分组…",
+            icon: "folder-open",
+            /* 第二级菜单：菜单自己点完会关掉，所以延一帧再开新的，
+               否则刚设进去的 ctx 立刻被 onClose 清掉（表现为"点了没反应"） */
+            action: () => {
+              const ids2 = inSel ? [...selectedIds] : [a.id];
+              window.setTimeout(() => collPickMenu(ids2, x, y), 0);
+            },
+          },
           { label: "在资源管理器中显示", icon: "reveal", action: () => void onReveal(a) },
+          /* T38：单张才有"另存为 / 调整尺寸"（多选时"存到哪"没有意义） */
+          {
+            label: "另存为…",
+            icon: "import",
+            disabled: n > 1 || busy,
+            action: () => void onSaveAs(a),
+          },
+          {
+            label: "调整尺寸另存为…",
+            icon: "expand",
+            disabled: n > 1 || busy || !a.width || !a.height,
+            action: () => void onResize(a),
+          },
           {
             label: n > 1 ? `复制 ${n} 个原文件` : "复制原文件",
             icon: "copy",
@@ -1747,8 +1991,9 @@ export default function App() {
       } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         if (lightbox !== null) {
           e.preventDefault();
-          const next = e.key === "ArrowRight" ? lightbox + 1 : lightbox - 1;
-          if (next >= 0 && next < items.length) setLightbox(next);
+          /* 换图走灯箱里的**逐帧闸门**（T37）：按住不放时，慢图也会先出一帧再切，
+             而不是被一长串按键整批跳过（那是"按了半天不知道最后停在哪张"）。 */
+          lightNav.current?.(e.key === "ArrowRight" ? 1 : -1);
         } else if (selected) {
           // 没开大图时方向键在图之间移动选中，详情面板跟着换
           const i = items.findIndex((x) => x.id === selected.id);
@@ -2105,6 +2350,7 @@ export default function App() {
         onSettings={() => setSettingsOpen(true)}
         onUndo={onUndo}
         busy={busy}
+        where={dir?.name}
       />
 
       {/* 布局骨架照 FontManager：标题栏通栏 → 侧栏通栏 → 右侧「顶栏 + 内容」两行。
@@ -2116,9 +2362,10 @@ export default function App() {
           source={source}
           selected={dir?.id ?? null}
           onSelect={(n) => {
-            // 点目录 = 离开标签视图，否则两个筛选叠在一起会莫名其妙 0 结果
+            // 点目录 = 离开标签 / 分组视图，否则两个筛选叠在一起会莫名其妙 0 结果
             setDir(n);
             setTagFilter(null);
+            setCollFilter(null);
             setPage("assets");
           }}
           onDropTo={(n) => {
@@ -2153,16 +2400,41 @@ export default function App() {
               onImport={() => void importSnapshot()}
             />
           }
+          /* 分组面板：位置照 FontManager —— 底栏上方、**标签面板之上** */
+          collDock={
+            <CollDock
+              items={colls}
+              activeId={collFilter}
+              onPick={(id) => {
+                /* 点分组 = 跨目录看这一撮素材；再点一次取消。
+                   和标签同一个口径：必须清目录，否则"目录 AND 分组"会空。 */
+                setCollFilter(id);
+                if (id !== null) {
+                  setDir(null);
+                  setTagFilter(null);
+                  setColorFilter(null);
+                  setRatingFilter(null);
+                }
+              }}
+              onCreate={(name) => void createCollInline(name)}
+              onRename={(id, name) => void renameCollInline(id, name)}
+              onMenu={(row, x, y) => collMenu(row, x, y)}
+              hold={!!ctx}
+              half={false}
+            />
+          }
           tagDock={
-            <TagDock
-              tags={tags}
+            <TagDock              tags={tags}
               groups={tagGroups}
               autoTags={autoTagCounts}
               activeTag={tagFilter}
               onPickTag={(t) => {
                 // 点标签 = 跨目录看这个标签；再点一次取消
                 setTagFilter(t);
-                if (t) setDir(null);
+                if (t) {
+                  setDir(null);
+                  setCollFilter(null);
+                }
               }}
               onEditTag={(name) => setTagEdit({ kind: "tag", name })}
               onEditGroup={(name) => setTagEdit({ kind: "group", name })}
@@ -2193,7 +2465,10 @@ export default function App() {
             color={colorFilter}
             onColor={(c) => {
               setColorFilter(c);
-              if (c) setTagFilter(null);
+              if (c) {
+                setTagFilter(null);
+                setCollFilter(null);
+              }
             }}
             colorCounts={colorCounts}
             tags={tags}
@@ -2205,6 +2480,14 @@ export default function App() {
               if (n) {
                 setColorFilter(null);
                 setRatingFilter(null);
+                setCollFilter(null);
+                /* 目录范围也要放开（2026-11-17 owner 报的 P0）：
+                   侧栏点标签走的是「跨目录看这个标签」，顶栏筛选菜单里点标签
+                   以前**没清目录** → 查询变成「当前目录 AND 这个标签」，
+                   标签明明有 400 张、里面一张都不在当前目录，于是空态。
+                   两个入口必须是同一种语义，否则同一个标签点出两种结果。 */
+                setDir(null);
+                setPage("assets");
               }
             }}
             source={source}
@@ -2212,6 +2495,7 @@ export default function App() {
             onDir={(n) => {
               setDir(n);
               setTagFilter(null);
+              setCollFilter(null);
               setPage("assets");
             }}
             autoTags={autoTagCounts}
@@ -2221,6 +2505,7 @@ export default function App() {
               if (n !== null) {
                 setColorFilter(null);
                 setTagFilter(null);
+                setCollFilter(null);
               }
             }}
           />
@@ -2253,6 +2538,18 @@ export default function App() {
               <Icon name="star" size={12} stroke={1.5} />
               <span className="filter-strip-label">评分：{ratingFilter} 星及以上</span>
               <button className="btn btn-tiny" onClick={() => setRatingFilter(null)}>
+                清除筛选
+              </button>
+            </div>
+          )}
+
+          {collFilter !== null && (
+            <div className="filter-strip">
+              <Icon name="folder-open" size={12} stroke={1.5} />
+              <span className="filter-strip-label">
+                分组：{colls.find((c) => c.id === collFilter)?.name ?? "分组"}
+              </span>
+              <button className="btn btn-tiny" onClick={() => setCollFilter(null)}>
                 清除筛选
               </button>
             </div>
@@ -2306,6 +2603,17 @@ export default function App() {
                   title="给选中的素材打标签（T）"
                 >
                   打标签
+                </button>
+                <button
+                  className="btn btn-tiny"
+                  disabled={busy}
+                  onClick={(e) => {
+                    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    collPickMenu([...selectedIds], r.left, r.bottom + 6);
+                  }}
+                  title="把选中的素材加进某个分组（不搬文件）"
+                >
+                  加入分组
                 </button>
                 <button
                   className="btn btn-tiny"
@@ -2481,6 +2789,7 @@ export default function App() {
           index={lightbox ?? 0}
           total={items.length}
           thumbSrc={thumbSrc}
+          navRef={lightNav}
           onClose={() => setLightbox(null)}
           onPrev={() => setLightbox((i) => (i !== null && i > 0 ? i - 1 : i))}
           onNext={() => setLightbox((i) => (i !== null && i + 1 < items.length ? i + 1 : i))}
@@ -2546,6 +2855,7 @@ function Lightbox({
   index,
   total,
   thumbSrc,
+  navRef,
   onClose,
   onPrev,
   onNext,
@@ -2554,6 +2864,8 @@ function Lightbox({
   index: number;
   total: number;
   thumbSrc: (a: Asset, px: number) => string;
+  /** 注册换图入口：App 的方向键走这里，带逐帧闸门（T37） */
+  navRef?: React.MutableRefObject<((dir: number) => void) | null>;
   onClose: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -2563,6 +2875,7 @@ function Lightbox({
   const [loaded, setLoaded] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
 
   const hi = thumbSrc(asset, 1600);
   const lo = thumbSrc(asset, 512);
@@ -2574,6 +2887,127 @@ function Lightbox({
   }, [asset.id]);
 
   const clampZoom = (z: number) => Math.min(8, Math.max(1, z));
+
+  /* ---------------- T37 连续切图：逐帧闸门 ----------------
+     按住 ←/→ 时浏览器会连发 keydown（每秒 20~30 次），旧实现是"每来一次就换一张"，
+     于是慢图（大 PNG）一张都出不来，最后停在随机某张上 —— 用户看到的是"连按几下就没反应"。
+     现在照果核的 `nav_frame_gate`：方向先攒进队列（最多领先 2 张），
+     **当前这张真的出过一帧**才放下一张。缓存里已有的图直接放行，不会变慢。 */
+  const painted = useRef<Set<number>>(new Set());
+  const [frameReady, setFrameReady] = useState(false);
+  const readyRef = useRef(false);
+  readyRef.current = frameReady;
+  const queue = useRef(0);
+  const nextRef = useRef(onNext);
+  nextRef.current = onNext;
+  const prevRef = useRef(onPrev);
+  prevRef.current = onPrev;
+
+  const pump = useCallback(() => {
+    if (!queue.current || !readyRef.current) return;
+    const d = queue.current;
+    queue.current = 0;
+    if (d > 0) nextRef.current();
+    else prevRef.current();
+  }, []);
+
+  useEffect(() => {
+    if (!navRef) return;
+    navRef.current = (dir: number) => {
+      queue.current = Math.max(-2, Math.min(2, queue.current + dir));
+      pump();
+    };
+    return () => {
+      if (navRef) navRef.current = null;
+    };
+  }, [navRef, pump]);
+
+  useEffect(() => {
+    const known = painted.current.has(asset.id);
+    setFrameReady(known);
+    if (known) return;
+    /* 兜底：坏图 / 极慢的图 500ms 后也放行，否则闸门等于把键盘锁死 */
+    const t = window.setTimeout(() => setFrameReady(true), 500);
+    return () => window.clearTimeout(t);
+  }, [asset.id]);
+
+  useEffect(() => {
+    pump();
+  }, [frameReady, pump]);
+
+  /* ---------------- T40 鸟瞰图（长图 / 放大后定位） ----------------
+     用**实际布局矩形**算可见比例，不自己推 pan/zoom 的数学：
+     缩放锚定、contain 适配、窗口 resize 全都自动对上。 */
+  const [nav, setNav] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [overflow, setOverflow] = useState(false);
+
+  /* 图片**内容**在屏幕上的矩形。
+     注意不能直接用 `<img>` 的 getBoundingClientRect —— 它是 width/height 100% 铺满舞台、
+     靠 `object-fit: contain` 缩内容，元素框永远等于舞台，量出来"永远不溢出"。
+     这里按 naturalWidth/Height 自己算 contain 后的尺寸，再叠 zoom/pan。 */
+  const contentBox = useCallback(() => {
+    const stage = stageRef.current;
+    const im = imgRef.current;
+    if (!stage || !im) return null;
+    const sr = stage.getBoundingClientRect();
+    const nw = im.naturalWidth || asset.width || 0;
+    const nh = im.naturalHeight || asset.height || 0;
+    if (!nw || !nh || !sr.width || !sr.height) return null;
+    const fit = Math.min(sr.width / nw, sr.height / nh);
+    const cw = nw * fit * zoom;
+    const ch = nh * fit * zoom;
+    return {
+      sr,
+      cw,
+      ch,
+      left: sr.left + sr.width / 2 + pan.x - cw / 2,
+      top: sr.top + sr.height / 2 + pan.y - ch / 2,
+    };
+  }, [zoom, pan.x, pan.y, asset.width, asset.height]);
+
+  const measure = useCallback(() => {
+    const b = contentBox();
+    if (!b) return;
+    const { sr, cw, ch, left, top } = b;
+    setOverflow(cw > sr.width + 1 || ch > sr.height + 1);
+    const fx = Math.max(0, Math.min(1, (sr.left - left) / cw));
+    const fy = Math.max(0, Math.min(1, (sr.top - top) / ch));
+    setNav({
+      x: fx,
+      y: fy,
+      w: Math.min(1 - fx, sr.width / cw),
+      h: Math.min(1 - fy, sr.height / ch),
+    });
+  }, [contentBox]);
+
+  useEffect(() => {
+    measure();
+  }, [measure, zoom, pan, loaded, asset.id]);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure]);
+
+  /* 拖鸟瞰图 = 直接定位：把"想看的那个点"移到舞台正中 */
+  const miniDrag = useRef(false);
+  const jumpTo = (e: React.PointerEvent) => {
+    const b = contentBox();
+    const mini = miniRef.current;
+    if (!b || !mini) return;
+    const mr = mini.getBoundingClientRect();
+    if (!mr.width || !mr.height) return;
+    const fx = Math.max(0, Math.min(1, (e.clientX - mr.left) / mr.width));
+    const fy = Math.max(0, Math.min(1, (e.clientY - mr.top) / mr.height));
+    /* 目标：图像上的 (fx,fy) 这一点落在舞台中心 → 反推需要补的位移 */
+    const dx = b.sr.left + b.sr.width / 2 - fx * b.cw - b.left;
+    const dy = b.sr.top + b.sr.height / 2 - fy * b.ch - b.top;
+    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+  };
+  const miniRef = useRef<HTMLDivElement>(null);
 
   /* 滚轮缩放必须用**原生非 passive** 监听。
      React 的 onWheel 走的是根节点委托，Chrome 默认 passive:true，
@@ -2624,6 +3058,15 @@ function Lightbox({
     setPan({ x: 0, y: 0 });
   };
 
+  /* 鸟瞰图尺寸：按原图比例，长边最多 132 CSS px（够看清，又不挡图） */
+  const miniW = asset.width && asset.height
+    ? Math.round((asset.width >= asset.height ? 132 : (132 * asset.width) / asset.height))
+    : 96;
+  const miniH = asset.width && asset.height
+    ? Math.round((asset.height >= asset.width ? 132 : (132 * asset.height) / asset.width))
+    : 72;
+  const showMini = overflow && !!nav;
+
   return (
     <div className="lightbox" onClick={onClose}>
       <div className="lightbox-panel" onClick={(e) => e.stopPropagation()}>
@@ -2659,19 +3102,84 @@ function Lightbox({
           onMouseUp={endDrag}
           onMouseLeave={endDrag}
           onDoubleClick={reset}
-          title={zoom > 1 ? "拖动平移 · 双击复位" : "滚轮放大 · 双击复位"}
+          title={zoom > 1 ? "拖动平移 · 双击复位 · 右侧鸟瞰图可拖动定位" : "滚轮放大 · 双击复位"}
         >
           {loaded !== hi && <img className="lightbox-img ghost" src={lo} alt="" draggable={false} aria-hidden />}
           <img
+            ref={imgRef}
             className={`lightbox-img ${loaded === hi ? "in" : "out"}`}
             src={hi}
             alt=""
             draggable={false}
             style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
-            onLoad={() => setLoaded(hi)}
+            onLoad={() => {
+              painted.current.add(asset.id);
+              setLoaded(hi);
+              setFrameReady(true);
+              measure();
+            }}
             onDoubleClick={reset}
           />
         </div>
+
+        {/* T43 边缘导航：光标到左右边缘才浮出来（无边框看图时最需要它） */}
+        <div className="lb-edge l" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="lb-edge-btn"
+            title="上一张（←）"
+            disabled={index <= 0}
+            onClick={onPrev}
+          >
+            <Icon name="chevron" size={20} className="rot180" />
+          </button>
+        </div>
+        <div className="lb-edge r" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="lb-edge-btn"
+            title="下一张（→）"
+            disabled={index >= total - 1}
+            onClick={onNext}
+          >
+            <Icon name="chevron" size={20} />
+          </button>
+        </div>
+
+        {/* T40 鸟瞰图：只在图片比舞台大的时候出现（否则没有"定位"可言） */}
+        {showMini && (
+          <div
+            className="lb-mini scroll-hot"
+            ref={miniRef}
+            style={{ width: miniW, height: miniH }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              miniDrag.current = true;
+              (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+              jumpTo(e);
+            }}
+            onPointerMove={(e) => {
+              if (!miniDrag.current) return;
+              e.stopPropagation();
+              jumpTo(e);
+            }}
+            onPointerUp={(e) => {
+              miniDrag.current = false;
+              (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+            }}
+            title="拖动定位"
+          >
+            <img className="lb-mini-img" src={lo} alt="" draggable={false} />
+            <div
+              className="lb-mini-view"
+              style={{
+                left: `${nav!.x * 100}%`,
+                top: `${nav!.y * 100}%`,
+                width: `${Math.max(4, nav!.w * 100)}%`,
+                height: `${Math.max(4, nav!.h * 100)}%`,
+              }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

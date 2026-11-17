@@ -10,6 +10,7 @@ import { Snip } from "./components/Snip";
 import { Board } from "./components/Board";
 import { installMomentumScroll } from "./lib/momentumScroll";
 import { installScrollHot } from "./lib/scrollHot";
+import { installPerfProbe } from "./lib/perf";
 
 /* 同一个前端包跑三种窗口：主窗（App）、无边框贴图（Peek）、截图覆盖层（Snip）。
    用**初始化脚本注入的全局变量**区分（Rust 侧 `initialization_script` 写 __AM_PEEK__）：
@@ -28,6 +29,10 @@ if (!isPeek && !isSnip && !isBoard) installMomentumScroll();
 /* 滚动条「靠近变粗」：指针进容器右缘 14px 内就给那个容器挂 .scroll-hot。
    ::-webkit-scrollbar 只认宿主元素的类，所以必须逐个容器挂，不能挂在父级。 */
 if (!isPeek && !isSnip && !isBoard) installScrollHot();
+
+/* 帧预算埋点（P3 T43）：默认关，`?perf=1` 或 localStorage["am.perf"]="1" 才真的开始采样。
+   永远挂上 window.__amPerf() 供自测脚本读一份当前统计。 */
+installPerfProbe();
 
 /* 关掉 WebView2 自带的右键菜单（返回 / 刷新 / 另存为 / 打印）：
    软件自己的菜单由 React 处理。capture 阶段只 preventDefault、不 stopPropagation，

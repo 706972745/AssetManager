@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, GripVertical, Sparkles } from "lucide-react";
+import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
 import {
   badge,
   fmtNum,
@@ -10,6 +10,7 @@ import {
   PREVIEWABLE_KINDS,
   type Asset,
   type AutoTag,
+  type ExifInfo,
   type SortKey,
   type Source,
 } from "../types";
@@ -35,12 +36,15 @@ export function TitleBar({
   onSettings,
   onUndo,
   busy,
+  where,
 }: {
   onRescan: () => void;
   onAddFolder: () => void;
   onSettings: () => void;
   onUndo: () => void;
   busy: boolean;
+  /** 当前所在目录（T44 的轻量版：标题带上位置，切到别的软件再切回来不用想"我在哪个库"） */
+  where?: string;
 }) {
   return (
     <header className="titlebar" data-tauri-drag-region>
@@ -48,22 +52,33 @@ export function TitleBar({
         <span className="brand-mark">
           <BrandMark />
         </span>
-        <span className="titlebar-title">AssetManager</span>
+        <span className="titlebar-title">
+          AssetManager
+          {where && <span className="titlebar-where">{where}</span>}
+        </span>
       </div>
-      <div className="titlebar-actions">
-        <button className="tb-action" title="撤销上一步（Ctrl+Z）" onClick={onUndo} disabled={busy}>
-          <Icon name="undo" size={14} stroke={1.5} />
-        </button>
-        <button className="tb-action" title="添加素材文件夹" onClick={onAddFolder} disabled={busy}>
-          <Icon name="plus" size={14} stroke={1.5} />
-        </button>
-        <button className="tb-action" title="重新扫描" onClick={onRescan} disabled={busy}>
-          <Icon name="scan" size={14} stroke={1.5} />
-        </button>
-        <button className="tb-action" title="设置" onClick={onSettings}>
-          <Icon name="settings" size={14} stroke={1.5} />
-        </button>
-        <span className="titlebar-sep" />
+      {/* 结构与 FontManager 逐层一致（TitleBar.tsx）：
+         `.titlebar-controls`（gap 1px）里装三样 —— 动作组 `.titlebar-actions`、
+         一条竖分隔线、三个窗口按钮。
+         我上一版把动作组拎到 controls 外面当兄弟节点，父级 `justify-content: space-between`
+         于是把三个子元素按「左 / 中 / 右」摊开，图标组被推到标题栏中间悬空，
+         离右边的窗口按钮一大截 —— owner 截图指的就是这里。 */}
+      <div className="titlebar-controls">
+        <div className="titlebar-actions">
+          <button className="tb-action" title="撤销上一步（Ctrl+Z）" onClick={onUndo} disabled={busy}>
+            <Icon name="undo" size={14} stroke={1.5} />
+          </button>
+          <button className="tb-action" title="添加素材文件夹" onClick={onAddFolder} disabled={busy}>
+            <Icon name="plus" size={14} stroke={1.5} />
+          </button>
+          <button className="tb-action" title="重新扫描" onClick={onRescan} disabled={busy}>
+            <Icon name="scan" size={14} stroke={1.5} />
+          </button>
+          <button className="tb-action" title="设置" onClick={onSettings}>
+            <Icon name="settings" size={14} stroke={1.5} />
+          </button>
+        </div>
+        <span className="titlebar-sep" aria-hidden />
         <button className="tc-btn" title="最小化" onClick={win("am_minimize")}>
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
             <path d="M2.5 6h7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
@@ -184,11 +199,21 @@ export function TopBar({
 
   const openMenu = (e: React.MouseEvent<HTMLElement>, k: "sort" | "filter" | "color") => {
     const r = e.currentTarget.getBoundingClientRect();
-    setMenu({ x: r.left, y: r.bottom + 6, kind: k });
+    /* 传**右沿**：三个下拉都照 FontManager 贴按钮右侧展开（`.sort-menu { right: 0 }`），
+       菜单比按钮宽，所以它是向左伸出去的。以前传左沿 + 左对齐，跟 FontManager 不是一个方向。 */
+    setMenu({ x: r.right, y: r.bottom + 6, kind: k });
   };
 
   const autoOf = (ns: string) => autoTags.filter((t) => t.name.startsWith(`${ns}:`));
   const pickTag = (name: string) => onTag(activeTag === name ? null : name);
+
+  /* 二级面板每行前面的图标必须**每一行都有**（照 FontManager 的 `.filter-sub-name`）：
+     只有部分行带图标时，同一列里的文字会左右错开 —— FontManager 2026-11-14 踩过。
+     自动标签 = 魔棒（品牌色），手工标签 / 文件夹 = 中性灰线性图标。 */
+  const ICO_AUTO = <Sparkles size={11} strokeWidth={1.6} className="menu-ico-auto" />;
+  const ICO_TAG = <TagIcon size={11} strokeWidth={1.5} className="menu-ico-manual" />;
+  const ICO_DIR = <FolderOpen size={11} strokeWidth={1.5} className="menu-ico-manual" />;
+  const ICO_STAR = <Star size={11} strokeWidth={1.5} className="menu-ico-manual" />;
 
   /* 筛选菜单（照 owner 给的 Eagle 那条：标签 / 文件夹 / 形状 / 评分 / 格式；
      **颜色不做** —— 顶栏那颗彩色按钮已经是颜色筛选，再放一遍就是两套入口）。
@@ -212,15 +237,31 @@ export function TopBar({
       meta: activeTag ? "1" : undefined,
       on: !!activeTag,
       sub: [
-        { label: "全部标签", on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
+        { label: "全部标签", icon: ICO_TAG, on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
         ...tags.map((t) => ({
           label: t.name,
-          dotClass: colorClass(t.color),
+          /* 标签行的图标口径和 FontManager 一致：手工标签 = 标签图标（不再是色点） */
+          icon: isAutoTag(t.name) ? ICO_AUTO : ICO_TAG,
           meta: String(t.count),
           on: activeTag === t.name,
           check: activeTag === t.name,
           onPick: () => pickTag(t.name),
         })),
+        /* 自动标签也要在这里出现（owner 2026-11-17：「筛选下、标签下自动标签没显示出来」）。
+           FontManager 的筛选菜单是**手工 + 自动**混在同一列（按名字排序），
+           因为「筛选菜单是用户唯一能勾标签的地方」；我们侧栏虽然单独分了「自动标签」一段，
+           但顶栏这层菜单如果不给，用户在筛选里就找不到 fmt:/orient: 这些。
+           排在手后面：手工是用户的，自动是软件推的，主次不能反。 */
+        ...[...autoTags]
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((t) => ({
+            label: autoTagLabel(t.name),
+            icon: ICO_AUTO,
+            meta: String(t.count),
+            on: activeTag === t.name,
+            check: activeTag === t.name,
+            onPick: () => pickTag(t.name),
+          })),
       ],
     },
     {
@@ -228,9 +269,10 @@ export function TopBar({
       meta: dirNode ? "1" : undefined,
       on: !!dirNode,
       sub: [
-        { label: "全部文件夹", on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
+        { label: "全部文件夹", icon: ICO_DIR, on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
         ...folders.map((d) => ({
           label: d.name,
+          icon: ICO_DIR,
           meta: d.assetCnt > 0 ? String(d.assetCnt) : undefined,
           on: dirNode?.id === d.id,
           check: dirNode?.id === d.id,
@@ -243,9 +285,10 @@ export function TopBar({
       meta: activeTag?.startsWith("orient:") ? "1" : undefined,
       on: !!activeTag?.startsWith("orient:"),
       sub: [
-        { label: "全部形状", on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
+        { label: "全部形状", icon: ICO_AUTO, on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
         ...autoOf("orient").map((t) => ({
           label: ORIENT_LABEL[t.name.slice("orient:".length)] ?? t.name,
+          icon: ICO_AUTO,
           meta: String(t.count),
           on: activeTag === t.name,
           check: activeTag === t.name,
@@ -258,9 +301,10 @@ export function TopBar({
       meta: rating !== null ? `${rating}★` : undefined,
       on: rating !== null,
       sub: [
-        { label: "全部评分", on: rating === null, check: rating === null, onPick: () => onRating(null) },
+        { label: "全部评分", icon: ICO_STAR, on: rating === null, check: rating === null, onPick: () => onRating(null) },
         ...[5, 4, 3, 2, 1].map((n) => ({
-          label: `${"★".repeat(n)} ${n} 星及以上`,
+          label: `${n} 星及以上`,
+          icon: ICO_STAR,
           on: rating === n,
           check: rating === n,
           onPick: () => onRating(rating === n ? null : n),
@@ -272,9 +316,10 @@ export function TopBar({
       meta: activeTag?.startsWith("fmt:") ? "1" : undefined,
       on: !!activeTag?.startsWith("fmt:"),
       sub: [
-        { label: "全部格式", on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
+        { label: "全部格式", icon: ICO_AUTO, on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
         ...autoOf("fmt").map((t) => ({
           label: t.name.slice("fmt:".length).toUpperCase(),
+          icon: ICO_AUTO,
           meta: String(t.count),
           on: activeTag === t.name,
           check: activeTag === t.name,
@@ -370,12 +415,15 @@ export function TopBar({
         <Menu
           x={menu.x}
           y={menu.y}
+          variant="pop"
+          align="right"
           onClose={() => setMenu(null)}
           items={
             menu.kind === "sort"
               ? (Object.keys(SORT_LABEL) as SortKey[]).map((k) => ({
                   label: SORT_LABEL[k],
                   on: sort === k,
+                  check: sort === k,
                   onPick: () => onSort(k),
                 }))
               : menu.kind === "color"
@@ -383,14 +431,17 @@ export function TopBar({
                   {
                     label: "全部颜色",
                     on: color === null,
+                    check: color === null,
                     onPick: () => onColor(null),
                     /* 全部颜色没有"自己的颜色" → 用一个七彩环点，和下面单色点区分开 */
                     dot: "conic-gradient(#d94a45,#d9a13a,#d9cf4a,#4f9d5d,#4a7fd9,#8c5ad9,#d94a45)",
                   },
                   ...(colorCounts.length
                     ? colorCounts.map(([k, n]) => ({
-                        label: `${COLOR_LABEL[k] ?? k}（${n}）`,
+                        label: COLOR_LABEL[k] ?? k,
+                        meta: String(n),
                         on: color === k,
+                        check: color === k,
                         onPick: () => onColor(k),
                         /* 行首圆点 = 这个颜色本身（与顶栏那颗、缩略图上的色点同一套变量） */
                         dot: `var(--c-${k}, #8b8b86)`,
@@ -446,6 +497,23 @@ async function copyText(text: string): Promise<boolean> {
  * 图就被右边切掉一块，用户看到的是"图不完整"而不是"可以滚"。
  * 现在宽度恒等于方框宽 → 左右永远完整，高的部分往下滚。
  */
+/** 一行摘要：机身 · f/1.8 · 1/250s · ISO 200 · 50mm（没展开折叠时显示） */
+function exifSummary(e: ExifInfo): string {
+  const v: string[] = [];
+  if (e.model) v.push(e.model);
+  else if (e.make) v.push(e.make);
+  if (e.fNumber != null) v.push(`f/${e.fNumber}`);
+  if (e.exposure) v.push(`${e.exposure}s`);
+  if (e.iso != null) v.push(`ISO ${e.iso}`);
+  if (e.focal != null) v.push(`${e.focal}mm`);
+  return v.join(" · ");
+}
+
+/** EXIF 的时间是 `2026:11:17 10:30:00`，只把那两个冒号换成短横线 */
+function fmtExifTime(s: string): string {
+  return s.replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3");
+}
+
 function SquarePreview({
   src,
   aspect,
@@ -819,6 +887,24 @@ export function Detail({
     };
   }, [asset?.id, source]);
 
+  /* 拍摄信息（T41）：只有 JPEG 之类真带 EXIF 的才有。
+     换素材就重查一次；读不到就把这一段整个藏起来（不留空壳）。 */
+  const [exif, setExif] = useState<ExifInfo | null>(null);
+  const [exifOpen, setExifOpen] = useState(false);
+  useEffect(() => {
+    setExif(null);
+    setExifOpen(false);
+    if (!asset || !source.desktop || asset.kind !== 0) return;
+    let dead = false;
+    void source
+      .exif(asset.path)
+      .then((e) => !dead && setExif(e))
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [asset?.id, asset?.path, asset?.kind, source]);
+
   /* 换素材 / 关掉详情时把折叠收回去：上一条的"展开"不该跟着带过来 */
   useEffect(() => {
     setRefsOpen(false);
@@ -1010,6 +1096,81 @@ export function Detail({
                   </dd>
                 </dl>
               </section>
+
+              {/* 拍摄信息（T41）：默认收起。相机/镜头/光圈/快门/ISO/焦距/时间。
+                  没有 EXIF 的文件这一段不渲染 —— 空壳比没有更让人困惑。 */}
+              {exif && (
+                <section className="detail-fold-sec">
+                  <button
+                    className="detail-fold"
+                    aria-expanded={exifOpen}
+                    onClick={() => setExifOpen((v) => !v)}
+                  >
+                    <span className="detail-heading">拍摄信息</span>
+                    {!exifOpen && exifSummary(exif) && (
+                      <span className="detail-fold-hint mono">{exifSummary(exif)}</span>
+                    )}
+                    <Icon name="chevron" size={12} stroke={2} className={exifOpen ? "rot90" : ""} />
+                  </button>
+                  {exifOpen && (
+                    <div className="detail-fold-body">
+                      <dl className="detail-meta">
+                        {exif.model && (
+                          <>
+                            <dt>机身</dt>
+                            <dd>
+                              {exif.make ? `${exif.make} ` : ""}
+                              {exif.model}
+                            </dd>
+                          </>
+                        )}
+                        {exif.lens && (
+                          <>
+                            <dt>镜头</dt>
+                            <dd className="wrap">{exif.lens}</dd>
+                          </>
+                        )}
+                        {exif.focal != null && (
+                          <>
+                            <dt>焦距</dt>
+                            <dd className="mono">{exif.focal}</dd>
+                          </>
+                        )}
+                        {exif.fNumber != null && (
+                          <>
+                            <dt>光圈</dt>
+                            <dd className="mono">f/{exif.fNumber}</dd>
+                          </>
+                        )}
+                        {exif.exposure && (
+                          <>
+                            <dt>快门</dt>
+                            <dd className="mono">{exif.exposure}s</dd>
+                          </>
+                        )}
+                        {exif.iso != null && (
+                          <>
+                            <dt>ISO</dt>
+                            <dd className="mono">{exif.iso}</dd>
+                          </>
+                        )}
+                        {exif.taken && (
+                          <>
+                            <dt>拍摄时间</dt>
+                            <dd className="mono">{fmtExifTime(exif.taken)}</dd>
+                          </>
+                        )}
+                        {exif.software && (
+                          <>
+                            <dt>软件</dt>
+                            <dd className="wrap">{exif.software}</dd>
+                          </>
+                        )}
+                      </dl>
+                    </div>
+                  )}
+                </section>
+              )}
 
               {/* 引用（默认收起）：显示层 + 谁在用它 + 它引用了谁。
                   这些是"排障 / 想知道缩略图哪来的"才看的东西，不该占满屏。 */}

@@ -137,11 +137,62 @@ CREATE TABLE IF NOT EXISTS ops (
 CREATE INDEX IF NOT EXISTS idx_ops_ts ON ops(ts DESC);
 "#;
 
+/// 索引库结构版本（`PRAGMA user_version`）。
+///
+/// **0 = 0.1.16 及更早建的库**：那时没有版本号，只能靠 `migrate()` 逐列探测补齐。
+/// **1 = 从 0.1.17 起由版本号驱动**：老库补完列后打上 1，以后每次改结构 +1，
+/// 并在 `MIGRATIONS` 里对应一条 SQL。
+///
+/// 为什么非要这个：真实用户手上已经有几万行的库了，靠"探测列存不存在"能加列，
+/// 但改不了**语义**（列类型变了、需要按新规则回填、需要删掉废弃列），
+/// 一旦出现那种迁移，没有版本号就只能猜。
+pub const SCHEMA_VERSION: i32 = 1;
+
+/// 按版本号推进的迁移表：下标 = 目标版本（`MIGRATIONS[1]` 把库带到 v1）。
+///
+/// **只增不改**：已经发出去的版本对应的 SQL 永远不许动，否则老库和新库会走岔。
+const MIGRATIONS: &[&str] = &[
+    /* v0 → v1：纯打标。列已经由 `migrate()` 补齐，这里没有结构改动。 */
+    "",
+];
+
+fn schema_version(c: &Connection) -> Res<i32> {
+    c.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(e2s)
+}
+
+fn set_schema_version(c: &Connection, v: i32) -> Res<()> {
+    c.execute_batch(&format!("PRAGMA user_version={v}"))
+        .map_err(e2s)
+}
+
+/// 把库推进到 `SCHEMA_VERSION`。返回是否真的动过。
+pub fn migrate_versioned(c: &Connection) -> Res<bool> {
+    let mut v = schema_version(c)?;
+    if v >= SCHEMA_VERSION {
+        return Ok(false);
+    }
+    /* v0 的老库：`migrate()` 已经把所有列补齐，直接算作 v1 */
+    if v == 0 {
+        v = 1;
+    }
+    while v < SCHEMA_VERSION {
+        let sql = MIGRATIONS.get(v as usize).copied().unwrap_or("");
+        if !sql.is_empty() {
+            c.execute_batch(sql).map_err(e2s)?;
+        }
+        v += 1;
+    }
+    set_schema_version(c, SCHEMA_VERSION)?;
+    Ok(true)
+}
+
 /// 打开一个库文件（`libs/lib-<id>.db`）：建表 + 迁移。
 pub fn open(path: &Path) -> Res<Connection> {
     let c = open_raw(path)?;
     c.execute_batch(SCHEMA).map_err(e2s)?;
     migrate(&c)?;
+    migrate_versioned(&c)?;
     Ok(c)
 }
 
@@ -830,6 +881,21 @@ pub fn list_assets(c: &Connection, q: &AssetQuery) -> Res<Vec<Asset>> {
         if n > 0 {
             where_sql.push_str(" AND a.rating >= ? ");
             args.push(Box::new(n));
+        }
+    }
+
+    /* 分组 / 指定 id 集合（0.2.x）：由 `App::list` 把全局 id 拆成各库的库内 id 再传下来。
+       **空集合必须是空结果**（`AND 0`）—— 退化成"不筛"就会把整个库列出来，
+       用户点一个空分组却看到全部素材，是最容易误判成"分组没生效"的那种 bug。 */
+    if let Some(ids) = q.ids.as_ref() {
+        if ids.is_empty() {
+            where_sql.push_str(" AND 0 ");
+        } else {
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            where_sql.push_str(&format!(" AND a.id IN ({ph}) "));
+            for i in ids {
+                args.push(Box::new(*i));
+            }
         }
     }
 
@@ -2086,6 +2152,81 @@ mod tests {
         let mut st = lib(app).prepare("SELECT id FROM assets ORDER BY name").unwrap();
         let rows = st.query_map([], |r| r.get::<_, i64>(0)).unwrap();
         rows.flatten().map(|id| crate::gid(lib_id, id)).collect()
+    }
+
+    /* ---------------- P3 T44 / T45：结构版本 与 崩溃恢复演练 ---------------- */
+
+    /// T44：没有版本号的老库（v0）被打开时要打上当前版本，且**一行数据都不能少**
+    #[test]
+    fn old_db_gets_stamped_without_losing_rows() {
+        let d = tmp("ver");
+        let path = d.join("lib-old.db");
+        {
+            // 模拟 0.1.16 建的库：表结构在、user_version 还是 0
+            let c = open_raw(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.execute("INSERT INTO dirs (id, path, name) VALUES (1, '/x', 'x')", [])
+                .unwrap();
+            c.execute(
+                "INSERT INTO assets (dir_id, name, ext, kind, size, mtime, added_at)
+                 VALUES (1, 'a.png', 'png', 0, 10, 1, 1)",
+                [],
+            )
+            .unwrap();
+            assert_eq!(schema_version(&c).unwrap(), 0);
+        }
+        let c = open(&path).unwrap();
+        assert_eq!(schema_version(&c).unwrap(), SCHEMA_VERSION, "老库要被推进到当前版本");
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "打标不能碰数据");
+        /* 幂等：再开一次不报错、版本不倒退 */
+        drop(c);
+        let c2 = open(&path).unwrap();
+        assert_eq!(schema_version(&c2).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// T45 演练 ①：进程被强杀时 WAL 里还有没 checkpoint 的数据 —— 重开必须能读到
+    #[test]
+    fn uncheckpointed_wal_survives_reopen() {
+        let d = tmp("wal");
+        let path = d.join("lib-wal.db");
+        {
+            let c = open(&path).unwrap();
+            c.execute("INSERT INTO dirs (id, path, name) VALUES (1, '/w', 'w')", [])
+                .unwrap();
+            for i in 0..50 {
+                c.execute(
+                    "INSERT INTO assets (dir_id, name, ext, kind, size, mtime, added_at)
+                     VALUES (1, ?1, 'png', 0, 1, 1, 1)",
+                    params![format!("{i:02}.png")],
+                )
+                .unwrap();
+            }
+            /* 故意不 checkpoint 就"掉电"：连接直接 drop，WAL 留在盘上 */
+        }
+        let c = open(&path).unwrap();
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 50, "没 checkpoint 的 WAL 必须被重放，不能丢行");
+    }
+
+    /// T45 演练 ②：坏库（半个文件）要被留证改名，而不是让软件起不来
+    #[test]
+    fn truncated_db_is_quarantined_and_replaced() {
+        let d = tmp("trunc");
+        let path = d.join("lib-bad.db");
+        let mut junk = vec![0u8; 4096];
+        junk[..16].copy_from_slice(b"SQLite format 3\0");
+        std::fs::write(&path, &junk).unwrap();
+        let c = open(&path).expect("坏库留证后要能照常开新库");
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        let left: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".corrupt-"))
+            .collect();
+        assert!(!left.is_empty(), "坏掉的那份要被改名留证");
     }
 
     /// 导出（T13）：库根 + 素材的用户层字段都要在，且必须是能读的 JSON。

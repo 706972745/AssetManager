@@ -16,10 +16,12 @@ pub mod clipimg;
 pub mod dataroot;
 pub mod db;
 pub mod dupes;
+pub mod exif;
 pub mod formats;
 pub mod fsops;
 pub mod ids;
 pub mod imageinfo;
+pub mod imgops;
 pub mod libs_migrate;
 pub mod model;
 pub mod palette;
@@ -407,11 +409,30 @@ impl App {
             q.search_tag_ids = Some(self.search_tag_ids(&needle)?);
         }
 
+        /* 分组筛选（0.2.x）：成员是**全局 asset id**，按库号拆成各库的库内 id。
+           拆完每个库只查自己那一批 —— 跨库分组也能一次查对，不用把三个库全扫一遍。 */
+        let coll_ids: Option<std::collections::HashMap<i64, Vec<i64>>> = match q.collection {
+            Some(cid) => {
+                let gids = reg::coll_gids(&self.reg, cid)?;
+                let mut m: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+                for g in gids {
+                    let (lib_id, local) = ungid(g);
+                    m.entry(lib_id).or_default().push(local);
+                }
+                Some(m)
+            }
+            None => None,
+        };
+        q.collection = None; // 往下只认 `ids`，别让 db 层再理解一次分组
+
         if let Some(g) = q.dir_id {
             let (lib_id, local) = ungid(g);
             let l = self.lib(lib_id)?;
             let mut q2 = q.clone();
             q2.dir_id = Some(local);
+            if let Some(m) = &coll_ids {
+                q2.ids = Some(m.get(&lib_id).cloned().unwrap_or_default());
+            }
             if let Some((k, id)) = q2.cursor {
                 q2.cursor = Some((k, ungid(id).1));
             }
@@ -453,6 +474,14 @@ impl App {
             q2.limit = Some(limit);
             q2.cursor = None;
             q2.name_cursor = None;
+            if let Some(m) = &coll_ids {
+                let mine = m.get(&l.id).cloned().unwrap_or_default();
+                // 这个库一张都不在分组里 → 跳过整个库（省一次全表查）
+                if mine.is_empty() {
+                    continue;
+                }
+                q2.ids = Some(mine);
+            }
             if cursor.is_some() {
                 if sort == "name_asc" {
                     if let Some((name, local)) = &name_cursor {
@@ -1397,6 +1426,69 @@ pub struct SnapshotResolve {
 impl App {
     pub fn snapshot_list(&self) -> Result<Vec<reg::SnapshotRow>, String> {
         reg::snapshots(&self.reg)
+    }
+
+    /* ---------------- 分组（0.2.x） ----------------
+       分组 = 用户自己攒的「一撮素材」，跨库存在（注册库里存的是全局 asset id）。
+       与标签的分工：标签是属性（一张图可以有多个），分组是收纳（侧栏里点名要看的那一批）。 */
+
+    /// 分组清单 + **真实计数**。
+    ///
+    /// 计数必须按"素材现在还在不在"重算：注册库里的成员行不知道别的库删了东西，
+    /// 直接拿行数当数字，侧栏会显示 12 项、点进去只有 9 张（用户只会说"分组坏了"）。
+    pub fn coll_list(&self) -> Result<Vec<reg::CollRow>, String> {
+        let mut rows = reg::collections(&self.reg)?;
+        for r in &mut rows {
+            let gids = reg::coll_gids(&self.reg, r.id)?;
+            r.count = self.count_gids(&gids)? as i64;
+        }
+        Ok(rows)
+    }
+
+    fn count_gids(&self, gids: &[i64]) -> Result<usize, String> {
+        use std::collections::HashMap;
+        let mut per: HashMap<i64, Vec<i64>> = HashMap::new();
+        for g in gids {
+            let (lib, local) = ungid(*g);
+            per.entry(lib).or_default().push(local);
+        }
+        let mut n = 0usize;
+        for (lib, ids) in per {
+            let Ok(l) = self.lib(lib) else { continue };
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("SELECT COUNT(*) FROM assets WHERE missing = 0 AND id IN ({ph})");
+            let mut st = l.conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let c: i64 = st
+                .query_row(rusqlite::params_from_iter(ids.iter()), |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            n += c as usize;
+        }
+        Ok(n)
+    }
+
+    pub fn coll_create(&mut self, name: &str) -> Result<i64, String> {
+        reg::coll_create(&self.reg, name)
+    }
+
+    pub fn coll_rename(&mut self, id: i64, name: &str) -> Result<(), String> {
+        reg::coll_rename(&self.reg, id, name)
+    }
+
+    pub fn coll_delete(&mut self, id: i64) -> Result<(), String> {
+        reg::coll_delete(&self.reg, id)
+    }
+
+    pub fn coll_add(&mut self, id: i64, ids: &[i64]) -> Result<usize, String> {
+        reg::coll_add(&self.reg, id, ids)
+    }
+
+    pub fn coll_remove(&mut self, id: i64, ids: &[i64]) -> Result<usize, String> {
+        reg::coll_remove(&self.reg, id, ids)
+    }
+
+    /// 这张素材在哪些分组里（详情面板 / 右键菜单用）
+    pub fn coll_of(&self, gid: i64) -> Result<Vec<i64>, String> {
+        reg::coll_of(&self.reg, gid)
     }
 
     pub fn snapshot_get(&self, id: i64) -> Result<Option<reg::SnapshotRow>, String> {

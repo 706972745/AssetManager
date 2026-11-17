@@ -3,12 +3,14 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactElement,
   type ReactNode,
 } from "react";
 import {
   ArrowUpDown,
   Camera,
+  Check,
   ChevronRight,
   Box,
   Columns2,
@@ -31,6 +33,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
   Star,
   Tag,
   Trash2,
@@ -101,6 +104,11 @@ const ICONS: Record<string, Glyph> = {
   ),
   folder: ({ size, stroke, className }) => (
     <Folder size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 打开状态的文件夹：分组面板（照 FontManager 的 `FolderOpen`）用它，
+     和「新建文件夹」那枚合着的文件夹区分开 */
+  "folder-open": ({ size, stroke, className }) => (
+    <FolderOpen size={size} strokeWidth={stroke} className={className} />
   ),
   plus: ({ size, stroke, className }) => <Plus size={size} strokeWidth={stroke} className={className} />,
   close: ({ size, stroke, className }) => <X size={size} strokeWidth={stroke} className={className} />,
@@ -449,6 +457,9 @@ export interface MenuItem {
   dot?: string;
   /** 圆点的附加类（标签行用 `.tc-*` 把 `--tc` 带进来，浅深主题各一套色） */
   dotClass?: string;
+  /** 行首线性图标。标签行照 FontManager：自动标签 = 魔棒，手工标签 = 标签图标。
+      两者都画，只是图形不同 —— 否则同一列里文字左右错开（FontManager 2026-11-14 踩过）。 */
+  icon?: ReactNode;
   /** 段头：不可点的小标题（照 FontManager 的 `.filter-heading`） */
   heading?: boolean;
   /** 选中项右侧打勾（FontManager 的 `.sort-item` 就是这样，比只把文字变蓝清楚） */
@@ -459,16 +470,30 @@ export interface MenuItem {
   sub?: MenuItem[];
 }
 
+/**
+ * 浮层菜单。有两种形态，**不要混用**：
+ *
+ * - 默认（右键菜单）：FontManager `.ctx-menu` 的定版值 —— 208 宽 / 5 内距 / 30 高行。
+ * - `variant="pop"`（顶栏下拉：筛选 / 排序 / 颜色）：FontManager `.sort-menu` 的定版值 ——
+ *   min-width 150/176、4 内距、8px 11px 行、13px 字、勾选图标。owner 2026-11-17 要求
+ *   顶栏这些下拉和 FontManager 长得一模一样（以前这里用的是 11px 字 + 30 高行的右键菜单尺寸，
+ *   并排看明显两套）。
+ */
 export function Menu({
   x,
   y,
   items,
   onClose,
+  variant = "ctx",
+  align = "left",
 }: {
   x: number;
   y: number;
   items: MenuItem[];
   onClose: () => void;
+  variant?: "ctx" | "pop";
+  /** pop 形态下菜单盒贴哪条边：FontManager 的两个下拉都是 right:0（贴按钮右沿） */
+  align?: "left" | "right";
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const subRef = useRef<HTMLDivElement>(null);
@@ -478,8 +503,13 @@ export function Menu({
    *  因为 .menu 自己 overflow-y:auto，绝对定位的子面板会被裁掉。 */
   const [sub, setSub] = useState<{ items: MenuItem[]; left: number; top: number } | null>(null);
 
-  const left = Math.min(x, window.innerWidth - 300);
   const maxH = Math.min(480, window.innerHeight - 24);
+  /* 宽度不写死：pop 形态的菜单宽度由 CSS（min-width + 内容）决定，
+     所以「贴右沿」用 right 而不是算 left——不需要先量宽度，窄了宽了都不会跳。 */
+  const posStyle: CSSProperties =
+    align === "right"
+      ? { right: Math.max(8, window.innerWidth - x) }
+      : { left: Math.min(x, window.innerWidth - 300) };
 
   const keep = () => {
     if (timer.current !== null) {
@@ -491,10 +521,13 @@ export function Menu({
     keep();
     triggerRef.current = el;
     const r = el.getBoundingClientRect();
+    /* 位置只给锚点（入口行的左上角），**向左弹**交给 CSS 的
+       `transform: translate(-100%, -6px) translateX(-6px)` —— 和 FontManager 的
+       `.filter-submenu` 同一套：面板宽度是内容决定的，用 JS 减宽度就得先量，白抖一次。 */
     setSub({
       items: subItems,
-      left: Math.max(8, Math.min(r.left, window.innerWidth - 8) - 224),
-      top: Math.max(8, Math.min(r.top - 4, window.innerHeight - 320)),
+      left: r.left,
+      top: r.top,
     });
   };
   const closeSubSoon = () => {
@@ -526,7 +559,7 @@ export function Menu({
   }, [onClose, sub]);
 
   const renderRow = (it: MenuItem, i: number, inSub = false) => {
-    if (it.sep) return <div key={i} style={{ height: 1, background: "var(--ui-line)", margin: "5px 0" }} />;
+    if (it.sep) return <div key={i} className="menu-sep" role="none" />;
     if (it.heading)
       return (
         <div key={i} className="menu-heading" role="none">
@@ -554,6 +587,11 @@ export function Menu({
           if (!inSub && it.sub?.length) closeSubSoon();
         }}
       >
+        {it.icon && (
+          <span className="menu-ico" aria-hidden>
+            {it.icon}
+          </span>
+        )}
         {(it.dot || it.dotClass) && (
           <span
             className={`menu-dot ${it.dotClass ?? ""}`}
@@ -561,10 +599,16 @@ export function Menu({
             aria-hidden
           />
         )}
-        {it.label}
-        {it.meta && <span className="menu-meta mono">{it.meta}</span>}
-        {it.check && <span className="menu-check" aria-hidden>✓</span>}
-        {it.sub?.length && !inSub && <span className="menu-arrow" aria-hidden>›</span>}
+        <span className="menu-label">{it.label}</span>
+        {it.meta && <span className="menu-meta">{it.meta}</span>}
+        {/* 勾选照 FontManager：lucide 的 Check（13/12，stroke 2），不是一个 ✓ 字符
+            —— 字符在不同字体下大小/基线都不一样，两个软件并排看就露馅 */}
+        {it.check && (
+          <Check size={inSub ? 12 : 13} strokeWidth={2} className="menu-check" aria-hidden />
+        )}
+        {it.sub?.length && !inSub && (
+          <ChevronRight size={12} strokeWidth={1.6} className="menu-arrow" aria-hidden />
+        )}
       </button>
     );
   };
@@ -573,9 +617,9 @@ export function Menu({
     <>
       <div
         ref={ref}
-        className="menu"
+        className={`menu ${variant === "pop" ? "pop" : ""}`}
         style={{
-          left,
+          ...posStyle,
           top: Math.max(8, Math.min(y, window.innerHeight - maxH - 8)),
           maxHeight: maxH,
         }}
@@ -583,7 +627,16 @@ export function Menu({
         {items.map((it, i) => renderRow(it, i))}
       </div>
       {sub && (
-        <div ref={subRef} className="menu submenu" style={{ left: sub.left, top: sub.top }}>
+        <div
+          ref={subRef}
+          className="menu submenu"
+          style={{ left: sub.left, top: sub.top }}
+          /* 指针进面板 → 取消"稍后收起"的计时器；出去 → 重新计时。
+             没有这两个的话，从入口行移到面板（中间隔 6px）的瞬间计时器就开始跑，
+             到点发现面板上没指针就把面板收掉 —— 用户的手感是「刚移过去就没了」。 */
+          onMouseEnter={keep}
+          onMouseLeave={closeSubSoon}
+        >
           {sub.items.map((it, i) => renderRow(it, i, true))}
         </div>
       )}

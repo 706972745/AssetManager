@@ -141,7 +141,9 @@ export function SnapshotDock({
           className="snap-toggle"
           onClick={() => setClosed((v) => !v)}
           aria-expanded={!closed}
-          title={closed ? "展开快照" : "收起快照"}
+          /* 悬停气泡照 FontManager 的 hint.snapshotsSection：说清"这是什么 + 点标题干什么"。
+             不再用原生 title（灰底黑字、延迟不定，两边的观感差得最明显）。 */
+          data-hint-text="快照：把一批图片记成一份清单，之后一键打开灵感板（只记图片，不搬文件）；点标题展开或收起"
         >
           <span className="snap-chevron">
             <Icon name="chevron" size={12} stroke={2} className={closed ? "" : "rot90"} />
@@ -150,13 +152,18 @@ export function SnapshotDock({
         </button>
         <button
           className="snap-add"
-          title="导入快照（.json，只含图片编号）"
+          data-hint-text="导入快照清单（.json，只含图片编号，不含图片本身）"
           aria-label="导入快照"
           onClick={onImport}
         >
           <Icon name="import" size={13} stroke={1.8} />
         </button>
-        <button className="snap-add" title="新建快照" aria-label="新建快照" onClick={onStartCreate}>
+        <button
+          className="snap-add"
+          data-hint-text="新建快照：给眼下这批图片起个名字（不复制、不移动文件）"
+          aria-label="新建快照"
+          onClick={onStartCreate}
+        >
           <Icon name="plus" size={13} stroke={1.8} />
         </button>
       </div>
@@ -203,14 +210,16 @@ export function SnapshotDock({
             )
           )}
 
-          {/* 空态本身就是入口（照 FontManager `.sidebar-hint`）：
-              一段灰字也是"点不动的"，用户只会以为这里没东西。 */}
+          {/* 空态本身就是入口（照 FontManager `.sidebar-hint` 的虚线框 + 一句「创建第一个快照」）。
+              以前这里是"两行灰字 + 小字说明"，和 FontManager 长得不一样；
+              解释文字挪到段头的气泡里（悬停段头才出来，不占地方）。 */}
           {items.length === 0 && !creating && (
-            <button className="snap-empty" onClick={onStartCreate}>
-              还没有快照 —— <b>点这里建第一份</b>
-              <span className="snap-empty-sub">
-                也可以右键任意「标签」→ 把标签下的图片加入快照（文件一个都不动）
-              </span>
+            <button
+              className="snap-empty"
+              onClick={onStartCreate}
+              data-hint-text="快照只记图片，不搬文件；也可以右键任意「标签」→ 把标签下的图片加入快照"
+            >
+              创建第一个快照
             </button>
           )}
         </div>

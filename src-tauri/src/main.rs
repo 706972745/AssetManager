@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -37,9 +37,74 @@ fn lock<'a>(state: &'a State<'_, AppState>) -> std::sync::MutexGuard<'a, App> {
    · 24MP 的照片 → 6 份，同时 1 张（JPEG 走 DCT 降采样，实际只解 1/64 的像素，估重按降采样后算）；
    · 36MP 的合成大图 → 9 份，独占闸门 —— 宁可它自己慢，也不能把进程顶死。
    内存峰值大致封在 160–200 MB，和以前一样安全，但小图吞吐翻一倍多。 */
-const DECODE_BUDGET: usize = 10;
 /// 一份对应的像素量（4 MP ≈ 解码后 12 MB RGB）
 const DECODE_UNIT_PX: u64 = 4_000_000;
+
+/// 闸门份额按**机器档位**给（P2.5 T42）。
+///
+/// 以前写死 10 份：4 核 8G 的老机器上 10 路同时解码会被拖到卡顿，
+/// 32G 的新机器上又白白浪费一半余量。现在按 核数 + 物理内存 分四档
+/// （照果核看图的 low/mid/high/ultra）：
+/// * 低档 ≤4 核或 ≤8G → 5 份；
+/// * 中档 → 7 份；
+/// * 高档（本机：16 核 / 32G 级）→ 10 份；
+/// * 极高档 → 14 份。
+/// 内存峰值仍封在 200 MB 上下（5×4MP×3B ≈ 60MB ~ 14×12MB ≈ 170MB）。
+fn decode_budget() -> usize {
+    static B: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let gb = total_ram_gb().unwrap_or(16);
+        let b = if cores <= 4 || gb <= 8 {
+            5
+        } else if cores <= 8 || gb <= 16 {
+            7
+        } else if cores <= 16 || gb <= 32 {
+            10
+        } else {
+            14
+        };
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("解码闸门：{cores} 核 / {gb} GB → {b} 份"));
+        }
+        b
+    })
+}
+
+/// 物理内存（GB，四舍五入）。拿不到就返回 None，按 16G 算。
+#[cfg(windows)]
+fn total_ram_gb() -> Option<u64> {
+    #[repr(C)]
+    struct MemStatus {
+        len: u32,
+        load: u32,
+        total: u64,
+        avail: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virt: u64,
+        avail_virt: u64,
+        avail_ext: u64,
+    }
+    extern "system" {
+        fn GlobalMemoryStatusEx(m: *mut MemStatus) -> i32;
+    }
+    unsafe {
+        let mut m: MemStatus = std::mem::zeroed();
+        m.len = std::mem::size_of::<MemStatus>() as u32;
+        if GlobalMemoryStatusEx(&mut m) == 0 {
+            return None;
+        }
+        Some((m.total as f64 / 1024.0 / 1024.0 / 1024.0).round() as u64)
+    }
+}
+
+#[cfg(not(windows))]
+fn total_ram_gb() -> Option<u64> {
+    None
+}
 
 struct DecodeGate {
     free: Mutex<usize>,
@@ -48,7 +113,7 @@ struct DecodeGate {
 
 fn gate() -> &'static DecodeGate {
     static G: OnceLock<DecodeGate> = OnceLock::new();
-    G.get_or_init(|| DecodeGate { free: Mutex::new(DECODE_BUDGET), cv: Condvar::new() })
+    G.get_or_init(|| DecodeGate { free: Mutex::new(decode_budget()), cv: Condvar::new() })
 }
 
 struct DecodeSlot {
@@ -79,7 +144,7 @@ fn decode_cost(path: &PathBuf, px: u32, db_px: u64) -> usize {
     } else {
         src
     };
-    ((est / DECODE_UNIT_PX) as usize + 1).clamp(1, DECODE_BUDGET - 1)
+    ((est / DECODE_UNIT_PX) as usize + 1).clamp(1, decode_budget() - 1)
 }
 
 fn acquire_decode(cost: usize) -> DecodeSlot {
@@ -151,21 +216,36 @@ fn am_children(parent: Option<i64>, state: State<AppState>) -> Result<Vec<DirNod
 /// 已加入的**用户**库根数量（前端加库前先问一次，最多 3 个）。
 ///
 /// 内置截图库不算名额：它一直存在，算进去等于用户只有 2 个位置。
+/// **所有** builtin 都扣（不只是当前 exe 那一个）—— 同一个软件有 debug / release /
+/// 已安装三种 exe，各自都会把自己的截图目录登记成库根；只扣一个的话，
+/// 用户明明只加了 2 个库，侧栏却写着 3/3（owner 2026-11-17 截图就是这情况）。
 #[tauri::command]
 fn am_lib_count(state: State<AppState>) -> Result<i64, String> {
     let app = lock(&state);
-    let n = app.lib_count()?;
-    let has_builtin = app
-        .lib_roots()?
+    let roots = app.lib_roots()?;
+    /* 只数**真实存在**的用户库根：路径已经不在的（用户手输错、盘拔了）不该占名额 ——
+       它们连一行素材都索引不到，占着位置只会让"再加一个库"被莫名其妙顶回来。 */
+    let user = roots
         .iter()
-        .any(|r| is_builtin_root(r));
-    Ok(if has_builtin { (n - 1).max(0) } else { n })
+        .filter(|r| !is_builtin_root(r) && std::path::Path::new(r).is_dir())
+        .count() as i64;
+    Ok(user)
 }
 
-/// 内置库的路径（前端据此：不计入 3 个名额、右键不给「移除」、永远显示）。
+/// 内置库的路径（前端据此：不计入 3 个名额、右键不给「移除」、永远显示成一行「截图」）。
+///
+/// 返回的是**所有** builtin 根：`Tree.tsx` 把它当"这行不是用户库"的判据，
+/// 谁被漏掉谁就会以 `screenshots` 的英文名混进素材库列表、还占一个名额。
 #[tauri::command]
-fn am_builtin_roots() -> Vec<String> {
-    vec![shot_dir().to_string_lossy().to_string()]
+fn am_builtin_roots(state: State<AppState>) -> Result<Vec<String>, String> {
+    let app = lock(&state);
+    let mut out = vec![shot_dir().to_string_lossy().to_string()];
+    for r in app.lib_roots()? {
+        if is_builtin_root(&r) && !out.iter().any(|p| same_path(p, &r)) {
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 /// 从素材库移除一个库根：只清索引，磁盘上的文件一个都不动。
@@ -809,6 +889,75 @@ fn am_open_path(path: String) -> Result<(), String> {
 fn am_copy_files(paths: Vec<String>) -> Result<(), String> {
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     fsops::copy_files_to_clipboard(&list)
+}
+
+/* ---------------- 调整尺寸（P2.5 T38） ---------------- */
+/* 「另存为」直接复用上面的 `am_save_as`（原样复制字节，任何格式都成立）。 */
+
+/// 缩放另存：`max_edge` = 长边上限（0 = 只转格式不缩放）。
+///
+/// 目标扩展名由用户在对话框里选（.png / .jpg / .webp 过滤器），
+/// 没写扩展名就按 `format` 补上。
+#[tauri::command]
+async fn am_resize_save(
+    path: String,
+    max_edge: u32,
+    format: Option<String>,
+) -> Result<Option<ResizeOut>, String> {
+    let src = PathBuf::from(&path);
+    if !am_core::imgops::resizable(&src) {
+        return Err("这个格式没法重新编码（动图/RAW/PSD/PDF 只能「另存为」原样复制）".into());
+    }
+    let fmt = format.unwrap_or_else(|| "png".into()).to_lowercase();
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    let suggest = if max_edge > 0 {
+        format!("{stem}_{max_edge}.{fmt}")
+    } else {
+        format!("{stem}.{fmt}")
+    };
+    let mut dlg = rfd::AsyncFileDialog::new()
+        .set_file_name(&suggest)
+        .add_filter("PNG", &["png"])
+        .add_filter("JPEG", &["jpg", "jpeg"])
+        .add_filter("WebP", &["webp"]);
+    if let Some(d) = src.parent() {
+        dlg = dlg.set_directory(d);
+    }
+    let Some(picked) = dlg.save_file().await else {
+        return Ok(None);
+    };
+    let mut dst = picked.path().to_path_buf();
+    if dst.extension().is_none() {
+        dst.set_extension(&fmt);
+    }
+    let (w, h, bytes) = am_core::imgops::resized_to(&src, &dst, max_edge)?;
+    Ok(Some(ResizeOut {
+        path: dst.to_string_lossy().to_string(),
+        width: w,
+        height: h,
+        bytes,
+    }))
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ResizeOut {
+    path: String,
+    width: u32,
+    height: u32,
+    bytes: u64,
+}
+
+/// 读 EXIF 拍摄信息（T41）。读不到就是 `None`，界面那一段直接不显示。
+#[tauri::command]
+async fn am_exif(path: String) -> Result<Option<am_core::exif::Exif>, String> {
+    let p = PathBuf::from(path);
+    Ok(tauri::async_runtime::spawn_blocking(move || am_core::exif::read(&p))
+        .await
+        .unwrap_or(None))
 }
 
 #[tauri::command]
@@ -2311,11 +2460,50 @@ struct SnapshotZip {
     missing: usize,
 }
 
+/* ---------------- 分组（0.2.x） ----------------
+   分组的成员是**全局 asset id**，注册库里存一份；素材本身一张都不动。
+   界面上的计数由 `App::coll_list` 按"素材现在还在不在"重算。 */
+
+#[tauri::command]
+fn am_coll_list(state: State<'_, AppState>) -> Result<Vec<am_core::reg::CollRow>, String> {
+    lock(&state).coll_list()
+}
+
+#[tauri::command]
+fn am_coll_create(name: String, state: State<'_, AppState>) -> Result<i64, String> {
+    lock(&state).coll_create(&name)
+}
+
+#[tauri::command]
+fn am_coll_rename(id: i64, name: String, state: State<'_, AppState>) -> Result<(), String> {
+    lock(&state).coll_rename(id, &name)
+}
+
+#[tauri::command]
+fn am_coll_delete(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    lock(&state).coll_delete(id)
+}
+
+#[tauri::command]
+fn am_coll_add(id: i64, ids: Vec<i64>, state: State<'_, AppState>) -> Result<usize, String> {
+    lock(&state).coll_add(id, &ids)
+}
+
+#[tauri::command]
+fn am_coll_remove(id: i64, ids: Vec<i64>, state: State<'_, AppState>) -> Result<usize, String> {
+    lock(&state).coll_remove(id, &ids)
+}
+
+/// 这张素材在哪些分组里（右键菜单打勾用）
+#[tauri::command]
+fn am_coll_of(gid: i64, state: State<'_, AppState>) -> Result<Vec<i64>, String> {
+    lock(&state).coll_of(gid)
+}
+
 #[tauri::command]
 fn am_snapshot_list(state: State<'_, AppState>) -> Result<Vec<am_core::reg::SnapshotRow>, String> {
     lock(&state).snapshot_list()
 }
-
 #[tauri::command]
 fn am_snapshot_create(name: String, state: State<'_, AppState>) -> Result<i64, String> {
     lock(&state).snapshot_create(&name)
@@ -2749,7 +2937,468 @@ fn show_peeks(app: &AppHandle, labels: &[String]) {
     }
 }
 
+/* ---------------- 原生底图层（splash） ----------------
+
+   **为什么需要这一层**：WebView2 只在窗口被真正合成到屏幕时才开始出帧，窗口显示到
+   第一帧之间有 200~400ms 是 WebView 的深色默认底 —— 用户看到就是"截图开始黑一下"。
+   Snipaste / ShareX / 微信截图没有这个问题，因为它们整块底图是 **GDI 直接画**的，
+   第一帧就是截图本身。
+
+   所以这里照它们做：截屏后立刻用一层 `WS_EX_LAYERED` 的原生窗口把整张图
+   `UpdateLayeredWindow` 上去 —— 零延迟、不抢焦点、不要消息循环。WebView 覆盖层随后
+   叠上来画压暗 / 选区 / 工具栏，工具栏就绪后把这层销毁。
+   用户看到的是"按下 F1 屏幕立刻冻住"，没有任何黑屏。 */
+
+#[cfg(windows)]
+mod splash {
+    use std::ffi::c_void;
+    use std::sync::OnceLock;
+
+    type Hwnd = isize;
+    type Hdc = isize;
+    type Hgdiobj = isize;
+
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_EX_LAYERED: u32 = 0x0008_0000;
+    const WS_EX_TOPMOST: u32 = 0x0000_0008;
+    const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+    const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+    const ULW_ALPHA: u32 = 0x0000_0002;
+    const SW_SHOWNOACTIVATE: i32 = 4;
+    const AC_SRC_OVER: u8 = 0x00;
+    const AC_SRC_ALPHA: u8 = 0x01;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BitmapInfoHeader {
+        bi_size: u32,
+        bi_width: i32,
+        bi_height: i32,
+        bi_planes: u16,
+        bi_bit_count: u16,
+        bi_compression: u32,
+        bi_size_image: u32,
+        bi_xppm: i32,
+        bi_yppm: i32,
+        bi_clr_used: u32,
+        bi_clr_important: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BitmapInfo {
+        header: BitmapInfoHeader,
+        colors: [u32; 3],
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct BlendFunction {
+        blend_op: u8,
+        blend_flags: u8,
+        source_constant_alpha: u8,
+        alpha_format: u8,
+    }
+
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    struct Size {
+        cx: i32,
+        cy: i32,
+    }
+
+    type WndProc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
+
+    #[repr(C)]
+    struct WndClassW {
+        style: u32,
+        wnd_proc: Option<WndProc>,
+        cls_extra: i32,
+        wnd_extra: i32,
+        hinstance: isize,
+        hicon: isize,
+        hcursor: isize,
+        hbr_background: isize,
+        menu_name: *const u16,
+        class_name: *const u16,
+    }
+
+    extern "system" {
+        fn RegisterClassW(c: *const WndClassW) -> u16;
+        fn CreateWindowExW(
+            ex: u32,
+            class: *const u16,
+            name: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            w: i32,
+            h: i32,
+            parent: isize,
+            menu: isize,
+            inst: isize,
+            param: *mut c_void,
+        ) -> Hwnd;
+        fn DefWindowProcW(h: Hwnd, m: u32, w: usize, l: isize) -> isize;
+        fn ShowWindow(h: Hwnd, cmd: i32) -> i32;
+        fn DestroyWindow(h: Hwnd) -> i32;
+        fn GetDC(h: Hwnd) -> Hdc;
+        fn ReleaseDC(h: Hwnd, dc: Hdc) -> i32;
+        fn GetModuleHandleW(name: *const u16) -> isize;
+        fn UpdateLayeredWindow(
+            h: Hwnd,
+            dst: Hdc,
+            dst_pos: *const Point,
+            size: *const Size,
+            src: Hdc,
+            src_pos: *const Point,
+            color_key: u32,
+            blend: *const BlendFunction,
+            flags: u32,
+        ) -> i32;
+    }
+
+    extern "system" {
+        fn CreateCompatibleDC(dc: Hdc) -> Hdc;
+        fn CreateDIBSection(
+            dc: Hdc,
+            bi: *const BitmapInfo,
+            usage: u32,
+            bits: *mut *mut c_void,
+            section: isize,
+            offset: u32,
+        ) -> isize;
+        fn SelectObject(dc: Hdc, obj: Hgdiobj) -> Hgdiobj;
+        fn DeleteObject(obj: Hgdiobj) -> i32;
+        fn DeleteDC(dc: Hdc) -> i32;
+    }
+
+    fn class_name() -> &'static [u16] {
+        static N: OnceLock<Vec<u16>> = OnceLock::new();
+        N.get_or_init(|| "AMSnipSplash\0".encode_utf16().collect())
+    }
+
+    fn register_class() {
+        static ONCE: OnceLock<()> = OnceLock::new();
+        ONCE.get_or_init(|| unsafe {
+            let wc = WndClassW {
+                style: 0,
+                wnd_proc: Some(DefWindowProcW),
+                cls_extra: 0,
+                wnd_extra: 0,
+                hinstance: GetModuleHandleW(std::ptr::null()),
+                hicon: 0,
+                hcursor: 0,
+                hbr_background: 0,
+                menu_name: std::ptr::null(),
+                class_name: class_name().as_ptr(),
+            };
+            RegisterClassW(&wc);
+        });
+    }
+
+    /// 把整张截图铺到屏幕上（返回窗口句柄；失败返回 Err，调用方降级即可）
+    pub fn show(x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) -> Result<isize, String> {
+        let n = w as usize * h as usize;
+        if w == 0 || h == 0 || rgba.len() < n * 4 {
+            return Err("位图尺寸对不上".into());
+        }
+        unsafe {
+            register_class();
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class_name().as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                x,
+                y,
+                w as i32,
+                h as i32,
+                0,
+                0,
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null_mut(),
+            );
+            if hwnd == 0 {
+                return Err("建原生底图窗口失败".into());
+            }
+
+            let mut bi = BitmapInfo::default();
+            bi.header.bi_size = std::mem::size_of::<BitmapInfoHeader>() as u32;
+            bi.header.bi_width = w as i32;
+            bi.header.bi_height = -(h as i32); // top-down
+            bi.header.bi_planes = 1;
+            bi.header.bi_bit_count = 32;
+            bi.header.bi_compression = 0; // BI_RGB
+
+            let screen_dc = GetDC(0);
+            let mem_dc = CreateCompatibleDC(screen_dc);
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let bmp = CreateDIBSection(mem_dc, &bi, 0, &mut bits, 0, 0);
+            if bmp == 0 || bits.is_null() {
+                ReleaseDC(0, screen_dc);
+                DeleteDC(mem_dc);
+                DestroyWindow(hwnd);
+                return Err("建 DIB 失败".into());
+            }
+            /* RGBA → BGRA（UpdateLayeredWindow 要的是 0xAARRGGBB，内存序 B,G,R,A） */
+            let src = rgba.as_ptr();
+            let dst = bits as *mut u8;
+            for i in 0..n {
+                let o = i * 4;
+                let (r, g, b) = (
+                    *src.add(o),
+                    *src.add(o + 1),
+                    *src.add(o + 2),
+                );
+                *dst.add(o) = b;
+                *dst.add(o + 1) = g;
+                *dst.add(o + 2) = r;
+                *dst.add(o + 3) = 255;
+            }
+            let old = SelectObject(mem_dc, bmp);
+            let size = Size { cx: w as i32, cy: h as i32 };
+            let dst_pos = Point { x, y };
+            let src_pos = Point { x: 0, y: 0 };
+            let blend = BlendFunction {
+                blend_op: AC_SRC_OVER,
+                blend_flags: 0,
+                source_constant_alpha: 255,
+                alpha_format: AC_SRC_ALPHA,
+            };
+            let ok = UpdateLayeredWindow(
+                hwnd,
+                screen_dc,
+                &dst_pos,
+                &size,
+                mem_dc,
+                &src_pos,
+                0,
+                &blend,
+                ULW_ALPHA,
+            );
+            SelectObject(mem_dc, old);
+            DeleteObject(bmp);
+            DeleteDC(mem_dc);
+            ReleaseDC(0, screen_dc);
+            if ok == 0 {
+                DestroyWindow(hwnd);
+                return Err("UpdateLayeredWindow 失败".into());
+            }
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            Ok(hwnd)
+        }
+    }
+
+    pub fn close(hwnd: isize) {
+        if hwnd == 0 {
+            return;
+        }
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+    }
+
+    /// 抽干本线程的消息队列。窗口是在这个线程里建的，就必须有人给它派消息，
+    /// 否则 `DestroyWindow` 之后那些 `WM_DESTROY` 永远排在队列里没人处理。
+    pub fn pump() {
+        #[repr(C)]
+        struct Pt {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        struct Msg {
+            hwnd: isize,
+            message: u32,
+            w: usize,
+            l: isize,
+            time: u32,
+            pt: Pt,
+        }
+        extern "system" {
+            fn PeekMessageW(m: *mut Msg, hwnd: isize, min: u32, max: u32, remove: u32) -> i32;
+            fn TranslateMessage(m: *const Msg) -> i32;
+            fn DispatchMessageW(m: *const Msg) -> isize;
+        }
+        const PM_REMOVE: u32 = 1;
+        unsafe {
+            let mut m: Msg = std::mem::zeroed();
+            while PeekMessageW(&mut m, 0, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod splash {
+    pub fn show(_x: i32, _y: i32, _w: u32, _h: u32, _rgba: &[u8]) -> Result<isize, String> {
+        Err("unsupported".into())
+    }
+    pub fn close(_hwnd: isize) {}
+    pub fn pump() {}
+}
+
+/// 原生底图窗口的命令。
+enum SplashCmd {
+    Show {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        rgba: Vec<u8>,
+        ack: std::sync::mpsc::Sender<bool>,
+    },
+    Close {
+        ack: std::sync::mpsc::Sender<()>,
+    },
+}
+
+static SPLASH_TX: OnceLock<std::sync::mpsc::Sender<SplashCmd>> = OnceLock::new();
+
+/// 底图窗口句柄的**只读镜像**（真句柄归 `am-splash` 线程所有）。
+/// 只给窗口枚举用：识别窗口时要跳过自己这块全屏底图，不然选中的永远是它。
+static SPLASH_HWND_VIEW: AtomicIsize = AtomicIsize::new(0);
+
+/// 原生底图窗口的**专属线程**（建窗 / 贴图 / 销毁全在这里做）。
+///
+/// 为什么要单开一个线程：`snip_begin` 跑在 tokio 的工作线程上（异步命令），
+/// 而 **Win32 窗口只能由创建它的线程销毁**。跨线程 `DestroyWindow` 直接失败，
+/// 于是那块全屏 topmost 的底图窗口永远留在桌面上 —— 用户看到的就是
+/// 「每次截图后取消会卡死」：屏幕冻在截图上、点什么都没反应（2026-11-17 owner 报）。
+///
+/// 现在这个线程独占窗口句柄，带消息泵，任何线程调用 `splash_close()` 都能可靠撤掉。
+fn splash_tx() -> &'static std::sync::mpsc::Sender<SplashCmd> {
+    SPLASH_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<SplashCmd>();
+        let spawned = std::thread::Builder::new()
+            .name("am-splash".into())
+            .spawn(move || {
+                let mut hwnd: isize = 0;
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(8)) {
+                        Ok(SplashCmd::Show { x, y, w, h, rgba, ack }) => {
+                            if hwnd != 0 {
+                                splash::close(hwnd);
+                                hwnd = 0;
+                                SPLASH_HWND_VIEW.store(0, Ordering::SeqCst);
+                            }
+                            match splash::show(x, y, w, h, &rgba) {
+                                Ok(h) => {
+                                    hwnd = h;
+                                    SPLASH_HWND_VIEW.store(h, Ordering::SeqCst);
+                                    let _ = ack.send(true);
+                                }
+                                Err(e) => {
+                                    if let Some(d) = LOG_DIR.get() {
+                                        log_runtime(d, &format!("snip splash FAIL {e}"));
+                                    }
+                                    let _ = ack.send(false);
+                                }
+                            }
+                        }
+                        Ok(SplashCmd::Close { ack }) => {
+                            if hwnd != 0 {
+                                splash::close(hwnd);
+                                hwnd = 0;
+                                SPLASH_HWND_VIEW.store(0, Ordering::SeqCst);
+                            }
+                            let _ = ack.send(());
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        /* 发送端被丢了（进程收尾）：把窗口收干净再退 */
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            if hwnd != 0 {
+                                splash::close(hwnd);
+                                SPLASH_HWND_VIEW.store(0, Ordering::SeqCst);
+                            }
+                            break;
+                        }
+                    }
+                    splash::pump();
+                }
+            });
+        if spawned.is_err() {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, "snip splash 线程起不来（降级：没有底图层）");
+            }
+        }
+        tx
+    })
+}
+
+/// 把截图立刻铺到屏幕上（零延迟）。失败只是没有这一层，不影响截图本身。
+/// **会等底图上屏再返回**（最多 600ms）：紧跟着建 WebView 覆盖层，
+/// 底图没上就已经是"黑一下"了。
+fn splash_show(x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    let cmd = SplashCmd::Show {
+        x,
+        y,
+        w,
+        h,
+        rgba: rgba.to_vec(),
+        ack: ack_tx,
+    };
+    if splash_tx().send(cmd).is_ok() {
+        let _ = ack_rx.recv_timeout(Duration::from_millis(600));
+    }
+}
+
+/// 撤掉原生底图（WebView 覆盖层已经画好了，或者截图被取消）。
+/// 阻塞到真的撤掉为止 —— 不然取消之后底图还挂在最上面，等于把桌面锁死。
+fn splash_close() {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    if splash_tx().send(SplashCmd::Close { ack: ack_tx }).is_ok() {
+        let _ = ack_rx.recv_timeout(Duration::from_millis(800));
+    }
+}
+
+/// 整扇窗的全局 alpha（Win32 layered，0–255）。
+///
+/// 截图覆盖层靠它"隐形出场"：建完窗先 alpha=1（肉眼看不见，但窗口是可见的 ——
+/// WebView2 只有在**可见窗口**里才会出帧），底图解码完再淡入到 255。
+/// 这样用户永远看不到 WebView 出首帧之前那段空白。
+#[cfg(windows)]
+fn set_window_alpha(win: &tauri::WebviewWindow, alpha: u8) -> Result<(), String> {
+    type Hwnd = isize;
+    extern "system" {
+        fn GetWindowLongPtrW(h: Hwnd, idx: i32) -> isize;
+        fn SetWindowLongPtrW(h: Hwnd, idx: i32, v: isize) -> isize;
+        fn SetLayeredWindowAttributes(h: Hwnd, key: u32, alpha: u8, flags: u32) -> i32;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_LAYERED: isize = 0x0008_0000;
+    const LWA_ALPHA: u32 = 0x0000_0002;
+    let raw = win.hwnd().map_err(|e| format!("拿不到窗口句柄：{e}"))?.0 as Hwnd;
+    if raw == 0 || raw == -1 {
+        return Err("窗口句柄无效".into());
+    }
+    unsafe {
+        let ex = GetWindowLongPtrW(raw, GWL_EXSTYLE);
+        SetWindowLongPtrW(raw, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+        if SetLayeredWindowAttributes(raw, 0, alpha, LWA_ALPHA) == 0 {
+            return Err("设置窗口透明度失败".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_window_alpha(_win: &tauri::WebviewWindow, _alpha: u8) -> Result<(), String> {
+    Ok(())
+}
+
 async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
+    /* 新会话：让上一次迟到的收尾线程（`am_snip_ready` 里那条）失效 */
+    SNIP_GEN.fetch_add(1, Ordering::SeqCst);
     /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
        `am_snip_cancel` 不会执行，slot 一直占着 → 之后每次按 F1 都回"上一次截图还没结束"，
        永久失效，用户只会说"F1 坏了"。有窗口才算真在进行中。 */
@@ -2765,6 +3414,8 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
             }
         }
     }
+    /* 上次的底图先撤掉（正常会随 cancel/finish 撤，这里兜残留） */
+    splash_close();
     /* 残留窗口（状态空了但窗口还没销毁完）：**必须等它真的消失**。
        `close()` 是排进消息队列的，紧接着 `build()` 同一个 label 会撞
        "a webview with label `snip` already exists"（2026-11-17 实测日志）。 */
@@ -2790,6 +3441,12 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
             return Err(e);
         }
     };
+    /* **先铺原生底图**（GDI 直接 blit，零延迟）：用户按下 F1 的下一帧就能看到
+       冻住的桌面。WebView 覆盖层随后叠上来画压暗 / 选区 / 工具栏，
+       工具栏就绪后（`am_snip_ready`）再把这一层撤掉。
+       PNG 编码 + WebView2 起来要几百毫秒，这段时间屏幕上就是这张图 —— 不会黑。 */
+    splash_show(shot.x, shot.y, shot.w, shot.h, &shot.rgba);
+
     let png = match shot.png() {
         Ok(p) => p,
         Err(e) => {
@@ -2811,6 +3468,19 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
         .and_then(|w| w.scale_factor().ok())
         .unwrap_or(1.0);
     let (vx, vy, vw, vh) = (shot.x, shot.y, shot.w, shot.h);
+    /* 低清底图（480 宽）：窗口一显示就有内容，治"截图开始黑一下"。
+       详见 `screen::Shot::thumb_png` —— 高清图上传纹理要 300~400ms，
+       这段时间里窗口只能显示自己的背景色。 */
+    let thumb = {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        shot.thumb_png(480)
+            .ok()
+            .map(|b| format!("data:image/png;base64,{}", STANDARD.encode(&b)))
+    };
+    /* 平均色：覆盖层根节点先铺它。WebView 在隐藏窗口里不预合成，
+       窗口显示到第一帧之间那 200~400ms 只能看到 WebView 背景（近黑）——
+       铺成截图的平均色之后，那一段看起来就是"屏幕压暗了一下"。 */
+    let avg = shot.avg_rgb();
     *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) =
         Some(SnipState { shot, tmp: tmp.clone(), hidden });
 
@@ -2819,21 +3489,39 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
     }
     let boot = serde_json::json!({
         "src": media_url(&tmp),
+        "thumb": thumb,
+        "avg": avg,
         "scale": scale,
         "x": vx, "y": vy, "w": vw, "h": vh,
         "mode": mode,
     });
     let script = format!("window.__AM_SNIP__ = {boot};");
-    tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
+    let win = tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
         .title("截图")
         .inner_size(vw as f64 / scale, vh as f64 / scale)
         .position(vx as f64 / scale, vy as f64 / scale)
         .decorations(false)
+        /* **不透明 + 先隐形**（实测：透明窗口里 WebView2 只画得出文字，位图完全不渲染，
+           所以不能靠"透出桌面"来躲黑屏）。
+           现在的顺序：建不可见窗 → 设 layered alpha=1 → show（窗口可见，WebView2 才开始
+           出帧，但人眼看不见）→ 低清底图解码完 → `am_snip_ready` 打回不透明。
+           配合 120ms 淡入，用户看到的是覆盖层柔和浮现，不是"闪一下黑"。 */
         .transparent(false)
         .shadow(false)
         .resizable(false)
-        .always_on_top(true)
+        /* **不置顶**：原生底图（splash）是 topmost 的，盖在它上面。
+           这样 WebView 窗口虽然"被遮挡"，但它确实是可见窗口 —— WebView2 会正常渲染
+           （实测被遮挡的窗口 PrintWindow 抓得到内容；而 alpha≈0 / visible(false) 的窗口
+           根本不渲染，等多久都没用）。渲染好之后 `am_snip_ready` 把它提到最前。 */
+        .always_on_top(false)
         .skip_taskbar(true)
+        /* **先不显示**（owner 2026-11-17 报「截图开始先黑屏一下」）：
+           以前这里一建窗就是可见的，而整屏底图要等 WebView2 起来、React 挂上、
+           `<img>` 解码完才画得出来 —— 中间那 100~300ms 用户看到的是窗口自己的
+           背景色（深色主题下就是一片黑），所以每次截图都"黑一下"。
+           现在的顺序：建不可见窗 → 前端底图 onLoad 且画完第一帧 → `am_snip_ready`
+           把它显示出来。人眼看到的第一帧就是冻结的桌面，不再是黑屏。 */
+        .visible(false)
         .initialization_script(&script)
         .build()
         .map_err(|e| {
@@ -2847,6 +3535,10 @@ async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
             }
             format!("截图窗口创建失败：{e}")
         })?;
+    /* 正常显示（不搞 alpha 隐形）：它上面盖着原生底图，用户看到的还是冻结的桌面。
+       窗口必须"真的可见"WebView2 才出帧 —— 这是这一整套的硬前提。 */
+    let _ = win.show();
+    let _ = win.set_focus();
     Ok(())
 }
 
@@ -2918,6 +3610,193 @@ fn am_snip_crop(
     ))
 }
 
+/// 整张截图（**data URL**）。前端拿它建一张离屏 canvas 当"像素源"：
+/// 放大镜要看像素、马赛克要采样、导出要合成 —— 都需要能 `getImageData`，
+/// 而 `boot.src` 是 `http://peekfile.localhost/…`（跨源），画进 canvas 会污染，
+/// `toDataURL` 直接抛错。所以这里给一份同源的 data URL。
+#[tauri::command]
+fn am_snip_full() -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = g.as_ref() else {
+        return Err("截图数据已经过期，请重新按一次快捷键".into());
+    };
+    let png = s.shot.png()?;
+    Ok(format!("data:image/png;base64,{}", STANDARD.encode(&png)))
+}
+
+/// 光标底下那一扇顶层窗口的矩形（**照 Snipaste 的"自动识别窗口"**）。
+///
+/// 入参 `x/y` 是覆盖层里的 CSS 像素；返回值也用 CSS 像素（相对覆盖层左上角）。
+/// 找不到（桌面 / 全透明窗 / 只剩自己）就返回 `None`，前端就只显示十字线。
+///
+/// 为什么不用 `WindowFromPoint`：那个函数返回的一定是**最上面**那扇 —— 也就是我们自己的
+/// 截图覆盖窗。所以这里按 z-order 从上往下走，跳过自己（覆盖层 + 原生底图），
+/// 取第一扇"可见 + 没被 DWM 隐藏 + 矩形包含该点"的顶层窗口。
+#[derive(serde::Serialize)]
+struct WinBox {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[cfg(windows)]
+fn window_rect_at(px: i32, py: i32, skip: &[isize]) -> Option<(i32, i32, i32, i32)> {
+    type Hwnd = isize;
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Rc {
+        l: i32,
+        t: i32,
+        r: i32,
+        b: i32,
+    }
+    extern "system" {
+        fn GetTopWindow(parent: Hwnd) -> Hwnd;
+        fn GetWindow(h: Hwnd, cmd: u32) -> Hwnd;
+        fn GetWindowRect(h: Hwnd, r: *mut Rc) -> i32;
+        fn IsWindowVisible(h: Hwnd) -> i32;
+        fn IsIconic(h: Hwnd) -> i32;
+        fn GetWindowLongPtrW(h: Hwnd, idx: i32) -> isize;
+        fn DwmGetWindowAttribute(h: Hwnd, attr: u32, pv: *mut core::ffi::c_void, cb: u32) -> i32;
+        fn GetWindowThreadProcessId(h: Hwnd, pid: *mut u32) -> u32;
+    }
+    const GW_HWNDNEXT: u32 = 2;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    const DWMWA_CLOAKED: u32 = 14;
+
+    let me = std::process::id();
+    unsafe {
+        let mut h = GetTopWindow(0);
+        let mut guard = 0;
+        while h != 0 && guard < 4000 {
+            guard += 1;
+            /* 本进程的窗口一律不算"底下的窗口"：覆盖层、原生底图、贴图窗都是我们自己的。
+               只按句柄排除不够 —— 底图窗口销毁是异步的，句柄早清空了窗口还在。 */
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(h, &mut pid);
+            if !skip.contains(&h) && pid != me && IsWindowVisible(h) != 0 && IsIconic(h) == 0 {
+                let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+                /* 全透明穿透窗（输入法候选、覆盖层之类）不算"窗口" */
+                if ex & WS_EX_TRANSPARENT == 0 {
+                    let mut cloaked: u32 = 0;
+                    let _ = DwmGetWindowAttribute(
+                        h,
+                        DWMWA_CLOAKED,
+                        &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+                        4,
+                    );
+                    if cloaked == 0 {
+                        /* 优先用 DWM 的"可见边框"：GetWindowRect 含一圈看不见的阴影边，
+                           自动识别出来的框会比眼睛看到的窗口大 7~8px */
+                        let mut rc = Rc::default();
+                        let ok = DwmGetWindowAttribute(
+                            h,
+                            DWMWA_EXTENDED_FRAME_BOUNDS,
+                            &mut rc as *mut Rc as *mut core::ffi::c_void,
+                            std::mem::size_of::<Rc>() as u32,
+                        ) == 0
+                            || GetWindowRect(h, &mut rc) != 0;
+                        if ok
+                            && rc.r > rc.l
+                            && rc.b > rc.t
+                            && px >= rc.l
+                            && px < rc.r
+                            && py >= rc.t
+                            && py < rc.b
+                        {
+                            /* 工具窗口（浮动面板）也让用户能选中，只是别把它当成桌面的替代 */
+                            let _ = WS_EX_TOOLWINDOW;
+                            return Some((rc.l, rc.t, rc.r - rc.l, rc.b - rc.t));
+                        }
+                    }
+                }
+            }
+            h = GetWindow(h, GW_HWNDNEXT);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn window_rect_at(_px: i32, _py: i32, _skip: &[isize]) -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
+/// 光标按像素微调（Snipaste 的 W/A/S/D）。
+#[tauri::command]
+fn am_cursor_step(dx: i32, dy: i32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct Pt {
+            x: i32,
+            y: i32,
+        }
+        extern "system" {
+            fn GetCursorPos(p: *mut Pt) -> i32;
+            fn SetCursorPos(x: i32, y: i32) -> i32;
+        }
+        let mut p = Pt { x: 0, y: 0 };
+        unsafe {
+            GetCursorPos(&mut p);
+            SetCursorPos(p.x + dx, p.y + dy);
+        }
+    }
+    let _ = (dx, dy);
+    Ok(())
+}
+
+#[tauri::command]
+async fn am_snip_window_at(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    scale: f64,
+) -> Result<Option<WinBox>, String> {
+    let (sx, sy, sw, sh) = {
+        let g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some(s) => (s.shot.x, s.shot.y, s.shot.w as i32, s.shot.h as i32),
+            None => return Ok(None),
+        }
+    };
+    let sc = if scale > 0.0 { scale } else { 1.0 };
+    let px = sx + (x * sc).round() as i32;
+    let py = sy + (y * sc).round() as i32;
+    let mut skip: Vec<isize> = Vec::new();
+    if let Some(w) = app.get_webview_window("snip") {
+        if let Ok(h) = w.hwnd() {
+            skip.push(h.0 as isize);
+        }
+    }
+    let splash = SPLASH_HWND_VIEW.load(Ordering::SeqCst);
+    if splash != 0 {
+        skip.push(splash);
+    }
+    let Some((rx, ry, rw, rh)) = window_rect_at(px, py, &skip) else {
+        return Ok(None);
+    };
+    /* 夹到截图范围内（窗口可能有一半在屏幕外） */
+    let l = rx.max(sx);
+    let t = ry.max(sy);
+    let r = (rx + rw).min(sx + sw);
+    let b = (ry + rh).min(sy + sh);
+    if r <= l || b <= t {
+        return Ok(None);
+    }
+    Ok(Some(WinBox {
+        x: (l - sx) as f64 / sc,
+        y: (t - sy) as f64 / sc,
+        w: (r - l) as f64 / sc,
+        h: (b - t) as f64 / sc,
+    }))
+}
+
 /// 收下前端合成好的整张图（含标注），按 `action` 处理：
 /// `copy` 进剪贴板 / `save` 存到截图目录 / `saveas` 让用户选位置 / `peek` 直接贴到屏幕上。
 ///
@@ -2930,9 +3809,13 @@ async fn am_snip_finish(
     action: String,
 ) -> Result<Option<String>, String> {
     let bytes = png_from_b64(&png)?;
+    /* 这条会话到此结束：正在淡入的收尾线程不许再动窗口 */
+    SNIP_GEN.fetch_add(1, Ordering::SeqCst);
 
     let win = app.get_webview_window("snip");
     let close_snip = || {
+        /* 底图必须一起撤：它是全屏 topmost 的原生窗口，忘了会一直挡着桌面 */
+        splash_close();
         if let Some(w) = app.get_webview_window("snip") {
             let _ = w.close();
         }
@@ -2958,6 +3841,9 @@ async fn am_snip_finish(
                 e
             })?;
             close_snip();
+            /* 复制是**没有痕迹**的动作：截完窗一关、剪贴板里有什么用户看不见，
+               很容易以为"什么都没发生"。给主窗一个事件，让它弹一句「已复制」。 */
+            let _ = app.emit("shot://copied", ());
             Ok(None)
         }
         "peek" => {
@@ -3033,8 +3919,73 @@ async fn am_snip_finish(
     }
 }
 
+/// 前端把底图解码完、画好第一帧之后调这个 —— 覆盖窗这时才真正显示。
+///
+/// 为什么要这一来一回：`snip` 窗建的时候是 `visible(false)`（见 `snip_begin`），
+/// 早显示 200ms 就是一片黑（用户报的「先黑屏一下」）。窗口一直不显示更糟：
+/// 用户按了 F1 像没反应。所以显示时机交给前端：图上屏了才 show。
+/// 截图会话代次。每开始 / 取消一次就 +1。
+///
+/// 用来让"迟到的异步收尾"失效：`am_snip_ready` 里那条线程会睡 200ms 再淡入、
+/// 再撤底图。如果这期间用户已经取消了（甚至又按了一次 F1 开了新的），
+/// 旧的收尾线程会把**新**的那块底图撤掉 / 把新窗口设成半透明 —— 表现就是
+/// "刚按 F1 画面一闪就没了"。所有跨线程收尾都先比一次代次。
+static SNIP_GEN: AtomicU64 = AtomicU64::new(0);
+
+#[tauri::command]
+async fn am_snip_ready(app: AppHandle) -> Result<(), String> {
+    /* 窗口建出来就是可见的（透明窗口，第一帧透出桌面），这里只负责把焦点拿回来，
+       让用户不用点一下就能直接拖选区。留着这个命令是因为前端在底图上屏时还会调一次
+       —— 顺便把窗口提到最前，防止被别的新窗口盖住。 */
+    let gen = SNIP_GEN.load(Ordering::SeqCst);
+    if let Some(w) = app.get_webview_window("snip") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        let win = w.clone();
+        std::thread::spawn(move || {
+            /* 1) 先等 WebView2 把第一帧交出来（窗口被原生底图挡着，但它确实在渲染）。
+                  这段时间屏幕上是冻结的桌面，用户看不出在等。
+               2) 提到最前时**用 24% 的半透明出场 + 240ms 渐变**，而不是一下子全不透明：
+                  WebView2 从"被遮挡"切到"最前"会重新合成，头 100~200ms 可能还没画完；
+                  半透明时底下的原生底图仍透出来，所以用户看到的是"截图轻轻变暗 → 工具栏浮现"，
+                  不会出现一整块硬黑。
+               3) 渐变走完再撤底图。 */
+            std::thread::sleep(Duration::from_millis(200));
+            if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            let _ = set_window_alpha(&win, 70);
+            let _ = win.set_always_on_top(true);
+            let _ = win.set_focus();
+            for step in 1..=24u32 {
+                if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+                let a = 70 + ((185 * step) / 24) as u8;
+                if set_window_alpha(&win, a).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            let _ = set_window_alpha(&win, 255);
+            std::thread::sleep(Duration::from_millis(40));
+            if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            splash_close();
+        });
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
+    /* 取消也算一次会话结束：正在淡入的那条线程必须立刻停手，
+       不然它会把底图重新撤一遍、把已经关掉的窗口再设一次 alpha */
+    SNIP_GEN.fetch_add(1, Ordering::SeqCst);
     let (hidden, tmp) = {
         let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
         match g.take() {
@@ -3042,13 +3993,28 @@ async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
             None => (Vec::new(), PathBuf::new()),
         }
     };
+    /* 顺序：先撤原生底图 → 再把覆盖层藏起来（用户这一刻就回到桌面了）→
+       最后才真关窗。关窗放到独立线程里：这条命令本身还在这个 webview 的 IPC 里跑，
+       就地 close 会让 webview 在等响应的时候被拆掉（偶发卡死）。 */
+    splash_close();
     if let Some(win) = app.get_webview_window("snip") {
-        let _ = win.close();
+        let _ = win.hide();
     }
-    show_peeks(&app, &hidden);
-    if !tmp.as_os_str().is_empty() {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        if let Some(w) = app2.get_webview_window("snip") {
+            let _ = w.close();
+        }
+        show_peeks(&app2, &hidden);
+        if !tmp.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        /* 焦点还给主窗：取消完还停在别处的话，用户得先点一下窗口才能继续用 */
+        if let Some(m) = app2.get_webview_window("main") {
+            let _ = m.set_focus();
+        }
+    });
     Ok(())
 }
 
@@ -3460,6 +4426,8 @@ fn main() {
             am_reveal,
             am_open_path,
             am_copy_files,
+            am_resize_save,
+            am_exif,
             am_rename,
             am_mkdir,
             am_move,
@@ -3484,12 +4452,23 @@ fn main() {
             am_clip_history,
             am_snip_start,
             am_snip_crop,
+            am_snip_full,
+            am_snip_window_at,
+            am_cursor_step,
             am_snip_finish,
             am_snip_cancel,
+            am_snip_ready,
             am_peek_ready,
             am_board_open,
             am_board_close,
             am_board_paste,
+            am_coll_list,
+            am_coll_create,
+            am_coll_rename,
+            am_coll_delete,
+            am_coll_add,
+            am_coll_remove,
+            am_coll_of,
             am_snapshot_list,
             am_snapshot_create,
             am_snapshot_rename,

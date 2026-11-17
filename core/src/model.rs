@@ -91,6 +91,12 @@ pub struct AssetQuery {
     /// **后端填的**：跨库合并分页时，`name_asc` 排序的游标（名字, 库内 id 或 ±调整值）。
     /// 前端不送 —— 它只知道 `(已取条数, 最后一行全局 id)`。
     pub name_cursor: Option<(String, i64)>,
+    /// 分组筛选（分组 id，注册库里的 `collections.id`）。None = 不筛。
+    /// 成员是全局 asset id，`App::list` 按库拆成库内 id 再交给各库查询。
+    pub collection: Option<i64>,
+    /// **后端填的**：这一页只许出现这些库内 id（分组筛选时由 `App::list` 拆出来）。
+    /// 前端不送。
+    pub ids: Option<Vec<i64>>,
 }
 
 /// 标签 + 使用数（侧栏每次刷新拉一次）。

@@ -77,6 +77,26 @@ CREATE TABLE IF NOT EXISTS snapshot_items (
 );
 CREATE INDEX IF NOT EXISTS idx_snapshot_items_hash ON snapshot_items(hash);
 
+/* 分组（0.2.x）：用户自己攒的「一撮素材」，**跨库存在**（同一组可以横跨几个素材库）。
+   存的是**全局 asset id**（`ids::gid` = 库号 + 库内 id），不是哈希也不是路径：
+   分组是"我现在挑出来的这几张"，跟着素材走；素材被删/丢了，这一行自动查不到，计数时跳过。
+   与「标签」的区别（照 FontManager）：标签是**属性**（一张图可以有多个），
+   分组是**收纳**（用户在侧栏点名要看的那一批）；所以分组进侧栏、标签进标签面板。 */
+CREATE TABLE IF NOT EXISTS collections (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS collection_assets (
+  collection_id INTEGER NOT NULL,
+  asset_gid INTEGER NOT NULL,
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (collection_id, asset_gid)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_assets_gid ON collection_assets(asset_gid);
+
 "#;
 
 pub struct LibRow {
@@ -96,6 +116,7 @@ pub fn open(path: &Path) -> Res<Connection> {
                 .map_err(|e| e.to_string())?;
         }
     }
+    db::migrate_versioned(&c)?;
     Ok(c)
 }
 
@@ -648,6 +669,133 @@ pub fn snapshot_touch(c: &Connection, id: i64) -> Res<()> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/* ------------------------------------------------------------------ 分组 */
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CollRow {
+    pub id: i64,
+    pub name: String,
+    /// **原始成员数**（含已经被删掉 / 丢失的素材）。界面上的数字由 `App::coll_list`
+    /// 用真实存在的素材重算，不直接信这个 —— 见那里的注释。
+    pub count: i64,
+    pub created_at: i64,
+}
+
+pub fn collections(c: &Connection) -> Res<Vec<CollRow>> {
+    let mut st = c
+        .prepare(
+            "SELECT c.id, c.name, c.created_at,
+                    (SELECT COUNT(*) FROM collection_assets a WHERE a.collection_id = c.id)
+             FROM collections c
+             ORDER BY c.sort, c.created_at, c.id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(CollRow { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, count: r.get(3)? })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+pub fn validate_coll_name(name: &str) -> Res<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("分组名不能为空".into());
+    }
+    if n.chars().count() > 60 {
+        return Err("分组名太长了（最多 60 个字）".into());
+    }
+    Ok(n.to_string())
+}
+
+/// 新建分组。**同名直接返回已有的 id**（和快照同一个口径：点两次不该出两个一样的）。
+pub fn coll_create(c: &Connection, name: &str) -> Res<i64> {
+    let name = validate_coll_name(name)?;
+    c.query_row(
+        "INSERT INTO collections (name, created_at) VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE SET name = collections.name
+         RETURNING id",
+        params![name, db::now_ts()],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn coll_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
+    let name = validate_coll_name(name)?;
+    let taken: Option<i64> = c
+        .query_row(
+            "SELECT id FROM collections WHERE name = ?1 AND id <> ?2",
+            params![name, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if taken.is_some() {
+        return Err(format!("已经有一个叫「{name}」的分组了"));
+    }
+    c.execute("UPDATE collections SET name = ?2 WHERE id = ?1", params![id, name])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 删分组：**只删这个分组和它的成员行，素材本身一个都不动**。
+pub fn coll_delete(c: &Connection, id: i64) -> Res<()> {
+    c.execute("DELETE FROM collection_assets WHERE collection_id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM collections WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn coll_add(c: &Connection, id: i64, gids: &[i64]) -> Res<usize> {
+    let mut n = 0usize;
+    let now = db::now_ts();
+    {
+        let mut st = c
+            .prepare(
+                "INSERT INTO collection_assets (collection_id, asset_gid, added_at)
+                 VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+            )
+            .map_err(|e| e.to_string())?;
+        for g in gids {
+            n += st.execute(params![id, g, now]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(n)
+}
+
+pub fn coll_remove(c: &Connection, id: i64, gids: &[i64]) -> Res<usize> {
+    let mut n = 0usize;
+    {
+        let mut st = c
+            .prepare("DELETE FROM collection_assets WHERE collection_id = ?1 AND asset_gid = ?2")
+            .map_err(|e| e.to_string())?;
+        for g in gids {
+            n += st.execute(params![id, g]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(n)
+}
+
+pub fn coll_gids(c: &Connection, id: i64) -> Res<Vec<i64>> {
+    let mut st = c
+        .prepare("SELECT asset_gid FROM collection_assets WHERE collection_id = ?1 ORDER BY added_at, asset_gid")
+        .map_err(|e| e.to_string())?;
+    let rows = st.query_map(params![id], |r| r.get(0)).map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// 这张素材在哪些分组里（详情面板显示"[分组] 客户稿 ×"用）。
+pub fn coll_of(c: &Connection, gid: i64) -> Res<Vec<i64>> {
+    let mut st = c
+        .prepare("SELECT collection_id FROM collection_assets WHERE asset_gid = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = st.query_map(params![gid], |r| r.get(0)).map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
 }
 
 #[cfg(test)]

@@ -51,6 +51,54 @@ impl Shot {
             .ok_or_else(|| "截图缓冲区尺寸与像素数对不上".to_string())?;
         png_of(&img)
     }
+
+    /// 整张图的平均色。
+    ///
+    /// 用途：截图覆盖层的窗口在「第一帧合成之前」只能显示 WebView 的背景色
+    /// （深色主题下就是一片近黑 —— owner 说的"截图开始黑一下"）。
+    /// 把覆盖层根节点的底色先铺成这张截图的平均色，那 200~400ms 就变成
+    /// "屏幕整体压暗了一点点"，而不是"闪一下黑"。
+    ///
+    /// 抽样步长按「最多看 4096 个点」算：2560×1600 也只遍历 4096 次，几毫秒。
+    pub fn avg_rgb(&self) -> [u8; 3] {
+        let px = self.w as usize * self.h as usize;
+        if px == 0 || self.rgba.len() < 3 {
+            return [18, 18, 18];
+        }
+        let step = (px / 4096).max(1);
+        let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+        let mut i = 0usize;
+        while i < px {
+            let o = i * 4;
+            if o + 2 < self.rgba.len() {
+                r += self.rgba[o] as u64;
+                g += self.rgba[o + 1] as u64;
+                b += self.rgba[o + 2] as u64;
+                n += 1;
+            }
+            i += step;
+        }
+        if n == 0 {
+            return [18, 18, 18];
+        }
+        [(r / n) as u8, (g / n) as u8, (b / n) as u8]
+    }
+
+    /// **秒出用的低清底图**（缩到 `max_w` 宽，PNG 字节）。
+    ///
+    /// 为什么需要它：WebView2 在**隐藏窗口**里不会提前合成，`<img>` 的 `onLoad` 只代表
+    /// "解码完了"，第一帧仍要等 `show()` 之后才提交；而 2560×1600 的 PNG 光是上传纹理
+    /// 就要 300–400ms，用户看到的就是窗口背景色（深色 = "截图开始黑一下"）。
+    /// 缩到 480 宽之后只有几十 KB，几十毫秒就能上屏，构图和颜色已经对上，
+    /// 高清图后到再盖上去 —— 人眼基本看不到中间那一步。
+    pub fn thumb_png(&self, max_w: u32) -> Result<Vec<u8>, String> {
+        let img = image::RgbaImage::from_raw(self.w, self.h, self.rgba.clone())
+            .ok_or_else(|| "截图缓冲区尺寸与像素数对不上".to_string())?;
+        let w = max_w.min(self.w).max(1);
+        let h = ((self.h as f64) * (w as f64) / (self.w as f64)).round().max(1.0) as u32;
+        let small = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+        png_of(&small)
+    }
 }
 
 /// 任意 RGBA 图 → PNG 字节

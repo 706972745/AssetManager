@@ -58,11 +58,22 @@
   margin-right: 2px;
   -webkit-app-region: no-drag;
 }
+/* 窗口按钮：与 FontManager `.titlebar-controls` 同值 —— gap 1px / 38×30 / 4 圆角。
+   它们和上面的动作图标是**两个组**：动作 30×30 gap 6，窗口 38×30 几乎贴住。 */
+.titlebar-controls {
+  display: flex;
+  gap: 1px;
+  -webkit-app-region: no-drag;
+}
+/* 竖分隔线（FontManager `.titlebar-sep` 逐值）：把「动作区」和「窗口按钮」分开。
+   1px 宽、16 高、靠中、左右各 4px —— 不写这几个值会和 FontManager 并排看出来。 */
 .titlebar-sep {
   width: 1px;
   height: 16px;
-  background: var(--hairline);
+  flex: none;
+  align-self: center;
   margin: 0 4px;
+  background: rgba(var(--ink-rgb), 0.08);
 }
 .tb-action {
   width: 30px;
@@ -1176,6 +1187,10 @@
   z-index: 95;
 }
 .menu-item {
+  /* 宽度必须写满：`button` 默认是 inline-block，不写 width 时整行会缩到文字宽
+     —— 行内 `flex:1` 的标签没有可伸长的空间，勾选图标就贴着文字而不是贴右沿
+     （FontManager `.sort-item { width: 100% }` 同一句） */
+  width: 100%;
   min-height: 30px;
   padding: 0 10px;
   display: flex;
@@ -1193,6 +1208,39 @@
 }
 .menu-item:disabled {
   color: var(--text-3);
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(var(--ink-rgb), 0.08);
+}
+
+/* ── 顶栏下拉（筛选 / 排序 / 颜色）：**逐值照 FontManager `.sort-menu` / `.sort-item`** ──
+   owner 2026-11-17：这几个下拉和 FontManager 并排一放就是两套 —— 我们这边是
+   「右键菜单尺寸」（208 宽 / 30 高行 / 11px 字），FontManager 是
+   「下拉尺寸」（150~176 宽 / 8+11 内距 / 13px 字 / 4px 圆角 / 勾选图标）。
+   右键菜单仍用上面那一套（FontManager 的 `.ctx-menu` 也是 208/30），不要互相污染。 */
+.menu.pop {
+  min-width: 176px;
+  max-width: 300px;
+  padding: 4px;
+  border-radius: 6px;
+}
+.menu.pop .menu-item {
+  min-height: 0;
+  padding: 8px 11px;
+  gap: 12px;
+  border-radius: 4px;
+  font-size: var(--fs-13);
+  color: var(--text-2);
+}
+.menu.pop .menu-item:hover {
+  background: var(--e2);
+  color: var(--text-1);
+}
+.menu.pop .menu-item.on {
+  color: var(--text-1);
+  font-weight: 500;
 }
 
 .lightbox {
@@ -1225,6 +1273,8 @@
   }
 }
 .lightbox-panel {
+  /* 边缘导航 / 鸟瞰图都绝对定位在这块面板里 */
+  position: relative;
   /* 100% 而不是写死 1100×760：窗口矮的时候固定高会顶出屏幕（owner 2026-11-16 截图） */
   width: min(1100px, 100%);
   height: min(760px, 100%);
@@ -1264,6 +1314,81 @@
 .lightbox-stage.zoomed {
   cursor: grab;
 }
+/* ---- 灯箱：边缘导航（T43） ----------------------------------------------
+   光标进到左右 64px 才浮出来（平时完全看不见，不挡图）。
+   为什么需要它：无边框看图 / 灯箱里鼠标比键盘顺手，而顶栏那两个箭头离图太远。 */
+.lb-edge {
+  position: absolute;
+  top: 44px;
+  bottom: 0;
+  width: 64px;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity var(--t-quick) ease;
+  z-index: 6;
+}
+.lb-edge.l {
+  left: 0;
+  background: linear-gradient(to right, rgba(0, 0, 0, 0.28), transparent);
+}
+.lb-edge.r {
+  right: 0;
+  background: linear-gradient(to left, rgba(0, 0, 0, 0.28), transparent);
+}
+.lb-edge:hover {
+  opacity: 1;
+}
+.lb-edge-btn {
+  width: 34px;
+  height: 44px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(20, 20, 22, 0.66);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.lb-edge-btn:hover:not(:disabled) {
+  background: rgba(32, 128, 240, 0.88);
+  border-color: rgba(32, 128, 240, 0.9);
+}
+.lb-edge-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+/* ---- 灯箱：鸟瞰图（T40） -------------------------------------------------
+   只在"图比舞台大"时出现：放大后、或者超长图。点/拖 = 直接定位。 */
+.lb-mini {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(10, 10, 12, 0.82);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  cursor: crosshair;
+  overflow: hidden;
+  z-index: 7;
+  touch-action: none;
+}
+.lb-mini-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  opacity: 0.92;
+}
+.lb-mini-view {
+  position: absolute;
+  border: 1.5px solid #2080f0;
+  background: rgba(32, 128, 240, 0.16);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
 .lightbox-stage.zoomed:active {
   cursor: grabbing;
 }
@@ -1903,27 +2028,31 @@
 .dr-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  border-top: 1px solid var(--hairline);
+  gap: 6px;
   padding-top: 6px;
 }
+/* 位置行 = FontManager「字体库地址列表」那一行（`.settings-folder` + `.settings-library-row`）：
+   不是无边框的 32 高行，而是 e1 实底 + 发丝线的小卡片，行距 6。
+   当前生效的那个用「蓝 8% 底 + 蓝 28% 描边」，不是一个灰底块。 */
 .dr-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 32px;
-  padding: 0 6px 0 8px;
+  padding: 6px 10px;
   border-radius: 5px;
+  background: var(--e1);
+  border: 1px solid rgba(var(--ink-rgb), 0.05);
   color: var(--text-2);
   cursor: default;
-  transition: background var(--t-micro), color var(--t-micro);
+  transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
 }
 .dr-row:hover {
-  background: var(--e1);
+  border-color: rgba(var(--ink-rgb), 0.12);
   color: var(--text-1);
 }
 .dr-row.sel {
-  background: var(--e2);
+  background: color-mix(in srgb, var(--accent) 8%, var(--e1));
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--text-1);
 }
 .dr-row-icon {
@@ -1937,29 +2066,31 @@
   flex: 1;
   font-size: var(--fs-11);
 }
-/* 「当前」徽章：蓝字 + 淡蓝描边（截图里就是这种，不是实心块） */
+/* 「当前」徽章：FontManager `.settings-library-current` 的值 —— 11px / 1+7 内距 /
+   胶囊 / 蓝字 + 蓝 35% 描边（比原来的 9px 小字更清楚，两边看起来才是同一个东西） */
 .dr-badge {
   flex: none;
-  font-size: var(--fs-9);
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: var(--r-pill);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: var(--fs-11);
+  line-height: 1.5;
   color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
+/* 行尾小按钮 = FontManager `.settings-folder button`：2px 内距的小图标，
+   默认中性灰；「打开目录」悬停变强调色，「移除」悬停变危险色（不是一个统一的灰底块）。 */
 .dr-act {
   flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
+  padding: 2px;
   border-radius: 4px;
   color: var(--text-3);
-  transition: background var(--t-micro), color var(--t-micro);
+  transition: color var(--t-quick);
 }
-.dr-act:hover {
-  background: var(--e2);
-  color: var(--text-1);
+.dr-act-open:hover {
+  color: var(--accent);
+}
+.dr-act-remove:hover {
+  color: var(--danger);
 }
 .dr-foot {
   display: flex;
@@ -2354,17 +2485,27 @@
   gap: 5px;
 }
 .tag-chip {
+  /* 逐值照 FontManager `.tag-chip`（owner 2026-11-17：两边标签必须一模一样）：
+     不是胶囊而是 4px 圆角的小方块，13 号字里排 11px / 500，
+     内距 4 7 4 10（左边宽一点，留给图标），e2 实底 + ink .08 发丝线 + 顶部高光。
+     以前这里是 21 高胶囊 + 10px 字，看起来像"筛选标签"，不像"这张图有哪些标签"。 */
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  height: 21px;
-  padding: 0 2px 0 7px;
-  border: 1px solid var(--ui-line, rgba(0, 0, 0, 0.16));
-  border-radius: var(--r-pill);
-  background: var(--e1);
-  font-size: var(--fs-10);
+  gap: 4px;
+  padding: 4px 7px 4px 10px;
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  border-radius: 4px;
+  background: var(--e2);
+  box-shadow: inset 0 1px 0 var(--glass-top-highlight);
+  font-size: var(--fs-11);
+  font-weight: 500;
   color: var(--text-1);
   white-space: nowrap;
+  /* 只过渡颜色：chip 的 transform 由 motion 逐帧写内联，这里再挂 transform 会让它慢半拍 */
+  transition: background var(--t-quick) ease;
+}
+.tag-chip:hover {
+  background: var(--e3);
 }
 .tag-chip-text {
   border: 0;
@@ -2378,29 +2519,33 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+/* 移除按钮：FontManager 是一个 1px 内距的小圆点按钮，悬停变危险色 */
 .tag-chip-x {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  padding: 0;
+  padding: 1px;
   border: 0;
-  border-radius: var(--r-pill);
+  border-radius: 50%;
   background: transparent;
   color: var(--text-3);
   cursor: default;
+  transition: color var(--t-quick) ease;
 }
 .tag-chip-x:hover {
-  background: var(--ui-hover, rgba(0, 0, 0, 0.08));
+  background: transparent;
   color: var(--danger);
 }
-/* 自动标签：虚线 + 小圆点。别做成和手动一样 —— 用户要能一眼看出「这条不是我打的」 */
+/* 自动标签：虚线 + 魔棒。别做成和手动一样 —— 用户要能一眼看出「这条不是我打的」 */
 .tag-chip.auto {
-  padding-right: 6px;
+  padding-left: 8px;
   border-style: dashed;
+  border-color: rgba(var(--ink-rgb), 0.22);
   background: transparent;
   color: var(--text-2);
+}
+.tag-chip.auto:hover {
+  background: var(--e1);
 }
 .tag-chip-dot {
   width: 4px;
@@ -2565,14 +2710,16 @@
   margin-right: 3px;
 }
 
-/* chip 用颜色：淡底 + 同色描边。手动标签才带颜色，自动标签保持无彩（它是推导的，不该有"性格"） */
-.tag-chip {
-  background: var(--tcs, var(--e1));
-  border-color: var(--tcline, var(--ui-line));
+/* chip 用颜色：淡底 + 同色描边 —— 逐值照 FontManager
+   `.tag-chip-iconed:not(.tag-c-none)`：底 = 标签色 9% 混 e2，描边 = 30% 混发丝线。
+   手动标签才带颜色，自动标签保持无彩（它是推导的，不该有"性格"）。 */
+.tag-chip:not(.tc-gray):not(.auto) {
+  background: color-mix(in srgb, var(--tc) 9%, var(--e2));
+  border-color: color-mix(in srgb, var(--tc) 30%, var(--ui-line));
 }
 .tag-chip.auto {
   background: transparent;
-  border-color: var(--ui-line);
+  border-color: rgba(var(--ink-rgb), 0.22);
 }
 
 /* ---------------------------------------------------------------- 侧栏分区
@@ -2614,6 +2761,26 @@
 .tag-dock.open {
   /* 与 FontManager .tag-dock.open 同值：300px / 42vh */
   height: min(300px, 42vh);
+}
+/* 两个停靠面板（分组 / 标签）同时展开时各让一步：
+   照 FontManager 的 `.half`（各约 220px）——否则下面那块会把上面那块挤成一条缝。 */
+.tag-dock.open.half {
+  height: min(220px, 32vh);
+}
+/* ── 分组面板（0.2.x）：与标签面板同一个壳，只有行首图标不同 ──
+   照 FontManager `.coll-row`：文件夹图标 + 名字 + 行尾数字，图标灰、悬停/选中提亮。 */
+.coll-row {
+  gap: 7px;
+}
+.coll-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+}
+.coll-row:hover .coll-icon,
+.coll-row.sel .coll-icon {
+  color: var(--text-2);
 }
 /* 头部**盒模型整段照 .nav-row**（FontManager 设计统一 §2.1）：
    32 高 / gap 10 / padding 0 11 / 直角 / 11px / 500 字重 / 图标 15。
@@ -3851,8 +4018,15 @@ body.peek-body #root {
    关窗走双击 / Esc / 右键菜单 —— 看得见的只剩图本身。 */
 
 /* ---------------- 截图覆盖层（F1 / Alt+F1） ----------------
-   窗口盖住整个虚拟桌面，底图是后端 BitBlt 抓下来的那张静态图。
-   框外压暗用一个超大 box-shadow 实现：比铺四块遮罩省事，也不会有 1px 的缝。 */
+   **按 Snipaste 2.11.3 复刻**。下面每个数值都是实机量出来的（2560×1600 @125%，
+   即 CSS = 物理 / 1.25）：
+   - 选区外压暗 55%（255→115、45→20）
+   - 边框 #2080f0，1px；8 颗把手 = 蓝点 + 2px 白圈
+   - 尺寸标签：白色 13px + 黑投影，贴在选区左上方外侧
+   - 工具栏：底色 #f2f2f2、1px 蓝边、圆角 3、高 34、按钮 30×32、图标 15
+   - 放大镜 184×136（8 倍）
+   别凭感觉改这些数：改之前先和 Snipaste 并排看一眼。 */
+
 html.snip-body,
 body.snip-body {
   background: transparent !important;
@@ -3877,148 +4051,296 @@ body.snip-body #root {
   object-fit: fill;
   pointer-events: none;
 }
-.snip-sel {
+/* 标注画布：整屏物理像素，只在选区内可见（clip 在 JS 里做） */
+.snip-ink {
   position: absolute;
-  border: 1px solid var(--accent, #4a8cff);
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
 }
-.snip-size {
+/* 选区外压暗：一个超大 box-shadow，比铺四块遮罩省事且没有缝 */
+.snip-dim {
   position: absolute;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 11px;
-  line-height: 16px;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.75);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   pointer-events: none;
-  white-space: nowrap;
+}
+.snip-sel {
+  position: absolute;
+  border: 1px solid #2080f0;
+  pointer-events: none;
+}
+/* 窗口自动识别的框：同色同宽，只是没有压暗 */
+.snip-detect {
+  position: absolute;
+  border: 1px solid #2080f0;
+  pointer-events: none;
 }
 .snip-dot {
   position: absolute;
-  width: 6px;
-  height: 6px;
-  margin: -3px 0 0 -3px;
-  background: #fff;
-  border: 1px solid var(--accent, #4a8cff);
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: #2080f0;
+  box-shadow: 0 0 0 2px #fff;
   pointer-events: none;
 }
-
-/* 标注画布：正好盖住选区。canvas 的像素尺寸由 JS 设成物理像素（高清），
-   CSS 尺寸才是选区大小 —— 两边都是内联样式，这里只管定位与层级。 */
-.snip-canvas {
+.snip-dot.detect {
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.92);
+}
+.snip-size {
   position: absolute;
+  font-size: 13px;
+  line-height: 16px;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.75);
   pointer-events: none;
-  cursor: crosshair;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
 }
 
-/* 工具栏（照 Snipaste 2.11.3：一条深色圆角条，激活项亮蓝底） */
+/* 工具栏：浅底 + 蓝边（Snipaste 就是拿蓝边把工具栏"接"在选区上） */
 .snip-bar {
   position: absolute;
   display: flex;
   align-items: center;
-  gap: 1px;
-  padding: 4px;
-  border-radius: 6px;
-  background: rgba(28, 28, 32, 0.94);
-  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(8px);
-  z-index: 5;
+  height: 34px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  background: #f2f2f2;
+  border: 1px solid #2080f0;
+  border-radius: 3px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
+  /* 比放大镜(25)高：放大镜贴到工具栏上时，工具栏不能被盖住（按钮还得看得见） */
+  z-index: 26;
 }
-.snip-tool {
-  width: 26px;
-  height: 26px;
+.snip-btn {
+  position: relative;
+  width: 31px;
+  height: 32px;
   display: grid;
   place-items: center;
-  border-radius: 4px;
-  color: rgba(255, 255, 255, 0.86);
-  transition: background var(--t-quick, 120ms) ease, color var(--t-quick, 120ms) ease;
+  border-radius: 3px;
+  color: #323232;
+  transition: background 90ms ease, color 90ms ease;
 }
-.snip-tool:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+.snip-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
 }
-.snip-tool.on {
-  background: var(--accent, #3b7ddd);
-  color: #fff;
+.snip-btn.on {
+  background: rgba(32, 128, 240, 0.16);
+  color: #1462c4;
 }
-.snip-tool:disabled {
-  color: rgba(255, 255, 255, 0.24);
+.snip-btn:disabled {
+  color: #bcbcbc;
   background: transparent;
 }
-.snip-tool.danger:hover {
-  background: rgba(214, 58, 48, 0.92);
+.snip-btn.danger:hover {
+  background: #e5484d;
   color: #fff;
 }
-.snip-bar-sep {
+/* 箭头那个红点：Snipaste 2.11 用来标"有新样式" */
+.snip-badge {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #f5222d;
+}
+.snip-sep {
   width: 1px;
   height: 18px;
   margin: 0 3px;
-  background: rgba(255, 255, 255, 0.16);
+  background: #d5d5d5;
 }
-/* 当前颜色：一块小方块，点开调色板 */
-.snip-swatch {
+/* 按钮气泡：默认藏着，悬停才出 */
+.snip-tip {
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 7px;
+  border-radius: 3px;
+  background: rgba(26, 26, 26, 0.94);
+  color: #fff;
+  font-size: 12px;
+  line-height: 17px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 90ms ease;
+  z-index: 30;
+}
+.snip-btn:hover .snip-tip {
+  opacity: 1;
+}
+
+/* 工具选项（再点一次工具弹出）：颜色 + 线宽 */
+.snip-opts {
+  position: absolute;
+  padding: 6px;
+  background: #f2f2f2;
+  border: 1px solid #2080f0;
+  border-radius: 3px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  z-index: 22;
+}
+.snip-opts-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.snip-opts-row + .snip-opts-row {
+  margin-top: 6px;
+}
+.snip-color {
   width: 18px;
   height: 18px;
-  margin: 0 3px;
-  border-radius: 3px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
+}
+.snip-color.on {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22), 0 0 0 2px #2080f0;
+}
+.snip-width {
+  width: 32px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 2px;
+}
+.snip-width span {
+  display: block;
+  width: 18px;
+  background: #333;
+  border-radius: 2px;
+}
+.snip-width.on {
+  background: rgba(32, 128, 240, 0.16);
+}
+
+/* 放大镜：一块 8 倍的像素图 + 下面一条深色信息条 */
+.snip-loupe {
+  position: absolute;
+  z-index: 25;
+  pointer-events: none;
+}
+.snip-loupe-cv {
+  display: block;
+  width: 184px;
+  height: 136px;
+  image-rendering: pixelated;
+  background: #000;
+  border: 1px solid #2b2b2b;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+.snip-loupe-info {
+  background: rgba(22, 22, 22, 0.88);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 5px 8px 7px;
+}
+.snip-coord {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 2px;
+}
+.snip-rgb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.snip-swatch-dot {
+  width: 12px;
+  height: 12px;
+  flex: none;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
 }
-.snip-palette {
+.snip-hintline {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* 左下角常驻快捷键面板（Snipaste 那块"键帽 + 说明"） */
+.snip-keys {
   position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 9px 16px 9px 12px;
+  background: rgba(18, 18, 18, 0.78);
+  color: #fff;
+  font-size: 12px;
+  z-index: 15;
+}
+.snip-keyrow {
   display: flex;
-  gap: 5px;
-  padding: 6px;
-  border-radius: 6px;
-  background: rgba(28, 28, 32, 0.96);
-  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
-  z-index: 6;
+  align-items: center;
+  gap: 12px;
+  height: 26px;
+  white-space: nowrap;
 }
-.snip-palette button {
-  width: 18px;
-  height: 18px;
-  border-radius: 3px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+.snip-keyrow .keys {
+  display: inline-flex;
+  gap: 3px;
+  min-width: 104px;
 }
-.snip-palette button.on {
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45), 0 0 0 2px var(--accent, #4a8cff);
+.snip-kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 2px;
+  font-size: 11px;
+  line-height: 15px;
+  text-align: center;
+  font-family: inherit;
+  font-weight: 400;
 }
-/* 文字工具：就地输入，字号跟导出尺寸对齐（18 × scale） */
+
+/* 文字工具：就地输入 */
 .snip-text {
   position: absolute;
   min-width: 60px;
-  padding: 2px 4px;
+  /* 输入框里字的位置和最终画上去的位置要对齐（不然一提交就跳 5px） */
+  padding: 0 1px;
   border: 1px dashed currentColor;
   border-radius: 2px;
   background: rgba(0, 0, 0, 0.28);
   font-size: 14px;
   font-weight: 600;
   outline: none;
-  z-index: 7;
+  z-index: 28;
 }
-.snip-busy {
+.snip-toast {
   position: absolute;
   left: 50%;
-  bottom: 28px;
+  bottom: 26px;
   transform: translateX(-50%);
-  padding: 4px 12px;
+  padding: 5px 14px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: #fff;
-  background: rgba(0, 0, 0, 0.72);
+  background: rgba(0, 0, 0, 0.78);
+  z-index: 40;
 }
-.snip-hint {
+.snip-err {
   position: absolute;
   left: 50%;
-  top: 18px;
-  transform: translateX(-50%);
-  padding: 4px 12px;
-  border-radius: 4px;
-  font-size: 11px;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 70vw;
+  padding: 10px 16px;
+  border-radius: 5px;
+  font-size: 13px;
+  line-height: 1.6;
   color: #fff;
-  background: rgba(0, 0, 0, 0.66);
-  backdrop-filter: blur(6px);
-  pointer-events: none;
+  background: rgba(196, 40, 40, 0.94);
+  z-index: 41;
 }
 .snip-miss {
   position: fixed;
@@ -4138,36 +4460,29 @@ body.snip-body #root {
 .snap-input::placeholder {
   color: var(--text-3);
 }
-/* 空态是**入口**不是说明文字（照 FontManager `.sidebar-hint`）：
-   一整行都能点，悬停时"点这里建第一份"变强调色。 */
+/* 空态是**入口**不是说明文字 —— 逐值照 FontManager `.sidebar-hint`：
+   整行宽的虚线框、11px 中性灰、7+11 内距、悬停 e1 底 + 文字提亮 + 描边加深。
+   以前这里是"两行灰字 + 一行小字"，和 FontManager 并排一看就不是一个东西
+   （owner 2026-11-17 截图指出）。 */
 .snap-empty {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 3px 11px 8px;
-  border: 0;
+  padding: 7px 11px;
+  margin: 2px 0;
+  border: 1px dashed rgba(var(--ink-rgb), 0.1);
   border-radius: 5px;
   background: none;
   text-align: left;
-  font-size: var(--fs-10);
-  line-height: 1.6;
+  font-size: var(--fs-11);
   color: var(--text-3);
   cursor: default;
-}
-.snap-empty b {
-  font-weight: 600;
-  color: var(--text-2);
+  transition: color var(--t-quick), background var(--t-quick), border-color var(--t-quick);
 }
 .snap-empty:hover {
-  background: var(--ui-hover);
-}
-.snap-empty:hover b {
-  color: var(--accent);
-}
-.snap-empty-sub {
-  display: block;
-  margin-top: 3px;
-  opacity: 0.82;
+  color: var(--text-1);
+  background: var(--e1);
+  border-color: rgba(var(--ink-rgb), 0.18);
 }
 .snap-prompt-lead {
   margin-bottom: 8px;
@@ -5697,23 +6012,49 @@ body.board-body #root {
    结构：段头 → 若干可点行（行首圆点 / 右侧数量 / 选中打勾）。
    段头不可点、不悬停，只用来分隔维度。 */
 .menu-heading {
-  padding: 7px 10px 3px;
-  font-size: var(--fs-9);
+  /* 逐值照 FontManager `.filter-heading`：10px / 600 / .08em / 大写 / 6+11 内距 */
+  padding: 6px 11px 2px;
+  font-size: var(--fs-10);
   font-weight: 600;
   letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-3);
   cursor: default;
   user-select: none;
+}
+.menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+/* 行首线性图标（二级面板）：自动标签 = 魔棒（品牌色），手工标签 / 文件夹 = 中性灰。
+   同 FontManager `.filter-sub-auto` / `.filter-sub-manual`。 */
+.menu-ico {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.menu-ico-auto {
+  color: var(--accent);
+  opacity: 0.9;
+}
+.menu-ico-manual {
+  color: var(--text-3);
+  opacity: 0.85;
 }
 .menu-meta {
   margin-left: auto;
   font-size: var(--fs-9);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+  flex: none;
 }
 .menu-check {
-  margin-left: 6px;
-  font-size: var(--fs-10);
+  flex: none;
+  margin-left: 2px;
   color: var(--accent);
   line-height: 1;
 }
@@ -5767,13 +6108,54 @@ body.board-body #root {
   justify-content: flex-start;
 }
 .menu-arrow {
-  margin-left: auto;
-  font-size: var(--fs-13);
-  line-height: 1;
+  flex: none;
+  margin-left: 2px;
   color: var(--text-3);
 }
+/* 二级面板：**逐值照 FontManager `.filter-submenu`** —— 156~260 宽、320 高、4 内距、
+   8 圆角、固定定位（父级 .menu 自己 overflow-y:auto，绝对定位会被裁掉）、
+   向左弹（translateX(-100% - 6px)），行高与字号比主菜单小一档（fs-11 / 6+9 内距）。 */
 .menu.submenu {
-  min-width: 200px;
-  max-width: 280px;
-  max-height: min(440px, calc(100vh - 24px));
+  min-width: 156px;
+  max-width: 260px;
+  max-height: 320px;
+  padding: 4px;
+  border-radius: 8px;
+  transform: translate(-100%, -6px) translateX(-6px);
+  transform-origin: top right;
+}
+.menu.submenu .menu-item {
+  min-height: 0;
+  padding: 6px 9px;
+  gap: 6px;
+  font-size: var(--fs-11);
+  color: var(--text-2);
+}
+.menu.submenu .menu-item.on {
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+/* 折叠段右侧的"一句话摘要"（拍摄信息没展开时显示机身 · 光圈 · 快门） */
+.detail-fold-hint {
+  margin-left: auto;
+  margin-right: 6px;
+  font-size: var(--fs-9);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 58%;
+}
+
+/* 标题栏里"当前目录"那一小截 */
+.titlebar-where {
+  margin-left: 8px;
+  color: var(--text-3);
+  font-weight: 400;
+}
+.titlebar-where::before {
+  content: "—";
+  margin-right: 8px;
+  opacity: 0.6;
 }

@@ -70,6 +70,8 @@ export interface Query {
   color?: string | null;
   /** 评分下限（1–5）：只列 n 星及以上；空 = 不筛 */
   minRating?: number | null;
+  /** 分组筛选（分组 id）：只看这一组里的素材；空 = 不筛 */
+  collection?: number | null;
 }
 
 
@@ -147,6 +149,14 @@ export interface SnapshotRow {
   count: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 分组（用户自己攒的「一撮素材」）。`count` 是后端按"素材现在还在不在"算出来的真实数。 */
+export interface CollRow {
+  id: number;
+  name: string;
+  count: number;
+  createdAt: number;
 }
 
 /** 加入快照的结果：新加 / 本来就有 / 失败清单 */
@@ -443,6 +453,18 @@ export interface Source {
     action: "copy" | "save" | "saveas" | "peek",
   ): Promise<string | null>;
   snipCancel(): Promise<void>;
+  /** 覆盖层底图上屏后调它，窗口这时才显示（先显示会黑闪一下） */
+  snipReady(): Promise<void>;
+  /** 整张截图的 data URL（同源，可 getImageData：放大镜 / 马赛克 / 导出都要用） */
+  snipFull(): Promise<string>;
+  /** 光标按像素微调（截图时 W/A/S/D 用） */
+  cursorStep(dx: number, dy: number): Promise<void>;
+  /** 光标底下的顶层窗口矩形（CSS 像素，相对覆盖层）；桌面/找不到 = null */
+  snipWindowAt(
+    x: number,
+    y: number,
+    scale: number,
+  ): Promise<{ x: number; y: number; w: number; h: number } | null>;
   /** 注册系统级快捷键，返回注册失败的组合 */
   hotkeysSet(list: [string, string][]): Promise<string[]>;
 
@@ -462,6 +484,19 @@ export interface Source {
    * 返回刚入库的那张（前端直接贴到视口中心）。
    */
   boardPaste(tag: string): Promise<BoardPastedItem>;
+
+  /* ---------------- 分组（0.2.x） ----------------
+     分组 = 用户点名要看的那一批素材（跨库）。存的是素材 id，**不搬文件**；
+     删分组只删"这一撮"的名单，素材一个都不动。 */
+  collList(): Promise<CollRow[]>;
+  collCreate(name: string): Promise<number>;
+  collRename(id: number, name: string): Promise<void>;
+  collDelete(id: number): Promise<void>;
+  /** 把一批素材加进分组，返回真正新增的条数 */
+  collAdd(id: number, ids: number[]): Promise<number>;
+  collRemove(id: number, ids: number[]): Promise<number>;
+  /** 这张素材在哪些分组里 */
+  collOf(gid: number): Promise<number[]>;
 
   /* ---------------- 快照（0.12.0） ----------------
      快照记的是**图片的内容指纹**（不是 id、不是路径），所以图片改名、换目录、
@@ -517,6 +552,10 @@ export interface Source {
   tagSetRule(tag: string, rule: AutoRule | null): Promise<void>;
   /** 每个库的独立 DB 文件：`[库根, 文件路径, 字节]` */
   libFiles(): Promise<[string, string, number][]>;
+  /** 缩放另存（T38）。maxEdge=0 表示只转格式。取消返回 null */
+  resizeSave(path: string, maxEdge: number, format?: string): Promise<ResizeOut | null>;
+  /** 读 EXIF 拍摄信息（T41）；读不到返回 null */
+  exif(path: string): Promise<ExifInfo | null>;
   /** 写配置。**下次启动生效**；`copyIndex` 为真时顺带把索引复制过去。
    *  `force` 为真 = 用户已经看过「这看起来是素材目录」的提示，仍要用它当数据位置 */
   setDataRoot(input: {
@@ -653,4 +692,25 @@ export interface TrashEntry {
   name: string;
   size: number;
   deletedAt: number;
+}
+
+/** 缩放另存的结果 */
+export interface ResizeOut {
+  path: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** 拍摄信息（EXIF）。字段可能缺，缺了界面就不显示那一行 */
+export interface ExifInfo {
+  make: string;
+  model: string;
+  lens: string;
+  fNumber: number | null;
+  exposure: string | null;
+  iso: number | null;
+  focal: number | null;
+  taken: string | null;
+  software: string;
 }

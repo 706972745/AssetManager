@@ -79,6 +79,8 @@ interface Props {
   refreshKey: number;
   /** 快照面板（0.12.0）：常驻在标签面板上方一行行列出快照 */
   snapshotDock?: ReactNode;
+  /** 分组面板（0.2.x）：位置照 FontManager —— 底栏上方、**标签面板之上** */
+  collDock?: ReactNode;
   /** 标签抽屉（默认收起、悬浮左缘展开）。侧栏只负责给它一块位置，内容与状态都在 App 里 */
   tagDock?: ReactNode;
 }
@@ -95,6 +97,7 @@ export function Tree({
   onShortcuts,
   refreshKey,
   snapshotDock,
+  collDock,
   tagDock,
 }: Props) {
   const [roots, setRoots] = useState<DirNode[]>([]);
@@ -577,6 +580,7 @@ export function Tree({
         {snapshotDock}
       </div>
 
+      {collDock}
       {tagDock}
 
       {/* 底栏固定四行（照 FontManager：打开库 / 回收站 / 关于 / 快捷键） */}

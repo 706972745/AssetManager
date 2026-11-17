@@ -422,6 +422,14 @@ export const mockSource: Source = {
     return null;
   },
   async snipCancel() {},
+  async snipReady() {},
+  async snipFull() {
+    throw new Error("浏览器预览模式没有截图");
+  },
+  async snipWindowAt() {
+    return null;
+  },
+  async cursorStep() {},
   async hotkeysSet() {
     return [];
   },
@@ -437,6 +445,23 @@ export const mockSource: Source = {
   async boardClose() {},
   async boardPaste() {
     throw new Error("浏览器预览模式没有灵感板");
+  },
+  async collList() {
+    return [];
+  },
+  async collCreate() {
+    return 0;
+  },
+  async collRename() {},
+  async collDelete() {},
+  async collAdd() {
+    return 0;
+  },
+  async collRemove() {
+    return 0;
+  },
+  async collOf() {
+    return [];
   },
   async snapshotList() {
     return [];
@@ -526,5 +551,11 @@ export const mockSource: Source = {
   },
   async libFiles() {
     return [] as [string, string, number][];
+  },
+  async resizeSave() {
+    throw new Error("浏览器预览模式不支持调整尺寸");
+  },
+  async exif() {
+    return null;
   },
 };

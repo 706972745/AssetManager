@@ -238,7 +238,7 @@ export function DataFolderCard({
                 <span className="dr-path mono">{d}</span>
                 {isEffective && <span className="dr-badge">当前</span>}
                 <button
-                  className="dr-act"
+                  className="dr-act dr-act-open"
                   title="在资源管理器中打开"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -248,7 +248,7 @@ export function DataFolderCard({
                   <Icon name="reveal" size={12} stroke={1.5} />
                 </button>
                 <button
-                  className="dr-act"
+                  className="dr-act dr-act-remove"
                   title="从清单移除（不删硬盘上的任何东西）"
                   onClick={(e) => {
                     e.stopPropagation();

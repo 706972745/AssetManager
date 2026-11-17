@@ -10,6 +10,7 @@ import type {
   ItemStat,
   TagCount,
   TagGroup,
+  CollRow,
   SnapshotRow,
   SnapshotAdd,
   SnapshotResolve,
@@ -27,6 +28,8 @@ import type {
   RenameResult,
   AutoRule,
   TrashEntry,
+  ResizeOut,
+  ExifInfo,
 } from "../types";
 import { mockSource } from "./mock";
 
@@ -144,6 +147,15 @@ export const tauriSource: Source = {
     invoke!<[string, number, number]>("am_snip_crop", { x, y, w, h, scale }),
   snipFinish: (png, action) => invoke!<string | null>("am_snip_finish", { png, action }),
   snipCancel: () => invoke!<void>("am_snip_cancel"),
+  snipReady: () => invoke!<void>("am_snip_ready"),
+  snipFull: () => invoke!<string>("am_snip_full"),
+  cursorStep: (dx, dy) => invoke!<void>("am_cursor_step", { dx, dy }),
+  snipWindowAt: (x, y, scale) =>
+    invoke!<{ x: number; y: number; w: number; h: number } | null>("am_snip_window_at", {
+      x,
+      y,
+      scale,
+    }),
   hotkeysSet: (list) => invoke!<string[]>("am_hotkeys_set", { list }),
   peekZoom: (step) => invoke!<void>("am_peek_zoom", { step }),
   peekRatio: (w, h) => invoke!<void>("am_peek_ratio", { w, h }),
@@ -151,6 +163,15 @@ export const tauriSource: Source = {
   boardOpen: (tag, title) => invoke!<number>("am_board_open", { tag, title: title ?? null }),
   boardClose: () => invoke!<void>("am_board_close"),
   boardPaste: (tag) => invoke!<BoardPastedItem>("am_board_paste", { tag }),
+
+  /* ---------------- 分组（0.2.x） ---------------- */
+  collList: () => invoke!<CollRow[]>("am_coll_list"),
+  collCreate: (name) => invoke!<number>("am_coll_create", { name }),
+  collRename: (id, name) => invoke!<void>("am_coll_rename", { id, name }),
+  collDelete: (id) => invoke!<void>("am_coll_delete", { id }),
+  collAdd: (id, ids) => invoke!<number>("am_coll_add", { id, ids }),
+  collRemove: (id, ids) => invoke!<number>("am_coll_remove", { id, ids }),
+  collOf: (gid) => invoke!<number[]>("am_coll_of", { gid }),
 
   /* ---------------- 快照（0.12.0） ---------------- */
   snapshotList: () => invoke!<SnapshotRow[]>("am_snapshot_list"),
@@ -185,6 +206,9 @@ export const tauriSource: Source = {
   tagGetRule: (tag) => invoke!<AutoRule | null>("am_tag_get_rule", { tag }),
   tagSetRule: (tag, rule) => invoke!<void>("am_tag_set_rule", { tag, rule }),
   libFiles: () => invoke!<[string, string, number][]>("am_lib_files"),
+  resizeSave: (path, maxEdge, format) =>
+    invoke!<ResizeOut | null>("am_resize_save", { path, maxEdge, format }),
+  exif: (path) => invoke!<ExifInfo | null>("am_exif", { path }),
 };
 
 export const source: Source = invoke ? tauriSource : mockSource;
