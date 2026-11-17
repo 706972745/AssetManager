@@ -2337,6 +2337,7 @@ async fn am_board_open(
     let shown = items.len();
     let title = title.unwrap_or_else(|| format!("灵感板 · {tag}"));
     let boot = serde_json::json!({
+        "board": format!("tag:{tag}"),
         "tag": tag,
         "title": title,
         "items": items,
@@ -2350,6 +2351,81 @@ async fn am_board_open(
 #[tauri::command]
 async fn am_board_close(win: Window) -> Result<(), String> {
     win.close().map_err(|e| e.to_string())
+}
+
+/// 灵感板摆位：读上次摆的位置/尺寸（`[[gid,x,y,w,h], …]`）。读不到就空 —— 板按瀑布流重排
+#[tauri::command]
+fn am_board_layout(
+    state: State<'_, AppState>,
+    board: String,
+) -> Result<Vec<(i64, f64, f64, f64, f64)>, String> {
+    lock(&state).board_layout(&board)
+}
+
+/// 灵感板摆位：记住这几张的位置/尺寸（松手时逐张写，不整板重写）
+#[tauri::command]
+fn am_board_place(
+    state: State<'_, AppState>,
+    board: String,
+    rows: Vec<(i64, f64, f64, f64, f64)>,
+) -> Result<usize, String> {
+    lock(&state).board_place(&board, &rows)
+}
+
+/// 往灵感板上**拖文件进来**（P2.8）：只收已经入库的那几张。
+///
+/// 为什么不顺便把文件复制/导入进来：板子是"看图的地方"，不是第二个入库入口。
+/// 拖进来的文件不在素材库里时**如实告诉用户**（而不是静默丢掉），
+/// 让他把那个目录加进素材库再拖 —— 这样索引、缩略图、标签全都一致。
+///
+/// 返回 `(能上板的条目, 不能上板的原因)`
+#[tauri::command]
+fn am_board_add_paths(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<(Vec<BoardItem>, Vec<String>), String> {
+    let app = lock(&state);
+    let mut items: Vec<BoardItem> = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
+    for p in paths {
+        let path = Path::new(&p);
+        if !path.is_file() {
+            bad.push(format!("{}（不是文件）", p));
+            continue;
+        }
+        let Some(lib_id) = app.lib_for_path(&p) else {
+            bad.push(format!("{}（不在任何素材库里）", p));
+            continue;
+        };
+        let Ok(conn) = app.conn_for_path(&p) else {
+            bad.push(format!("{}（打不开它所在的库）", p));
+            continue;
+        };
+        let local = match db::asset_id_by_path(conn, &p) {
+            Ok(Some(id)) => id,
+            _ => {
+                bad.push(format!(
+                    "{}（还没入库：把它所在目录加进素材库后就会出现在这里）",
+                    p
+                ));
+                continue;
+            }
+        };
+        let Some(a) = db::asset_by_id(conn, local)? else {
+            bad.push(format!("{p}（索引里没有这一行）"));
+            continue;
+        };
+        let g = am_core::ids::gid(lib_id, local);
+        items.push(BoardItem {
+            id: g,
+            src: format!("http://thumb.localhost/{}?px=1024&r={}", g, a.mtime),
+            w: a.width.unwrap_or(0).max(0) as u32,
+            h: a.height.unwrap_or(0).max(0) as u32,
+            name: a.name.clone(),
+            path: a.path.clone(),
+        });
+    }
+    Ok((items, bad))
 }
 
 /// 同一秒里连粘两张会撞名（时间戳精确到秒）：`粘贴 2026-11-17 12-42-11.png`
@@ -2539,6 +2615,17 @@ fn am_snapshot_add_tag(
     lock(&state).snapshot_add_tag(snapshot, &tag)
 }
 
+/// 合并 / 差集（P2.9）：几份快照 → 一份新快照。返回 `[新 id, 条数, 新写入行数]`
+#[tauri::command]
+fn am_snapshot_combine(
+    ids: Vec<i64>,
+    name: String,
+    mode: String,
+    state: State<'_, AppState>,
+) -> Result<(i64, usize, usize), String> {
+    lock(&state).snapshot_combine(&ids, &name, &mode)
+}
+
 /// 对账：把快照里的每一条按内容哈希在当前库里找回来（missing 不为 0 只是"这次没找到"）
 #[tauri::command]
 fn am_snapshot_resolve(
@@ -2690,6 +2777,8 @@ async fn am_snapshot_open(
     let shown = items.len();
     let title = format!("灵感板 · 快照 {}", row.name);
     let boot = serde_json::json!({
+        /* 摆位的键：与 spawn_board 的 key 同源，改一处必须改两处 */
+        "board": format!("snap:{snapshot}"),
         "snapshot": { "id": snapshot, "name": row.name },
         "title": title,
         "items": items,
@@ -3866,7 +3955,8 @@ async fn am_snip_finish(
             save_peeks();
             // 先关覆盖层再开贴图：两个都是置顶窗，顺序反了贴图会被压在截图底下
             close_snip();
-            let _ = clipimg::set_png(&bytes);
+            /* 这里**也不碰剪贴板**：贴图是"把它放到屏幕上"，不是"把它复制下来"。
+               想复制有明确的「复制」按钮 / Enter / C。 */
             spawn_peek(&app, item, rec, false).await?;
             Ok(None)
         }
@@ -3910,8 +4000,10 @@ async fn am_snip_finish(
             })?;
             let saved = target.to_string_lossy().to_string();
             close_snip();
-            // 顺手进剪贴板（Snipaste 的行为：截完就能直接粘）
-            let _ = clipimg::set_png(&bytes);
+            /* 保存**不动**剪贴板（owner 2026-11-18 报的 bug：「截图完成后老是会直接自动复制」）。
+               0.10.0 曾经照 Snipaste 顺手塞一份 PNG —— 后果是用户保存一张截图，
+               剪贴板里原来的东西就被静默换掉了，等他要粘别的内容才发现。
+               「复制」是一个有明确后果的动作，只能由用户按 C / Enter / 点复制按钮显式触发。 */
             remember_shot_dir(&app);
             let _ = app.emit("shot://saved", saved.clone());
             Ok(Some(saved))
@@ -4461,6 +4553,9 @@ fn main() {
             am_peek_ready,
             am_board_open,
             am_board_close,
+            am_board_layout,
+            am_board_place,
+            am_board_add_paths,
             am_board_paste,
             am_coll_list,
             am_coll_create,
@@ -4475,6 +4570,7 @@ fn main() {
             am_snapshot_delete,
             am_snapshot_add,
             am_snapshot_add_tag,
+            am_snapshot_combine,
             am_snapshot_resolve,
             am_snapshot_remove,
             am_snapshot_export,

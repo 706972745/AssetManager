@@ -64,6 +64,76 @@ const CHUNK = 200;
 
 let toastSeq = 1;
 
+/** 「把图片加入快照」弹层的四种来源（见 `snapPromptProps`） */
+type SnapPromptState =
+  | { mode: "tag"; tag: string; count?: number }
+  | { mode: "ids"; ids: number[] }
+  | { mode: "merge"; srcId: number }
+  | { mode: "diff"; srcId: number };
+
+/**
+ * 四种入口 → 同一张卡片的文案。
+ *
+ * 合并 / 差集**不给新建**（名字由两份快照的名字拼出来）：否则用户会以为还得自己起名，
+ * 而自己起名这件事在这两个动作里没有语义。
+ */
+function snapPromptProps(p: SnapPromptState, snaps: SnapshotRow[]) {
+  const nameOf = (id: number) => snaps.find((s) => s.id === id)?.name ?? "这份快照";
+  if (p.mode === "ids") {
+    return {
+      title: "把选中的图片加入快照",
+      lead: (
+        <>
+          选中的 <b>{p.ids.length}</b> 张会记进快照：不移动、不复制任何文件，
+          只是记下「这些图是哪几张」。
+        </>
+      ),
+      picksHint: "已有的快照（点一下直接加进去）",
+      excludeIds: undefined as number[] | undefined,
+      canCreate: true,
+    };
+  }
+  if (p.mode === "merge") {
+    return {
+      title: "与另一份快照合并",
+      lead: (
+        <>
+          把「{nameOf(p.srcId)}」和<b>点的那一份</b>合成一份<b>新快照</b>（同一张图只算一次）。
+          两份原件都不动。
+        </>
+      ),
+      picksHint: "选另一份（会新建一份并集）",
+      excludeIds: [p.srcId],
+      canCreate: false,
+    };
+  }
+  if (p.mode === "diff") {
+    return {
+      title: "与另一份快照做差集",
+      lead: (
+        <>
+          新建一份 =「{nameOf(p.srcId)}」里<b>去掉</b>另一份也有的图。两份原件都不动。
+        </>
+      ),
+      picksHint: "选要减掉的那一份",
+      excludeIds: [p.srcId],
+      canCreate: false,
+    };
+  }
+  return {
+    title: "把图片加入快照",
+    lead: (
+      <>
+        标签「{p.tag}」下{typeof p.count === "number" ? ` ${p.count} 张图` : "的图"}
+        会记进快照：不移动、不复制任何文件，只是记下「这些图是哪几张」。
+      </>
+    ),
+    picksHint: "已有的快照（点一下直接加进去）",
+    excludeIds: undefined as number[] | undefined,
+    canCreate: true,
+  };
+}
+
 export default function App() {
   /* 偏好先读出来：默认档位/视图在首屏就要用上，不能等设置面板打开过一次 */
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
@@ -123,12 +193,22 @@ export default function App() {
   const [collFilter, setCollFilter] = useState<number | null>(null);
   /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
   const [snaps, setSnaps] = useState<SnapshotRow[]>([]);
+  /** 正按哪份快照筛（null = 不筛）。与标签/分组同一口径：点了就跨目录看 */
+  const [snapFilter, setSnapFilter] = useState<number | null>(null);
   /* 新建 / 改名都是**侧栏就地输入**（照 FontManager，不弹窗）：状态放这里，
      因为「Ctrl+K → 新建快照」和快照右键「改名」都要能把它打开。 */
   const [snapCreating, setSnapCreating] = useState(false);
   const [snapRenaming, setSnapRenaming] = useState<{ id: number; name: string } | null>(null);
-  /* 只剩「把标签下的图片加入快照」这一种弹层（要选目标快照，弹层比就地输入合适） */
-  const [snapPrompt, setSnapPrompt] = useState<{ tag: string; count?: number } | null>(null);
+  /**
+   * 「把图片加入快照」那一层弹层的状态（要选目标快照，弹层比就地输入合适）。
+   *
+   * 四种来源共用同一张卡片（0.1.18 起）：
+   * - `tag`   标签右键 → 把这个标签下的图加进去
+   * - `ids`   选中素材 → 加入快照（批量条 / 右键菜单）
+   * - `merge` 快照右键 → 并入另一份快照（并集）
+   * - `diff`  快照右键 → 与另一份做差集（新建）
+   */
+  const [snapPrompt, setSnapPrompt] = useState<SnapPromptState | null>(null);
   /** 正在编辑的标签/分组（null = 没开编辑卡） */
   const [tagEdit, setTagEdit] = useState<{ kind: "tag" | "group"; name: string } | null>(null);
   /** 正在编辑的标签的自动规则（T34）：null = 没有规则 */
@@ -222,14 +302,14 @@ export default function App() {
          而那个标签的 400 张图在**另一个库**里 → 永远空列表。
          截图当时的状态就是：筛选条写着标签、侧栏第一个库高亮、网格空白。 */
       if (!alive || dirRef.current || !rs[0]) return;
-      if (tagFilter !== null || collFilter !== null) return;
+      if (tagFilter !== null || collFilter !== null || snapFilter !== null) return;
       setDir(rs[0]);
     });
     return () => {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey, tagFilter, collFilter]);
+  }, [refreshKey, tagFilter, collFilter, snapFilter]);
 
   /** 设置面板里的任何改动都走这里：落盘 + 立刻把默认档位与视图套到当前界面 */
   const applyPrefs = useCallback((p: Prefs) => {
@@ -293,8 +373,9 @@ export default function App() {
       color: colorFilter,
       minRating: ratingFilter,
       collection: collFilter,
+      snapshot: snapFilter,
     }),
-    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter, ratingFilter, collFilter]
+    [dir?.id, kindKey, debounced, sort, tagFilter, colorFilter, ratingFilter, collFilter, snapFilter]
   );
 
   const loadPage = useCallback(
@@ -307,6 +388,7 @@ export default function App() {
       const scoped =
         tagFilter !== null ||
         collFilter !== null ||
+        snapFilter !== null ||
         colorFilter !== null ||
         ratingFilter !== null ||
         !!debounced;
@@ -352,7 +434,7 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buildQuery, cursor, dir, sort, toast, tagFilter, collFilter, colorFilter, ratingFilter, debounced]
+    [buildQuery, cursor, dir, sort, toast, tagFilter, collFilter, colorFilter, ratingFilter, snapFilter, debounced]
   );
 
   // 查询条件变化 → 重新拉第一页
@@ -361,7 +443,7 @@ export default function App() {
     setDone(false);
     void loadPage(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter, ratingFilter, collFilter]);
+  }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter, ratingFilter, collFilter, snapFilter]);
 
   /* 颜色计数（顶栏色板菜单用）：只在"库里可能变了"的时候拉，不跟着滚动刷新 */
   useEffect(() => {
@@ -674,6 +756,7 @@ export default function App() {
             icon: "copy",
             action: () =>
               setSnapPrompt({
+                mode: "tag",
                 tag,
                 count:
                   tags.find((t) => t.name === tag)?.count ??
@@ -686,7 +769,10 @@ export default function App() {
             icon: "funnel",
             action: () => {
               setTagFilter(on ? null : tag);
-              if (!on) setDir(null);
+              if (!on) {
+                setDir(null);
+                setSnapFilter(null);
+              }
             },
           },
           { kind: "separator" },
@@ -807,6 +893,7 @@ export default function App() {
       if (v !== "go") return;
       try {
         await source.snapshotDelete(row.id);
+        if (snapFilter === row.id) setSnapFilter(null);
         setRefreshKey((k) => k + 1);
         toast(`已删除快照「${row.name}」`);
       } catch (e) {
@@ -814,7 +901,7 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toast]
+    [toast, snapFilter]
   );
 
   const addTagToSnapshot = useCallback(
@@ -832,6 +919,52 @@ export default function App() {
       }
     },
     [toast]
+  );
+
+  /* ---------------- 快照的「加入 / 合并 / 差集」（0.1.18，P2.9） ----------------
+     三个动作都只改**清单**：一件素材、一个文件都不搬。 */
+
+  /** 把一批选中的素材加进某份快照（弹层里点已有快照，或写新名字新建） */
+  const addIdsToSnapshot = useCallback(
+    async (id: number, ids: number[]) => {
+      try {
+        const r = await source.snapshotAdd(id, ids);
+        setSnapPrompt(null);
+        setRefreshKey((k) => k + 1);
+        const notes: string[] = [];
+        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
+        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
+        toast(`已加入 ${r.added} 张`, r.failed.length > 0, notes.join(" · ") || undefined);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  /** 合并（并集）/ 差集（第一份减第二份）：结果是一份**新快照**，两份原件都不动 */
+  const combineSnapshots = useCallback(
+    async (srcId: number, otherId: number, mode: "union" | "diff") => {
+      const a = snaps.find((s) => s.id === srcId);
+      const b = snaps.find((s) => s.id === otherId);
+      if (!a || !b) return;
+      setSnapPrompt(null);
+      const name = mode === "diff" ? `${a.name} − ${b.name}` : `${a.name} ∪ ${b.name}`;
+      try {
+        const [, total, added] = await source.snapshotCombine([srcId, otherId], name, mode);
+        setRefreshKey((k) => k + 1);
+        toast(
+          mode === "diff"
+            ? `已新建「${name}」：${total} 张`
+            : `已新建「${name}」：${total} 张（其中 ${added} 条新记）`,
+          false,
+          "原快照都没动 —— 只是照着算了一份新的"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [snaps, toast]
   );
 
   /* ---------------- 快照的新建 / 改名：都是侧栏里的一行输入（照 FontManager） ----------------
@@ -952,6 +1085,7 @@ export default function App() {
               setCollFilter(collFilter === row.id ? null : row.id);
               setDir(null);
               setTagFilter(null);
+              setSnapFilter(null);
               setPage("assets");
             },
           },
@@ -1016,36 +1150,84 @@ export default function App() {
     [colls, addToColl]
   );
 
-  /** 标签 → 快照那层弹窗里"写个新名字直接建好并加入" */  const createAndTagSnapshot = useCallback(
+  /** 快照那层弹窗里"写个新名字直接建好并加入"（四种入口共用） */
+  const createAndTagSnapshot = useCallback(
     async (name: string) => {
       const p = snapPrompt;
       if (!p) return;
       try {
+        if (p.mode === "merge" || p.mode === "diff") {
+          /* 合并/差集不需要新名字 —— 「新建并加入」在这里没有意义，直接忽略 */
+          setSnapPrompt(null);
+          return;
+        }
         const id = await source.snapshotCreate(name);
         setSnapPrompt(null);
         setRefreshKey((k) => k + 1);
-        await addTagToSnapshot(id, p.tag);
+        if (p.mode === "tag") await addTagToSnapshot(id, p.tag);
+        else await addIdsToSnapshot(id, p.ids);
       } catch (e) {
         toast(String(e), true);
       }
     },
-    [snapPrompt, toast, addTagToSnapshot]
+    [snapPrompt, toast, addTagToSnapshot, addIdsToSnapshot]
   );
 
   const snapshotMenu = useCallback(
     (id: number, x: number, y: number) => {
       const row = snaps.find((s) => s.id === id);
       if (!row) return;
+      const on = snapFilter === id;
+      const others = snaps.filter((s) => s.id !== id);
+      const selCount = selectedIds.size;
       setCtx({
         x,
         y,
         items: [
+          {
+            label: on ? "取消「只看这份快照」" : `只看「${row.name}」（在主列表里筛）`,
+            icon: "funnel",
+            action: () => {
+              setSnapFilter(on ? null : id);
+              if (!on) {
+                /* 与标签/分组一致：跨目录看这一批，目录选择要清掉，
+                   否则会变成"这个目录 AND 这份快照"，而快照里的图可能在别的目录 */
+                setDir(null);
+                setTagFilter(null);
+                setCollFilter(null);
+                setPage("assets");
+              }
+            },
+          },
+          {
+            label: `把选中的 ${selCount} 张加进来`,
+            icon: "plus",
+            disabled: selCount === 0,
+            action: () => void addIdsToSnapshot(id, [...selectedIds]),
+          },
+          { kind: "separator" },
           { label: "打开灵感板（无限画布）", icon: "expand", action: () => openSnapshot(row) },
           {
             label: "重新对账（按内容找回来）",
             icon: "search",
             action: () => void resolveSnapshot(row),
           },
+          { kind: "separator" },
+          { kind: "heading", label: "和另一份快照…" },
+          ...(others.length
+            ? [
+                {
+                  label: "合并（并集，新建一份）…",
+                  icon: "copy",
+                  action: () => setSnapPrompt({ mode: "merge", srcId: id }),
+                },
+                {
+                  label: "做差集（这份减另一份，新建）…",
+                  icon: "funnel",
+                  action: () => setSnapPrompt({ mode: "diff", srcId: id }),
+                },
+              ]
+            : [{ kind: "heading" as const, label: "只有一份快照，凑不齐" }]),
           { kind: "separator" },
           {
             label: "导出快照（.json，只含编号）",
@@ -1072,7 +1254,17 @@ export default function App() {
         ],
       });
     },
-    [snaps, openSnapshot, resolveSnapshot, exportSnapshot, exportSnapshotZip, deleteSnapshot]
+    [
+      snaps,
+      openSnapshot,
+      resolveSnapshot,
+      exportSnapshot,
+      exportSnapshotZip,
+      deleteSnapshot,
+      snapFilter,
+      selectedIds,
+      addIdsToSnapshot,
+    ]
   );
 
 
@@ -1781,6 +1973,15 @@ export default function App() {
             action: () => {
               const ids2 = inSel ? [...selectedIds] : [a.id];
               window.setTimeout(() => collPickMenu(ids2, x, y), 0);
+            },
+          },
+          {
+            /* 快照（0.1.18）：只记清单、不搬文件，所以放在「加入分组」旁边 */
+            label: n > 1 ? `加入快照…（${n} 项）` : "加入快照…",
+            icon: "camera",
+            action: () => {
+              const ids2 = inSel ? [...selectedIds] : [a.id];
+              window.setTimeout(() => setSnapPrompt({ mode: "ids", ids: ids2 }), 0);
             },
           },
           { label: "在资源管理器中显示", icon: "reveal", action: () => void onReveal(a) },
@@ -2555,6 +2756,19 @@ export default function App() {
             </div>
           )}
 
+          {snapFilter !== null && (
+            <div className="filter-strip">
+              <Icon name="camera" size={12} stroke={1.5} />
+              <span className="filter-strip-label">
+                快照：{snaps.find((s) => s.id === snapFilter)?.name ?? "快照"}
+              </span>
+              <span className="filter-strip-kind">按图片内容匹配</span>
+              <button className="btn btn-tiny" onClick={() => setSnapFilter(null)}>
+                清除筛选
+              </button>
+            </div>
+          )}
+
           <div className={`content ${prefs.showTileName ? "" : "no-tile-name"}`}>
             {/* 回收站 / 关于 是整页替换：铺在内容区上层，切回来时列表状态还在（不重挂载） */}
             {page !== "assets" && (
@@ -2581,7 +2795,7 @@ export default function App() {
               view={view}
               sizeIndex={sizeIndex}
               selectedIds={selectedIds}
-              resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}`}
+              resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}|${collFilter ?? ""}|${snapFilter ?? ""}`}
               onPick={pickOne}
               onPickMany={pickMany}
               onOpen={(a) => openLightbox(a)}
@@ -2614,6 +2828,14 @@ export default function App() {
                   title="把选中的素材加进某个分组（不搬文件）"
                 >
                   加入分组
+                </button>
+                <button
+                  className="btn btn-tiny"
+                  disabled={busy}
+                  onClick={() => setSnapPrompt({ mode: "ids", ids: [...selectedIds] })}
+                  title="把选中的素材记进某份快照（不搬文件）"
+                >
+                  加入快照
                 </button>
                 <button
                   className="btn btn-tiny"
@@ -2775,9 +2997,13 @@ export default function App() {
       {snapPrompt && (
         <SnapshotPrompt
           snapshots={snaps}
-          tag={snapPrompt.tag}
-          count={snapPrompt.count}
-          onPick={(id) => void addTagToSnapshot(id, snapPrompt.tag)}
+          {...snapPromptProps(snapPrompt, snaps)}
+          onPick={(id) => {
+            const p = snapPrompt;
+            if (p.mode === "tag") void addTagToSnapshot(id, p.tag);
+            else if (p.mode === "ids") void addIdsToSnapshot(id, p.ids);
+            else void combineSnapshots(p.srcId, id, p.mode === "diff" ? "diff" : "union");
+          }}
           onName={(name) => void createAndTagSnapshot(name)}
           onClose={() => setSnapPrompt(null)}
         />

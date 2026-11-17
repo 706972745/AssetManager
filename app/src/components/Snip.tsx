@@ -51,14 +51,25 @@ interface P {
   y: number;
 }
 
-type Tool = "rect" | "ellipse" | "line" | "arrow" | "pen" | "marker" | "text" | "mosaic" | "eraser";
+type Tool =
+  | "select"
+  | "rect"
+  | "ellipse"
+  | "line"
+  | "arrow"
+  | "pen"
+  | "marker"
+  | "text"
+  | "mosaic"
+  | "eraser";
 type ShapeTool = "rect" | "ellipse" | "line";
 type Action = "copy" | "save" | "saveas" | "peek";
 
 /** 一条标注。坐标全是**物理像素**，相对整块虚拟桌面（不相对选区）——
  *  这样改选区大小时标注不会跟着飘。 */
 type Op =
-  | { t: "rect" | "ellipse" | "line" | "arrow"; a: P; b: P; color: string; w: number }
+  /* `solid`：箭头头是实心三角还是空心（只对 arrow 有意义，其余三个忽略） */
+  | { t: "rect" | "ellipse" | "line" | "arrow"; a: P; b: P; color: string; w: number; solid?: boolean }
   | { t: "pen" | "marker"; pts: P[]; color: string; w: number; alpha: number }
   | { t: "text"; p: P; s: string; color: string; size: number }
   | { t: "mosaic"; a: P; b: P };
@@ -93,6 +104,13 @@ const IcoShape = () =>
     </>
   );
 
+const IcoSelect = () =>
+  svg(
+    <>
+      <path d="M4.2 3.2 L4.2 14.2 L7.6 10.9 L9.9 15.8 L11.9 14.9 L9.6 10.1 L14.4 9.9 Z" />
+    </>
+  );
+
 const IcoArrow = () =>
   svg(
     <>
@@ -124,6 +142,12 @@ export function Snip() {
   const [shape, setShape] = useState<ShapeTool>("rect");
   const [color, setColor] = useState(COLORS[0]);
   const [widthScale, setWidthScale] = useState(1);
+  /** 文字字号（基准 17，比它大/小的三档） */
+  const [textSize, setTextSize] = useState(17);
+  /** 箭头：实心（默认，照 Snipaste）/ 空心 */
+  const [arrowSolid, setArrowSolid] = useState(true);
+  /** 选择工具选中的那条标注（下标；ops 一变就清掉） */
+  const [selOp, setSelOp] = useState<number | null>(null);
   const [ops, setOps] = useState<Op[]>([]);
   const [redo, setRedo] = useState<Op[]>([]);
   const [cursor, setCursor] = useState<P>({ x: -999, y: -999 });
@@ -148,6 +172,10 @@ export function Snip() {
   colorRef.current = color;
   const toolRef = useRef<Tool | null>(null);
   toolRef.current = tool;
+  const textSizeRef = useRef(17);
+  textSizeRef.current = textSize;
+  const arrowSolidRef = useRef(true);
+  arrowSolidRef.current = arrowSolid;
   const spaceRef = useRef(false);
   spaceRef.current = space;
 
@@ -260,6 +288,12 @@ export function Snip() {
     ctx.restore();
   }, [scale]);
 
+  /* 选中是按**下标**记的：ops 一变（撤销 / 删除 / 重画）下标就可能指到别的标注上，
+     所以任何改动都清掉选中。选择工具本身不需要跨操作记住"选的是哪条"。 */
+  useEffect(() => {
+    setSelOp(null);
+  }, [ops.length]);
+
   const schedule = useCallback(() => {
     if (raf.current) return;
     raf.current = requestAnimationFrame(() => {
@@ -339,7 +373,8 @@ export function Snip() {
     | { k: "move"; from: P; orig: Rect }
     | { k: "resize"; h: string; from: P; orig: Rect }
     | { k: "draw" }
-    | { k: "erase" };
+    | { k: "erase" }
+    | { k: "opmove"; from: P; idx: number; orig: Op };
 
   const g = useRef<Gesture | null>(null);
 
@@ -386,6 +421,16 @@ export function Snip() {
   };
 
   const insideR = (r: Rect, p: P) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+
+  /** 点在哪个标注上（从最上层往下找）。p 是 CSS 坐标，opBox 是物理坐标 */
+  const hitOp = (p: P): number | null => {
+    const q = { x: p.x * scale, y: p.y * scale };
+    for (let i = opsRef.current.length - 1; i >= 0; i--) {
+      const b = opBox(opsRef.current[i], scale);
+      if (b && q.x >= b.x && q.x <= b.x + b.w && q.y >= b.y && q.y <= b.y + b.h) return i;
+    }
+    return null;
+  };
 
   /** 鼠标 CSS 坐标 → **整屏物理坐标**（标注就存在这个坐标系里，改选区不会跟着飘） */
   const toPhys = (e: { clientX: number; clientY: number }): P => ({
@@ -454,6 +499,15 @@ export function Snip() {
         return;
       }
       if (insideR(r, p)) {
+        /* 选择工具：点中哪条就选哪条，按着拖 = 挪它（这是"标注也能摆位置"的唯一入口） */
+        if (tool === "select") {
+          const idx = hitOp(p);
+          setSelOp(idx);
+          if (idx != null) {
+            g.current = { k: "opmove", from: p, idx, orig: opsRef.current[idx] };
+          }
+          return;
+        }
         if (!tool || space) {
           g.current = { k: "move", from: p, orig: r };
           return;
@@ -470,7 +524,9 @@ export function Snip() {
           requestAnimationFrame(() => textRef.current?.focus());
           return;
         }
-        live.current = { op: newOp(tool, q, color, widthScale, scale) };
+        live.current = {
+          op: newOp(tool, q, color, widthScale, scale, textSizeRef.current, arrowSolidRef.current),
+        };
         g.current = { k: "draw" };
         schedule();
         return;
@@ -522,6 +578,13 @@ export function Snip() {
       else if (isBoxOp(o)) d.op = { ...o, b: q };
       live.current = { op: d.op };
       schedule();
+      return;
+    }
+    if (ge.k === "opmove") {
+      const dx = (p.x - ge.from.x) * scale;
+      const dy = (p.y - ge.from.y) * scale;
+      const moved = shiftOp(ge.orig, dx, dy);
+      setOps((os) => os.map((o, i) => (i === ge.idx ? moved : o)));
       return;
     }
     if (ge.k === "erase") eraseAt(p);
@@ -667,6 +730,10 @@ export function Snip() {
       }
       if (k === "Escape") {
         e.preventDefault();
+        if (selOp != null) {
+          setSelOp(null);
+          return;
+        }
         if (textAt) {
           setTextAt(null);
           setText("");
@@ -749,7 +816,16 @@ export function Snip() {
           void source.cursorStep(d[0], d[1]).catch(() => {});
           return;
         }
+        /* 选择工具选了东西时，Delete 删它（单条删除；橡皮擦是按位置擦，两者互补） */
+        if ((k === "Delete" || k === "Backspace") && selOp != null) {
+          e.preventDefault();
+          setOps((os) => os.filter((_, i) => i !== selOp));
+          setRedo([]);
+          setSelOp(null);
+          return;
+        }
         const map: Record<string, Tool | "shape"> = {
+          v: "select",
           r: "shape",
           e: "ellipse",
           l: "line",
@@ -926,6 +1002,23 @@ export function Snip() {
         </>
       )}
 
+      {/* 选中的那条标注：虚线框（物理 → CSS 要除以 scale） */}
+      {selOp != null && ops[selOp] && (() => {
+        const b = opBox(ops[selOp], scale);
+        if (!b) return null;
+        return (
+          <div
+            className="snip-opsel"
+            style={{
+              left: b.x / scale,
+              top: b.y / scale,
+              width: Math.max(4, b.w / scale),
+              height: Math.max(4, b.h / scale),
+            }}
+          />
+        );
+      })()}
+
       {/* 工具栏 */}
       {barVisible && (
         <div
@@ -943,6 +1036,19 @@ export function Snip() {
             e.stopPropagation();
           }}
         >
+          <BarBtn
+            label="选择 / 移动标注"
+            keyHint="V"
+            active={tool === "select"}
+            onPick={() => {
+              if (tool === "select") setTool(null);
+              else {
+                setTool("select");
+                setOptions(false);
+              }
+            }}
+            icon={<IcoSelect />}
+          />
           <BarBtn
             label={`形状：${SHAPE_LABEL[shape]}（再点切换）`}
             keyHint="R / E / L"
@@ -1036,6 +1142,41 @@ export function Snip() {
                 <span style={{ height: n * 2 }} />
               </button>
             ))}
+            {/* 文字：字号四档（跟着线宽那一排，手感一致） */}
+            {tool === "text" &&
+              [14, 17, 22, 28].map((n) => (
+                <button
+                  key={`t${n}`}
+                  className={`snip-font ${textSize === n ? "on" : ""}`}
+                  onClick={() => setTextSize(n)}
+                  title={`字号 ${n}`}
+                >
+                  <span style={{ fontSize: Math.max(9, n * 0.55) }}>A</span>
+                </button>
+              ))}
+            {/* 箭头：实心 / 空心 */}
+            {tool === "arrow" && (
+              <>
+                <button
+                  className={`snip-arrowstyle ${arrowSolid ? "on" : ""}`}
+                  onClick={() => setArrowSolid(true)}
+                  title="实心箭头"
+                >
+                  <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden>
+                    <path d="M2 18 L18 2 L11.5 3.4 L16.6 8.5 Z" fill="currentColor" />
+                  </svg>
+                </button>
+                <button
+                  className={`snip-arrowstyle ${!arrowSolid ? "on" : ""}`}
+                  onClick={() => setArrowSolid(false)}
+                  title="空心箭头"
+                >
+                  <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+                    <path d="M2 18 L18 2 L11.5 3.4 L16.6 8.5 Z" />
+                  </svg>
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1200,14 +1341,38 @@ function BarBtn({
 
 /* ---------------- 绘制 ---------------- */
 
-function newOp(t: Exclude<Tool, "eraser">, p: P, color: string, ws: number, scale: number): Op {
+function newOp(
+  t: Exclude<Tool, "eraser" | "select">,
+  p: P,
+  color: string,
+  ws: number,
+  scale: number,
+  textSize = 17,
+  arrowSolid = true
+): Op {
   const lw = Math.max(1, Math.round((t === "marker" ? 14 : 2.4) * ws * scale));
   if (t === "mosaic") return { t: "mosaic", a: p, b: p };
   if (t === "pen" || t === "marker") {
     return { t, pts: [p], color, w: lw, alpha: t === "marker" ? 0.32 : 1 };
   }
-  if (t === "text") return { t: "text", p, s: "", color, size: Math.round(17 * scale) };
-  return { t, a: p, b: p, color, w: lw };
+  if (t === "text") return { t: "text", p, s: "", color, size: Math.round(textSize * scale) };
+  return { t, a: p, b: p, color, w: lw, solid: arrowSolid };
+}
+
+/** 整条标注平移（物理像素）。自由笔迹要挪每个点，文字只挪锚点 */
+function shiftOp(op: Op, dx: number, dy: number): Op {
+  if (isFreehand(op)) {
+    return { ...op, pts: op.pts.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+  }
+  if (op.t === "text") return { ...op, p: { x: op.p.x + dx, y: op.p.y + dy } };
+  if (isBoxOp(op)) {
+    return {
+      ...op,
+      a: { x: op.a.x + dx, y: op.a.y + dy },
+      b: { x: op.b.x + dx, y: op.b.y + dy },
+    };
+  }
+  return op;
 }
 
 function opBox(op: Op, _scale: number): Rect | null {
@@ -1279,7 +1444,14 @@ function drawOp(ctx: CanvasRenderingContext2D, op: Op, src: HTMLCanvasElement | 
     ctx.lineTo(b.x - Math.cos(ang - 0.4) * head, b.y - Math.sin(ang - 0.4) * head);
     ctx.lineTo(b.x - Math.cos(ang + 0.4) * head, b.y - Math.sin(ang + 0.4) * head);
     ctx.closePath();
-    ctx.fill();
+    /* 空心：只描边不填。线宽比箭杆细一档，否则小箭头会被自己糊成一坨 */
+    if (op.solid === false) {
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(1, op.w * 0.8);
+      ctx.stroke();
+    } else {
+      ctx.fill();
+    }
   } else if (op.t === "pen" || op.t === "marker") {
     if (op.pts.length < 2) {
       ctx.restore();

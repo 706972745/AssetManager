@@ -109,6 +109,8 @@ function buildAssets(nodes: DirNode[], pathToId: Map<string, number>): Asset[] {
       kind,
       size: Math.floor(80 * 1024 + r() * 9 * 1024 * 1024),
       mtime: now - Math.floor(r() * 60 * 86400),
+      // 假数据给一个"入库时间"：比 mtime 稍晚一点，界面上的「添加日期」才说得通
+      addedAt: now - Math.floor(r() * 30 * 86400),
       width: hasDim ? Math.round(scale * (aw / Math.max(aw, ah))) : null,
       height: hasDim ? Math.round(scale * (ah / Math.max(aw, ah))) : null,
       thumbState: 0,
@@ -476,6 +478,18 @@ export const mockSource: Source = {
   },
   async snapshotAddTag() {
     throw new Error("浏览器预览模式没有快照");
+  },
+  async snapshotCombine() {
+    throw new Error("浏览器预览模式没有快照");
+  },
+  async boardLayout() {
+    return [];
+  },
+  async boardPlace() {
+    return 0;
+  },
+  async boardAddPaths() {
+    return [[], ["浏览器预览模式没有素材库"]];
   },
   async snapshotResolve() {
     return { items: [], found: 0, missing: 0 };

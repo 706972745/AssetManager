@@ -67,6 +67,9 @@ pub struct App {
     pub libs: Vec<Lib>,
     pub data_dir: PathBuf,
     pub thumbs: thumb::ThumbStore,
+    /// 快照 → 全局 id 的换算缓存：`快照 id → (updated_at, ids)`。
+    /// 列表按快照筛时每翻一页都要这批 id，重算哈希太贵；快照一改（updated_at 变）就作废。
+    snap_ids_cache: std::sync::Mutex<std::collections::HashMap<i64, (i64, Vec<i64>)>>,
 }
 
 impl App {
@@ -83,7 +86,13 @@ impl App {
         let thumbs = thumb::ThumbStore::new(data_dir.join("cache").join("thumbs"));
         std::fs::create_dir_all(&thumbs.root).map_err(|e| e.to_string())?;
 
-        let mut app = Self { reg, libs: Vec::new(), data_dir, thumbs };
+        let mut app = Self {
+            reg,
+            libs: Vec::new(),
+            data_dir,
+            thumbs,
+            snap_ids_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
         app.reload_libs();
         Ok(app)
     }
@@ -423,14 +432,32 @@ impl App {
             }
             None => None,
         };
+
+        /* 快照筛选（0.1.18）：条目是**内容哈希**，先换算成全局 id（带缓存），
+           再走与分组完全相同的拆库路径 —— 跨库快照也能一次查对。 */
+        let snap_ids: Option<std::collections::HashMap<i64, Vec<i64>>> = match q.snapshot {
+            Some(sid) => {
+                let gids = self.snapshot_gids(sid)?;
+                let mut m: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+                for g in gids {
+                    let (lib_id, local) = ungid(g);
+                    m.entry(lib_id).or_default().push(local);
+                }
+                Some(m)
+            }
+            None => None,
+        };
         q.collection = None; // 往下只认 `ids`，别让 db 层再理解一次分组
+        q.snapshot = None;
+        /* 两个筛选同时给时不叠加（界面是单选），**快照优先** —— 它更"具体"。 */
+        let member_ids = snap_ids.or(coll_ids);
 
         if let Some(g) = q.dir_id {
             let (lib_id, local) = ungid(g);
             let l = self.lib(lib_id)?;
             let mut q2 = q.clone();
             q2.dir_id = Some(local);
-            if let Some(m) = &coll_ids {
+            if let Some(m) = &member_ids {
                 q2.ids = Some(m.get(&lib_id).cloned().unwrap_or_default());
             }
             if let Some((k, id)) = q2.cursor {
@@ -474,9 +501,9 @@ impl App {
             q2.limit = Some(limit);
             q2.cursor = None;
             q2.name_cursor = None;
-            if let Some(m) = &coll_ids {
+            if let Some(m) = &member_ids {
                 let mine = m.get(&l.id).cloned().unwrap_or_default();
-                // 这个库一张都不在分组里 → 跳过整个库（省一次全表查）
+                // 这个库一张都不在分组/快照里 → 跳过整个库（省一次全表查）
                 if mine.is_empty() {
                     continue;
                 }
@@ -1428,6 +1455,20 @@ impl App {
         reg::snapshots(&self.reg)
     }
 
+    /// 灵感板摆位（0.1.18）：`board` = `tag:<标签>` / `snap:<快照 id>`。
+    /// 只是视图记忆 —— 读不到就按瀑布流重排，不报错。
+    pub fn board_layout(&self, board: &str) -> Result<Vec<(i64, f64, f64, f64, f64)>, String> {
+        reg::board_layout(&self.reg, board)
+    }
+
+    pub fn board_place(
+        &self,
+        board: &str,
+        rows: &[(i64, f64, f64, f64, f64)],
+    ) -> Result<usize, String> {
+        reg::board_place(&self.reg, board, rows)
+    }
+
     /* ---------------- 分组（0.2.x） ----------------
        分组 = 用户自己攒的「一撮素材」，跨库存在（注册库里存的是全局 asset id）。
        与标签的分工：标签是属性（一张图可以有多个），分组是收纳（侧栏里点名要看的那一批）。 */
@@ -1511,8 +1552,110 @@ impl App {
         reg::snapshot_items(&self.reg, id)
     }
 
+    /// 快照 → 当前各库里那批素材的**全局 id**（主列表按快照筛选用）。
+    ///
+    /// 换算走 `match_by_hash`（哈希命中优先，没有哈希的同体积候选现算），
+    /// 结果按快照的 `updated_at` 缓存：同一个快照翻页只算一次，
+    /// 快照被改了（加入/删除/对账）`updated_at` 自变，缓存自然作废。
+    pub fn snapshot_gids(&self, snap: i64) -> Result<Vec<i64>, String> {
+        let row =
+            reg::snapshot(&self.reg, snap)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        {
+            let g = self.snap_ids_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((ts, ids)) = g.get(&snap) {
+                if *ts == row.updated_at {
+                    return Ok(ids.clone());
+                }
+            }
+        }
+        let mut out: Vec<i64> = Vec::new();
+        for it in reg::snapshot_items(&self.reg, snap)? {
+            let Some(hash) = snapshot::unhex(&it.hash) else { continue };
+            if let Some((g, _, _)) = self.match_by_hash(&hash, it.size)? {
+                out.push(g);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        self.snap_ids_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(snap, (row.updated_at, out.clone()));
+        Ok(out)
+    }
+
+    /// 合并 / 差集（P2.9）：把 `ids` 里的快照按 `mode` 合成**一份新快照**，原件一条不动。
+    ///
+    /// - `union`（默认）：并集，按哈希去重；
+    /// - `diff`：差集，第一份减去其余各份。
+    ///
+    /// 返回 `(新快照 id, 条数, 其中新写入的行数)`。重名自动加 ` (2)`，不静默覆盖。
+    pub fn snapshot_combine(
+        &mut self,
+        ids: &[i64],
+        name: &str,
+        mode: &str,
+    ) -> Result<(i64, usize, usize), String> {
+        if ids.is_empty() {
+            return Err("先选一份快照".into());
+        }
+        let mut merged: Vec<snapshot::SnapItem> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if mode == "diff" {
+            let mut drop: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for &other in &ids[1..] {
+                for it in reg::snapshot_items(&self.reg, other)? {
+                    drop.insert(it.hash);
+                }
+            }
+            for it in reg::snapshot_items(&self.reg, ids[0])? {
+                if !drop.contains(&it.hash) && seen.insert(it.hash.clone()) {
+                    merged.push(it);
+                }
+            }
+        } else {
+            for &id in ids {
+                for it in reg::snapshot_items(&self.reg, id)? {
+                    if seen.insert(it.hash.clone()) {
+                        merged.push(it);
+                    }
+                }
+            }
+        }
+        let total = merged.len();
+        /* 重名不覆盖：与导入同一口径，追加 ` (2)`、` (3)`… */
+        let base = name.trim();
+        let base = if base.is_empty() {
+            if mode == "diff" {
+                "快照差集"
+            } else {
+                "合并快照"
+            }
+        } else {
+            base
+        };
+        let mut final_name = base.to_string();
+        let mut n = 2;
+        while self
+            .snapshot_list()?
+            .iter()
+            .any(|s| s.name.eq_ignore_ascii_case(&final_name))
+        {
+            final_name = format!("{base} ({n})");
+            n += 1;
+        }
+        let new_id = reg::snapshot_create(&self.reg, &final_name)?;
+        let added = reg::snapshot_insert_items(&self.reg, new_id, &merged)?;
+        Ok((new_id, total, added))
+    }
+
     pub fn snapshot_remove(&mut self, id: i64, hashes: &[String]) -> Result<usize, String> {
-        reg::snapshot_remove_items(&self.reg, id, hashes)
+        let n = reg::snapshot_remove_items(&self.reg, id, hashes)?;
+        self.snap_ids_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        Ok(n)
     }
 
     /// 把一批素材加进快照。**身份是文件内容哈希**：算过的直接用，没算过的现算并写回
@@ -1562,6 +1705,11 @@ impl App {
 
         let total = items.len();
         let added = reg::snapshot_insert_items(&self.reg, snap, &items)?;
+        /* updated_at 只到秒：同一秒内连加两次时缓存会认成"没变"，所以显式作废 */
+        self.snap_ids_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&snap);
         Ok(SnapshotAdd { added, total, already: total - added, failed })
     }
 
@@ -2155,4 +2303,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /* ---------------- 快照筛选 / 合并（0.1.18，P2.9） ---------------- */
+
+    /// 主列表按快照筛：只列快照里那几张，且**跨库**也对（哈希换算 + 拆库查询）。
+    #[test]
+    fn snapshot_filter_lists_only_its_members() {
+        let d = tmp("snap-filter");
+        let lib_a = d.join("lib-a");
+        let lib_b = d.join("lib-b");
+        png_at(&lib_a.join("a1.png"), 1, 2, 3);
+        png_at(&lib_a.join("a2.png"), 4, 5, 6);
+        png_at(&lib_b.join("b1.png"), 7, 8, 9);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&lib_b.to_string_lossy(), |_| {}).unwrap();
+        let all = app
+            .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+            .unwrap();
+        assert_eq!(all.len(), 3, "两个库各扫一遍后应当是 3 张");
+
+        // 从**两个库各取一张**放进快照：这样同时验证"跨库"这件事
+        let mut picked: Vec<i64> = Vec::new();
+        for root in [lib_a.to_string_lossy().to_string(), lib_b.to_string_lossy().to_string()] {
+            if let Some(a) = all.iter().find(|a| a.path.starts_with(&root)) {
+                picked.push(a.id);
+            }
+        }
+        assert_eq!(picked.len(), 2);
+        let snap = app.snapshot_create("筛选板").unwrap();
+        app.snapshot_add_assets(snap, &picked).unwrap();
+
+        let rows = app
+            .list(&model::AssetQuery { snapshot: Some(snap), limit: Some(50), ..Default::default() })
+            .unwrap();
+        let mut got: Vec<i64> = rows.iter().map(|a| a.id).collect();
+        got.sort_unstable();
+        let mut want = picked.clone();
+        want.sort_unstable();
+        assert_eq!(got, want, "按快照筛必须把两个库里的那两张都列出来，且一张不多");
+
+        // 第二页（游标）不能因为换了条路就漏 / 重
+        let p1 = app
+            .list(&model::AssetQuery {
+                snapshot: Some(snap),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(p1.len(), 1);
+        let last = &p1[0];
+        let p2 = app
+            .list(&model::AssetQuery {
+                snapshot: Some(snap),
+                limit: Some(1),
+                cursor: Some((last.mtime, last.id)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(p2.len(), 1);
+        assert_ne!(p2[0].id, last.id, "翻页不能把同一张再给一次");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 合并 / 差集：结果落到**新快照**，原件一条不动。
+    #[test]
+    fn snapshot_combine_union_and_diff() {
+        let d = tmp("snap-combine");
+        let lib = d.join("lib");
+        png_at(&lib.join("a.png"), 10, 10, 10);
+        png_at(&lib.join("b.png"), 20, 20, 20);
+        png_at(&lib.join("c.png"), 30, 30, 30);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let ids: Vec<i64> = app
+            .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+            .unwrap()
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+
+        let a = app.snapshot_create("A").unwrap();
+        app.snapshot_add_assets(a, &ids[0..2]).unwrap(); // a + b
+        let b = app.snapshot_create("B").unwrap();
+        app.snapshot_add_assets(b, &ids[1..3]).unwrap(); // b + c
+
+        // 并集：3 条（b 只算一次）
+        let (u, total, added) = app.snapshot_combine(&[a, b], "A∪B", "union").unwrap();
+        assert_eq!((total, added), (3, 3));
+        assert_eq!(reg::snapshot(&app.reg, u).unwrap().unwrap().name, "A∪B");
+
+        // 差集：A − B 应当正好是「A 有、B 没有」的那一张
+        let names_of = |app: &App, id: i64| -> std::collections::BTreeSet<String> {
+            app.snapshot_items(id).unwrap().into_iter().map(|i| i.name).collect()
+        };
+        let (an, bn) = (names_of(&app, a), names_of(&app, b));
+        let expect: Vec<String> = an.difference(&bn).cloned().collect();
+        assert_eq!(expect.len(), 1);
+        let (df, total, _) = app.snapshot_combine(&[a, b], "A−B", "diff").unwrap();
+        assert_eq!(total, 1);
+        let items = app.snapshot_items(df).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, expect[0], "差集只能留下 A 独有的那一张");
+
+        // 原件没被改
+        assert_eq!(app.snapshot_items(a).unwrap().len(), 2);
+        assert_eq!(app.snapshot_items(b).unwrap().len(), 2);
+
+        // 重名不覆盖
+        let (_u2, _, _) = app.snapshot_combine(&[a, b], "A∪B", "union").unwrap();
+        assert!(app
+            .snapshot_list()
+            .unwrap()
+            .iter()
+            .any(|s| s.name == "A∪B (2)"));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

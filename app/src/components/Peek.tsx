@@ -56,6 +56,10 @@ export function Peek() {
   const [opac, setOpac] = useState(boot.opacity);
   /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点 */
   const [view, setView] = useState({ s: 1, x: 0, y: 0 });
+  /* 旋转 / 镜像（0.1.18，P2.7）：只影响"看"，不动文件、不改存档 ——
+     贴图是临时视图，关掉再开回来还是原样。 */
+  const [rot, setRot] = useState(0);
+  const [flip, setFlip] = useState({ h: false, v: false });
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const root = useRef<HTMLDivElement>(null);
@@ -95,6 +99,21 @@ export function Peek() {
     void source.peekClose();
   }, []);
 
+  /**
+   * 转 90° / 270° 时窗口的长宽要跟着换（不然图会转出窗口、留两条黑边）。
+   * 换比例走 `peekRatio`：长边不变、只按新比例重算短边。
+   */
+  const applyRot = useCallback(
+    (next: number) => {
+      setRot(next);
+      const it = boot.items[idx];
+      if (!it?.w || !it?.h) return;
+      const swap = next === 90 || next === 270;
+      void source.peekRatio(swap ? it.h : it.w, swap ? it.w : it.h).catch(() => {});
+    },
+    [boot.items, idx]
+  );
+
   /* 换图：窗口按新图比例变，并把存档指向新文件（重启还原的是最后看到的那张） */
   const goto = useCallback(
     (next: number) => {
@@ -104,6 +123,8 @@ export function Peek() {
       const it = boot.items[k];
       setIdx(k);
       setView({ s: 1, x: 0, y: 0 });
+      setRot(0);
+      setFlip({ h: false, v: false });
       if (it.w && it.h) void source.peekRatio(it.w, it.h).catch(() => {});
       void source.peekTrack(it.path, it.gid).catch(() => {});
     },
@@ -183,10 +204,34 @@ export function Peek() {
       }
       if (e.key === "ArrowLeft") goto(idx - 1);
       if (e.key === "ArrowRight") goto(idx + 1);
+      if (!e.ctrlKey && !e.metaKey) {
+        if (k === "r") {
+          e.preventDefault();
+          applyRot((rot + 90) % 360);
+          return;
+        }
+        if (k === "h") {
+          e.preventDefault();
+          setFlip((f) => ({ ...f, h: !f.h }));
+          return;
+        }
+        if (k === "v") {
+          e.preventDefault();
+          setFlip((f) => ({ ...f, v: !f.v }));
+          return;
+        }
+        if (k === "0") {
+          e.preventDefault();
+          setRot(0);
+          setFlip({ h: false, v: false });
+          setView({ s: 1, x: 0, y: 0 });
+          return;
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [close, cur, goto, idx, menu, view.s]);
+  }, [close, cur, goto, idx, menu, view.s, rot, applyRot]);
 
   /* 中键拖动 = 图内平移（放大后才有意义）。左键留给"拖窗口"（drag region）。 */
   useEffect(() => {
@@ -250,11 +295,35 @@ export function Peek() {
       icon: "star",
       action: () => void source.peekTop(!pinned).then(setPinned).catch(() => {}),
     },
+    { kind: "separator" },
     {
-      label: "还原图内缩放",
+      label: `顺时针转 90°${rot ? `（已转 ${rot}°）` : ""}`,
+      icon: "play",
+      shortcut: "R",
+      action: () => applyRot((rot + 90) % 360),
+    },
+    {
+      label: `${flip.h ? "✓ " : ""}左右镜像`,
+      icon: "copy",
+      shortcut: "H",
+      action: () => setFlip((f) => ({ ...f, h: !f.h })),
+    },
+    {
+      label: `${flip.v ? "✓ " : ""}上下镜像`,
+      icon: "copy",
+      shortcut: "V",
+      action: () => setFlip((f) => ({ ...f, v: !f.v })),
+    },
+    {
+      label: "还原旋转 / 镜像 / 缩放",
       icon: "search",
-      disabled: view.s <= 1,
-      action: () => setView({ s: 1, x: 0, y: 0 }),
+      shortcut: "0",
+      disabled: rot === 0 && !flip.h && !flip.v && view.s <= 1,
+      action: () => {
+        setRot(0);
+        setFlip({ h: false, v: false });
+        setView({ s: 1, x: 0, y: 0 });
+      },
     },
     { kind: "separator" },
     { label: "关闭这扇无边框看图", icon: "close", shortcut: "Esc", danger: true, action: close },
@@ -284,8 +353,16 @@ export function Peek() {
           onError={markReady}
           style={{
             opacity: opac,
-            transform:
-              view.s > 1 ? `translate(${view.x}px, ${view.y}px) scale(${view.s})` : undefined,
+            /* 顺序：镜像 → 旋转 → 图内缩放位移。
+               先镜像再旋转，「左右镜像」说的就是**屏幕上**的左右（符合直觉）。 */
+            transform: (() => {
+              const parts: string[] = [];
+              if (view.s > 1) parts.push(`translate(${view.x}px, ${view.y}px) scale(${view.s})`);
+              if (rot) parts.push(`rotate(${rot}deg)`);
+              if (flip.h) parts.push("scaleX(-1)");
+              if (flip.v) parts.push("scaleY(-1)");
+              return parts.length ? parts.join(" ") : undefined;
+            })(),
             transformOrigin: "0 0",
             cursor: view.s > 1 ? "grab" : undefined,
           }}

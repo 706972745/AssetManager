@@ -26,6 +26,8 @@ export interface Asset {
   kind: number;
   size: number;
   mtime: number;
+  /** 首次入库时间（unix 秒）。**0 = 老数据没记过**，界面显示「未知」 */
+  addedAt: number;
   width: number | null;
   height: number | null;
   thumbState: number;
@@ -72,6 +74,8 @@ export interface Query {
   minRating?: number | null;
   /** 分组筛选（分组 id）：只看这一组里的素材；空 = 不筛 */
   collection?: number | null;
+  /** 快照筛选（快照 id）：只看这份快照里认得出的素材；空 = 不筛。跨库生效 */
+  snapshot?: number | null;
 }
 
 
@@ -191,6 +195,16 @@ export interface SnapshotZip {
   ok: number;
   bad: string[];
   missing: number;
+}
+
+/** 灵感板上一张图（板上看到的永远是缩略图，操作一律落到 path 的源文件） */
+export interface BoardItemDto {
+  id: number;
+  src: string;
+  w: number;
+  h: number;
+  name: string;
+  path: string;
 }
 
 /** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
@@ -523,6 +537,27 @@ export interface Source {
   snapshotOpen(id: number): Promise<number>;
   /** 快照板里 Ctrl+V：存截图目录 + 入库 + 加进这个快照 */
   snapshotPaste(id: number): Promise<BoardPastedItem>;
+  /**
+   * 合并 / 差集（P2.9）：把几份快照合成**一份新快照**，原件不动。
+   * 返回 `[新快照 id, 条数, 其中新写入的行数]`；重名自动加 ` (2)`。
+   */
+  snapshotCombine(
+    ids: number[],
+    name: string,
+    mode: "union" | "diff",
+  ): Promise<[number, number, number]>;
+  /** 灵感板摆位：读上次摆的位置/尺寸（`[gid,x,y,w,h]`）。读不到就空 */
+  boardLayout(board: string): Promise<[number, number, number, number, number][]>;
+  /**
+   * 往板上**拖文件进来**：只收已入库的（不在库里的如实报原因，不静默丢）。
+   * 返回 `[能上板的条目, 不能上板的原因]`
+   */
+  boardAddPaths(paths: string[]): Promise<[BoardItemDto[], string[]]>;
+  /** 灵感板摆位：记住这几张（松手时逐张写） */
+  boardPlace(
+    board: string,
+    rows: [number, number, number, number, number][],
+  ): Promise<number>;
   peekTop(on: boolean): Promise<boolean>;
   /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
   peekReady(): Promise<void>;

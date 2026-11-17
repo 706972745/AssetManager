@@ -25,6 +25,9 @@ pub struct Asset {
     pub kind: i32,
     pub size: i64,
     pub mtime: i64,
+    /// 首次入库时间（unix 秒）。**0 = 老数据没有这个值**（0.1.16 及更早扫描时没写），
+    /// 界面必须如实显示「未知」，不能拿 mtime 冒充 —— 那是文件的修改时间，不是"我什么时候存进来的"。
+    pub added_at: i64,
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub thumb_key: Option<String>,
@@ -94,6 +97,10 @@ pub struct AssetQuery {
     /// 分组筛选（分组 id，注册库里的 `collections.id`）。None = 不筛。
     /// 成员是全局 asset id，`App::list` 按库拆成库内 id 再交给各库查询。
     pub collection: Option<i64>,
+    /// **快照筛选**（0.1.18）：快照 id。快照记的是内容哈希，`App::list` 先换算成全局 id
+    /// 再按库拆开（口径同 `collection`），所以跨库也能一次查对。
+    /// 换算结果按快照的 `updated_at` 缓存，翻页不会重算。
+    pub snapshot: Option<i64>,
     /// **后端填的**：这一页只许出现这些库内 id（分组筛选时由 `App::list` 拆出来）。
     /// 前端不送。
     pub ids: Option<Vec<i64>>,

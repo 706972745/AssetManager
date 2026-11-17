@@ -97,6 +97,21 @@ CREATE TABLE IF NOT EXISTS collection_assets (
 );
 CREATE INDEX IF NOT EXISTS idx_collection_assets_gid ON collection_assets(asset_gid);
 
+/* 灵感板的摆位（0.1.18）：板上每张图的**位置与尺寸**，跨库存在（一块板可以横跨几个库）。
+   `board` = `tag:<标签名>` / `snap:<快照 id>`；`gid` 是全局素材 id。
+   这只是一份**视图记忆**：删掉不会丢任何素材（下一板按瀑布流重排一遍就是新的排布），
+   所以它不进素材库的 DB，也不参与任何对账。 */
+CREATE TABLE IF NOT EXISTS board_items (
+  board TEXT NOT NULL,
+  gid INTEGER NOT NULL,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  w REAL NOT NULL,
+  h REAL NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (board, gid)
+) WITHOUT ROWID;
+
 "#;
 
 pub struct LibRow {
@@ -796,6 +811,44 @@ pub fn coll_of(c: &Connection, gid: i64) -> Res<Vec<i64>> {
         .map_err(|e| e.to_string())?;
     let rows = st.query_map(params![gid], |r| r.get(0)).map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
+}
+
+/* ------------------------------------------------------------------ 灵感板摆位 */
+
+/// 一块板上记下来的摆位：`(gid, x, y, w, h)`。
+///
+/// 只是"上次摆哪儿"的记忆 —— 板上的图被删了 / 换库了，这一行就自然对不上，
+/// 调用方按 gid 过滤即可，**不要**因为对不上而删行（图可能只是暂时不在）。
+pub fn board_layout(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64)>> {
+    let mut st = c
+        .prepare("SELECT gid, x, y, w, h FROM board_items WHERE board = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![board], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// 记住一批图的摆位（松手时逐张写，不整板重写）。
+pub fn board_place(c: &Connection, board: &str, rows: &[(i64, f64, f64, f64, f64)]) -> Res<usize> {
+    let now = db::now_ts();
+    let mut st = c
+        .prepare(
+            "INSERT INTO board_items (board, gid, x, y, w, h, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(board, gid) DO UPDATE SET
+               x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h, updated_at=excluded.updated_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut n = 0usize;
+    for &(g, x, y, w, h) in rows {
+        n += st
+            .execute(params![board, g, x, y, w, h, now])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

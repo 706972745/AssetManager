@@ -1082,6 +1082,19 @@ export function Detail({
                   <dd className="mono">{fmtSize(asset.size)}</dd>
                   <dt>修改时间</dt>
                   <dd className="mono">{fmtTime(asset.mtime)}</dd>
+                  <dt>添加日期</dt>
+                  <dd
+                    className="mono"
+                    /* 0.1.16 及更早的库里没有这个值 —— 如实写「未知」，
+                       不拿 mtime 顶上（那是文件的修改时间，不是入库时间） */
+                    title={
+                      asset.addedAt
+                        ? "第一次被这个软件扫到的时间"
+                        : "这张图入库时还没有记录添加时间（0.1.17 之前的版本）；重新扫描也不会补"
+                    }
+                  >
+                    {asset.addedAt ? fmtTime(asset.addedAt) : "未知"}
+                  </dd>
                   <dt>位置</dt>
                   <dd>
                     {/* 悬停 1 秒弹完整路径（图上只放得下一行，长路径必被截） */}

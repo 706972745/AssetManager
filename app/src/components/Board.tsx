@@ -31,6 +31,8 @@ interface BoardItem {
 
 interface BoardBoot {
   label?: string;
+  /** 摆位的键（`tag:<标签>` / `snap:<id>`）：同一个标签/快照下次开板还摆回原样 */
+  board?: string;
   /** 标签板：这块板对应哪个标签（Ctrl+V 打的就是这个标签） */
   tag?: string;
   /** 快照板：这块板对应哪份快照（Ctrl+V 加进这个快照） */
@@ -197,14 +199,53 @@ export function Board() {
     };
   }, []);
 
-  /* 第一次摆：把初始排布写进 pos，然后 fit 一次。
+  /* 第一次摆：**先读上次的摆位**，没记过的才用瀑布流；然后 fit 一次。
      **之后再增删条目都不许 fit** —— 粘一张图就把整块画布重缩一遍，等于把用户手摆的位置全打乱。 */
   const fitted = useRef(false);
+  /** 摆位读回来没有：没读回来之前不 fit，否则会先按瀑布流 fit 一次、再跳一下 */
+  const layoutReady = useRef(false);
+  useEffect(() => {
+    const board = boot?.board;
+    if (!board) {
+      layoutReady.current = true;
+      return;
+    }
+    let alive = true;
+    void source
+      .boardLayout(board)
+      .then((rows) => {
+        if (!alive) return;
+        for (const [g, x, y, w, h] of rows) pos.current.set(g, { x, y, w, h });
+      })
+      .catch(() => {})
+      .finally(() => {
+        layoutReady.current = true;
+        /* 读完之后重排一次：这一帧 items 已经从 boot 来了，直接把 DOM 位置改对 */
+        setItems((old) => [...old]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [boot?.board]);
+
+  /** 把一张图的位置/尺寸记回库（松手、缩放单张时调） */
+  const remember = useCallback(
+    (id: number) => {
+      const board = boot?.board;
+      const b = pos.current.get(id);
+      if (!board || !b) return;
+      void source
+        .boardPlace(board, [[id, Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.h)]])
+        .catch(() => {});
+    },
+    [boot?.board]
+  );
+
   useEffect(() => {
     items.forEach((it, i) => {
       if (!pos.current.has(it.id)) pos.current.set(it.id, { ...boxes[i] });
     });
-    if (!fitted.current) {
+    if (!fitted.current && layoutReady.current) {
       fitted.current = true;
       fit();
     } else {
@@ -235,6 +276,8 @@ export function Board() {
     box: Box;
   } | null>(null);
   const tick = useRef(0);
+  /** Alt+滚轮改大小的落库定时器（停止滚动 400ms 后写一次） */
+  const sizeSave = useRef(0);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -261,6 +304,9 @@ export function Board() {
           pos.current.set(id, { ...b, w, h });
           setActive(id);
           recompute();
+          /* 滚轮会连发：停 400ms 再落库，别每帧一次 IPC */
+          window.clearTimeout(sizeSave.current);
+          sizeSave.current = window.setTimeout(() => remember(id), 400);
           return;
         }
       }
@@ -280,7 +326,7 @@ export function Board() {
     };
     root.addEventListener("wheel", onWheel, { passive: false });
     return () => root.removeEventListener("wheel", onWheel);
-  }, [applyVp, recompute]);
+  }, [applyVp, recompute, remember]);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -327,6 +373,7 @@ export function Board() {
             h: Math.round(parseFloat(el.style.height) || d.box.h),
           });
         }
+        remember(d.id);
         drag.current = null;
         rootRef.current?.classList.remove("dragging-img");
         recompute();
@@ -338,7 +385,7 @@ export function Board() {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [applyVp, recompute, boxById]);
+  }, [applyVp, recompute, boxById, remember]);
 
   const onDown = (e: React.MouseEvent) => {
     if (e.button === 2) return; // 右键交给菜单
@@ -393,6 +440,7 @@ export function Board() {
       const cx = (W / 2 - v.x) / v.k;
       const cy = (H / 2 - v.y) / v.k;
       pos.current.set(it.id, { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h });
+      remember(it.id);
       setItems((old) => (old.some((x) => x.id === it.id) ? old : [...old, it]));
       setHint({
         text: snap
@@ -405,7 +453,87 @@ export function Board() {
     } finally {
       pasting.current = false;
     }
-  }, [boot]);
+  }, [boot, remember]);
+
+  /* ---------------- 从外面拖文件进来（P2.8） ----------------
+     走 WebView 的原生拖放事件（HTML5 drop 在 Tauri 里拿不到真实路径）。
+     只收**已经在素材库里**的文件；不在库里的如实报出来（不静默丢）。 */
+  const addPaths = useCallback(
+    async (paths: string[]) => {
+      if (!paths.length) return;
+      try {
+        const [items, bad] = await source.boardAddPaths(paths);
+        if (items.length) {
+          const root = rootRef.current;
+          const W = root?.clientWidth ?? 1200;
+          const H = root?.clientHeight ?? 800;
+          const v = vp.current;
+          const cx = (W / 2 - v.x) / v.k;
+          const cy = (H / 2 - v.y) / v.k;
+          /* 落到视口中心，一列往下排（多张时不会叠成一坨） */
+          items.forEach((it, i) => {
+            const aspect = it.w > 0 && it.h > 0 ? it.w / it.h : 4 / 3;
+            const w = Math.round(Math.min(MAX_W, Math.max(MIN_W, CW)));
+            const h = Math.max(24, Math.round(w / aspect));
+            pos.current.set(it.id, {
+              x: Math.round(cx - w / 2),
+              y: Math.round(cy - h / 2 + i * (h + GAP)),
+              w,
+              h,
+            });
+          });
+          setItems((old) => {
+            const have = new Set(old.map((x) => x.id));
+            return [...old, ...items.filter((x) => !have.has(x.id))];
+          });
+          items.forEach((it) => remember(it.id));
+          setHint({ text: `已放上 ${items.length} 张`, bad: false });
+        }
+        if (bad.length) {
+          setHint({
+            text:
+              bad.length === 1
+                ? bad[0]
+                : `${bad.length} 个文件没放上来（不在素材库里）：${bad[0]}`,
+            bad: true,
+          });
+        }
+      } catch (e) {
+        setHint({ text: String(e), bad: true });
+      }
+    },
+    [remember]
+  );
+
+  useEffect(() => {
+    /* 浏览器预览没有原生拖放：没有 Tauri 运行时就直接跳过 */
+    if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+    let dead = false;
+    let un: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview()
+          .onDragDropEvent((e) => {
+            const p = e.payload;
+            if (p.type === "over") rootRef.current?.classList.add("drop-hot");
+            else if (p.type === "leave") rootRef.current?.classList.remove("drop-hot");
+            else if (p.type === "drop") {
+              rootRef.current?.classList.remove("drop-hot");
+              void addPaths(p.paths);
+            }
+          })
+          .then((u) => {
+            if (dead) u();
+            else un = u;
+          })
+          .catch(() => {})
+      )
+      .catch(() => {});
+    return () => {
+      dead = true;
+      un?.();
+    };
+  }, [addPaths]);
 
   /* ---------------- 键盘 ---------------- */
 
@@ -453,6 +581,11 @@ export function Board() {
     const it = id != null ? items.find((x) => x.id === id) : null;
     if (!it) {
       return [
+        {
+          label: "从资源管理器拖文件进来",
+          icon: "import",
+          action: () => setHint({ text: "直接把图片拖进画布即可（只收已入库的图）", bad: false }),
+        },
         {
           label: "粘贴剪贴板图片",
           icon: "copy",
@@ -593,6 +726,22 @@ export function Board() {
       )}
 
       {hint && <div className={`board-hint ${hint.bad ? "bad" : ""}`}>{hint.text}</div>}
+
+      {/* 左下角缩放条：固定在这一角（画布怎么平移缩放都不动它） */}
+      <div className="board-zoombar" onMouseDown={(e) => e.stopPropagation()}>
+        <button title="缩小" onClick={() => zoomBy(1 / 1.2)}>
+          <Minus size={12} strokeWidth={1.9} />
+        </button>
+        <span className="mono board-zoom" onClick={reset100} title="点一下回到 100%">
+          {Math.round(zoom * 100)}%
+        </span>
+        <button title="放大" onClick={() => zoomBy(1.2)}>
+          <Plus size={12} strokeWidth={1.9} />
+        </button>
+        <button title="全部适应窗口（F）" onClick={fit}>
+          <Maximize2 size={12} strokeWidth={1.9} />
+        </button>
+      </div>
 
       {/* 顶栏：整条是拖窗口的把手（画布本身也要能拖，所以只在顶部让出这一条） */}
       <div className="board-top" data-tauri-drag-region>

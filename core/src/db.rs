@@ -831,6 +831,7 @@ fn row_to_asset(r: &rusqlite::Row) -> rusqlite::Result<Asset> {
         kind: r.get("kind")?,
         size: r.get("size")?,
         mtime: r.get("mtime")?,
+        added_at: r.get::<_, Option<i64>>("added_at")?.unwrap_or(0),
         width: r.get("width")?,
         height: r.get("height")?,
         thumb_key: r.get("thumb_key")?,
@@ -1049,7 +1050,7 @@ pub fn list_assets(c: &Connection, q: &AssetQuery) -> Res<Vec<Asset>> {
     let sql = format!(
         "SELECT a.id, a.dir_id, a.name, a.ext, a.kind, a.size, a.mtime, a.width, a.height,
                 a.thumb_key, a.thumb_state, a.quality, a.rating, a.note, a.source_url,
-                a.palette, a.color, d.path AS dpath
+                a.palette, a.color, COALESCE(a.added_at,0) AS added_at, d.path AS dpath
          FROM assets a JOIN dirs d ON d.id = a.dir_id
          WHERE {where_sql} {page_sql} {order} LIMIT {limit}{offset_sql}"
     );
@@ -1797,7 +1798,7 @@ pub fn asset_by_id(c: &Connection, id: i64) -> Res<Option<Asset>> {
         .prepare(
             "SELECT a.id, a.dir_id, a.name, a.ext, a.kind, a.size, a.mtime, a.width, a.height,
                     a.thumb_key, a.thumb_state, a.quality, a.rating, a.note, a.source_url,
-                    a.palette, a.color, d.path AS dpath
+                    a.palette, a.color, COALESCE(a.added_at,0) AS added_at, d.path AS dpath
              FROM assets a JOIN dirs d ON d.id=a.dir_id WHERE a.id=?1",
         )
         .map_err(e2s)?;
