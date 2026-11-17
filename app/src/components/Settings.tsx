@@ -660,7 +660,7 @@ export function Settings({
             id: "ver",
             label: "版本",
             kw: "版本 version 号",
-            node: <span className="set-value mono">0.10.0 开发版</span>,
+            node: <span className="set-value mono">{__APP_VERSION__}</span>,
           },
           {
             id: "what",
