@@ -1,6 +1,6 @@
 [package]
 name = "am-core"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 
 [dependencies]
@@ -18,6 +18,10 @@ notify = "8.2.2"
 # 一张 24MP 照片全解要 200–400 ms，而缩略图只要 384px。
 # jpeg-decoder 支持在 DCT 域直接出 1/2、1/4、1/8 的图，像素少 64 倍、解码十几毫秒。
 jpeg-decoder = "0.3"
+
+# 剪贴板图片（F3 贴图 / Alt+F1 复制）。Windows 的 CF_DIB 细节（预乘 alpha、行序、
+# BI_BITFIELDS）坑太多，手写会在"某些软件复制的图"上翻车，这类交给 arboard。
+arboard = "3"
 
 # 系统缩略图兜底（T10 L3）走手写 FFI（core/src/shellthumb.rs），
 # **不引 `windows` crate**：那个 crate 打开 Win32_UI_Shell 后 rustc 工作集能跑到 37 GB，

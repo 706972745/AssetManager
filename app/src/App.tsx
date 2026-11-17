@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
+import { loadHotkeys } from "./lib/hotkeys";
 import {
   fmtNum,
   fmtSize,
@@ -385,6 +386,33 @@ export default function App() {
     if (!dir?.path) return;
     void source.watch([dir.path]).catch(() => 0);
   }, [dir?.path]);
+
+  /* 截图保存后刷新（截图目录可能已自动进库，列表要立刻看到这张新图） */
+  useEffect(() => {
+    const off = onAppEvent<string | null>("shot://saved", (p) => {
+      setRefreshKey((k) => k + 1);
+      if (p) toast(`截图已保存：${p.split(/[\\/]/).pop() ?? p}`, false, "Ctrl+S 可以另选位置");
+    });
+    return () => off();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* 系统级快捷键（F1 截图 / F3 贴剪贴板 / Alt+F1 截图后复制）。
+     启动时按用户存的组合注册一次；设置里改完由设置面板自己再调一次。 */
+  useEffect(() => {
+    const saved = loadHotkeys();
+    const list: [string, string][] = [
+      [saved.snip, "snip"],
+      [saved.clip, "clip_peek"],
+      [saved.snipCopy, "snip_copy"],
+    ];
+    void source
+      .hotkeysSet(list)
+      .then((failed) => {
+        if (failed.length) toast(`这些快捷键被别的软件占了：${failed.join("、")}`, true);
+      })
+      .catch(() => {});
+  }, []); // 只注册一次；改动走设置面板
 
   useEffect(() => {
     let timer: number | null = null;
@@ -1068,6 +1096,23 @@ export default function App() {
     [items, toast]
   );
 
+  /* 中键（滚轮按下去）= 立刻贴图。
+     素材格上的左键有选择语义、右键有菜单，中键在浏览器里是"自动滚动"，在这里正好空着。 */
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 1) return;
+      const t = e.target as HTMLElement | null;
+      const tile = t?.closest<HTMLElement>("[data-asset-id]");
+      if (!tile) return;
+      e.preventDefault();
+      const id = Number(tile.dataset.assetId);
+      const a = items.find((v) => v.id === id);
+      if (a) openPeek(a);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [items, openPeek]);
+
   /* ---------------- 右键菜单 ----------------
      一处接管全窗口：
      · 页面任意处右键都 preventDefault，WebView2 那套「返回/刷新/另存为/打印」不再出现；
@@ -1232,6 +1277,21 @@ export default function App() {
         { label: "全选", icon: "image", shortcut: "Ctrl+A", action: () => pickMany(items.map((v) => v.id), false) },
         { label: "撤销上一步", icon: "undo", shortcut: "Ctrl+Z", action: () => void onUndo() },
         { kind: "separator" },
+        /* 截图 / 剪贴板看图是系统级功能（默认 F1 / F3），这里再给一份鼠标入口：
+           快捷键被别的软件占住时（本机 Snipaste 就占着 F1/F3），用户总得有地方点。 */
+        {
+          label: "截图（选完区存到截图目录）",
+          icon: "image",
+          shortcut: "F1",
+          action: () => void source.snipStart("save").catch((e) => toast(String(e), true)),
+        },
+        {
+          label: "把剪贴板里的图用无边框看图打开",
+          icon: "copy",
+          shortcut: "F3",
+          action: () => void source.clipPeek().catch((e) => toast(String(e), true)),
+        },
+        { kind: "separator" },
         { label: "常规网格", icon: "grid", disabled: view === "grid", action: () => setView("grid") },
         {
           label: "瀑布流",
@@ -1315,6 +1375,19 @@ export default function App() {
         if (ids.length) {
           e.preventDefault();
           setTagPrompt({ ids });
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+        // Ctrl+C = 复制**原文件**（CF_HDROP）。粘到 PS/资源管理器得到的是文件，不是位图 ——
+        // 和右键「复制原文件」完全同一条路，别让两处行为不一样
+        const ids = selectedIds.size ? [...selectedIds] : selected ? [selected.id] : [];
+        if (ids.length) {
+          const paths = ids
+            .map((id) => items.find((x) => x.id === id)?.path)
+            .filter((p): p is string => !!p);
+          if (paths.length) {
+            e.preventDefault();
+            void onCopyFile(paths);
+          }
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();

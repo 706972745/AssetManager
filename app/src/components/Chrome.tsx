@@ -494,8 +494,31 @@ export function Detail({
       <div className="detail-inner scroll-hot">
         {asset ? (
           <>
+            {/* 预览 + 右侧竖排色板（照 Eagle）：色板贴在预览右边而不是另起一行，
+                扫一眼就知道这张图是什么调性，也不占纵向空间。 */}
+            <div className="detail-hero">
+              <SquarePreview
+                src={thumbSrc(asset, 512)}
+                aspect={asset.width && asset.height ? asset.width / asset.height : 0}
+                onPressStart={(e) => {
+                  if (e.button === 0) press.current = { x: e.clientX, y: e.clientY };
+                }}
+              />
+              {palette.length > 0 && (
+                <div className="detail-palette" aria-label="主色板">
+                  {palette.slice(0, 7).map((hex, i) => (
+                    <button
+                      key={`${hex}-${i}`}
+                      style={{ background: `#${hex}` }}
+                      title={`#${hex.toUpperCase()} · 点击复制`}
+                      onClick={() => void copy(`#${hex.toUpperCase()}`, "色值")}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
             <header className="detail-head">
-              <span className="detail-badge">{badge(asset.ext)}</span>
               <button
                 className="detail-title"
                 title="点击复制文件名"
@@ -503,17 +526,9 @@ export function Detail({
               >
                 {asset.name}
               </button>
+              <span className="detail-badge">{badge(asset.ext)}</span>
             </header>
 
-            <SquarePreview
-              src={thumbSrc(asset, 512)}
-              aspect={
-                asset.width && asset.height ? asset.width / asset.height : 0
-              }
-              onPressStart={(e) => {
-                if (e.button === 0) press.current = { x: e.clientX, y: e.clientY };
-              }}
-            />
             <div className="detail-artmeta mono">
               <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
               <span>{fmtSize(asset.size)}</span>
@@ -521,7 +536,7 @@ export function Detail({
             </div>
 
             <section>
-              <div className="detail-heading">原文件</div>
+              <div className="detail-heading">基本信息</div>
               <dl className="detail-meta">
                 <dt>格式</dt>
                 <dd>{asset.ext.toUpperCase()}</dd>
@@ -542,7 +557,6 @@ export function Detail({
                 </dd>
               </dl>
             </section>
-
             <section>
               <div className="detail-heading">标签</div>
               <TagSection
@@ -557,9 +571,8 @@ export function Detail({
                 onEdit={onEditTag}
               />
             </section>
-
             <section>
-              <div className="detail-heading">我的</div>
+              <div className="detail-heading">注释与评分</div>
               {/* 评分 / 注释 / 来源 URL 都是**人写的东西**：扫描与重建索引永远不碰它们 */}
               <div className="mine">
                 <div className="mine-rate" role="group" aria-label="评分">
@@ -664,9 +677,7 @@ export function Detail({
                 拖到左侧目录树 = 移动到这个文件夹。出去/移走的都是磁盘上的原文件。
               </p>
             </section>
-
-            {(refsOut.length > 0 || refsIn.length > 0) && (
-              <section>
+            <section>
                 <div className="detail-heading">引用</div>
                 {refsIn.length > 0 && (
                   <>
@@ -697,8 +708,6 @@ export function Detail({
                   </>
                 )}
               </section>
-            )}
-
             <section>
               <div className="detail-heading">显示层</div>
               {!PREVIEWABLE_KINDS.has(asset.kind) ? (

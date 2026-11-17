@@ -355,6 +355,29 @@ export interface Source {
   /** 看一眼目录里有什么（判断用户是不是把素材目录当成数据文件夹了） */
   probeDir(dir: string): Promise<DirProbe>;
 
+  /* ---------------- 无边框贴图 / 截图 / 剪贴板（0.10.0） ---------------- */
+  /** 复制原文件（CF_HDROP） */
+  peekCopyFile(paths: string[]): Promise<void>;
+  /** 贴图不透明度（Ctrl+滚轮），写进存档 */
+  peekOpacity(v: number): Promise<void>;
+  /** 贴图换图后把存档指向新文件 */
+  peekTrack(path: string, gid: number): Promise<void>;
+  /** 文本进剪贴板（复制显示尺寸这种） */
+  clipText(text: string): Promise<void>;
+  /** 另存为，返回最终路径（取消 = null） */
+  saveAs(src: string, suggest?: string): Promise<string | null>;
+  /** F3：剪贴板图片贴到屏幕（进历史，最多 10 张） */
+  clipPeek(): Promise<void>;
+  /** 剪贴板历史：`[路径, 宽, 高]`，最新在前 */
+  clipHistory(): Promise<[string, number, number][]>;
+  /** F1 / Alt+F1：开始截图（mode: save | copy） */
+  snipStart(mode?: "save" | "copy"): Promise<void>;
+  /** 确认选区（CSS 像素）；saveAs = 弹保存对话框 */
+  snipCommit(x: number, y: number, w: number, h: number, saveAs?: boolean): Promise<string | null>;
+  snipCancel(): Promise<void>;
+  /** 注册系统级快捷键，返回注册失败的组合 */
+  hotkeysSet(list: [string, string][]): Promise<string[]>;
+
   /* ---------------- 无边框看图窗口（0.9.0） ---------------- */
   /** 开一扇无边框窗口，`ids` 是整个浏览集合，`index` 是当前那张 */
   peekOpen(ids: number[], index: number, longEdge?: number): Promise<void>;
@@ -364,7 +387,6 @@ export interface Source {
   peekRatio(w: number, h: number): Promise<void>;
   peekClose(): Promise<void>;
   peekTop(on: boolean): Promise<boolean>;
-  peekFullscreen(on: boolean): Promise<boolean>;
 
   /* ---------------- T24 主色板 / T25 查重 / T26 引用 / T33 批量重命名 ---------------- */
   /** 按一批全局 id 取素材（查重/引用面板要显示缩略图） */

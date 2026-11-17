@@ -12,6 +12,7 @@
 //! 跨库的操作（列全部、标签计数、撤销选库）都在这里收口 —— 别让命令层自己拼。
 
 pub mod autotag;
+pub mod clipimg;
 pub mod dataroot;
 pub mod db;
 pub mod dupes;
@@ -26,6 +27,7 @@ pub mod preview;
 pub mod refs;
 pub mod reg;
 pub mod scan;
+pub mod screen;
 pub mod shellthumb;
 pub mod thumb;
 pub mod watch;
@@ -604,6 +606,12 @@ impl App {
         db::set_palette(&self.lib(lib_id)?.conn, local, palette, color)
     }
 
+    /// 只写相似指纹（出缩略图时顺带算的那个）
+    pub fn set_phash(&mut self, g: i64, phash: i64) -> Result<(), String> {
+        let (lib_id, local) = ungid(g);
+        db::set_phash(&self.lib(lib_id)?.conn, local, phash)
+    }
+
     pub fn set_thumb(&mut self, g: i64, key: &str, state: i32, quality: i32, bytes: i64) -> Result<(), String> {
         let (lib_id, local) = ungid(g);
         db::set_thumb(&self.lib(lib_id)?.conn, local, key, state, quality, bytes)
@@ -1029,13 +1037,21 @@ impl App {
             let rows = db::assets_without_palette_paths(&l.conn, limit)?;
             left += rows.len() as i64;
             for (id, path) in rows {
-                let key = thumb::ThumbStore::key_for(Path::new(&path), 256);
-                let f = store.file_for(&key);
-                if !f.is_file() {
-                    continue;
+                /* 缓存里到底是哪一档？用户在网格里看到的是 384/512，
+                   256 档可能从来没生成过。四档挨个试，命中就用（从大到小：
+                   大图算出来的色板更稳，但 256 也够用）。 */
+                let p = Path::new(&path);
+                let mut hit = None;
+                for px in [512u32, 384, 256, 1600] {
+                    let f = store.file_for(&thumb::ThumbStore::key_for(p, px));
+                    if f.is_file() {
+                        hit = Some(f);
+                        break;
+                    }
                 }
+                let Some(f) = hit else { continue };
                 let Ok(img) = image::open(&f) else { continue };
-                let rgb = img.to_rgb8();
+                let rgb = img.to_rgba8();
                 let pal = palette::compute(rgb.as_raw(), rgb.width(), rgb.height());
                 if pal.hexes.is_empty() {
                     continue;

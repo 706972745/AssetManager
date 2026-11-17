@@ -3,7 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use am_core::fsops::MovePolicy;
 use am_core::model::{Asset, AssetQuery, DirNode, ScanStats};
-use am_core::{db, fsops, scan, thumb, watch, App};
-use serde::Serialize;
+use am_core::{clipimg, db, fsops, scan, screen, thumb, watch, App};
+use serde::{Deserialize, Serialize};
 use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
@@ -1389,26 +1389,113 @@ fn not_found() -> Response<Vec<u8>> {
         .unwrap()
 }
 
-/* ---------------- 无边框看图窗口（0.9.0，照果核看图的「无边框模式」） ----------------
-   果核看图最值得抄的一点不是渲染，而是**窗口形态**：它能把窗口变成"就是那张图"——
-   没有标题栏、没有边框、没有工具条，长边固定 342 DIP，窗口尺寸按图片比例算。
-   拖到截图里、贴在素材旁边比对时，它不占地方也不穿帮。
+/* ---------------- 无边框看图窗口（0.9.0 → 0.10.0） ----------------
+   果核看图最值得抄的一点不是渲染，而是**窗口形态**：窗口变成"就是那张图"——
+   没有标题栏、没有边框、没有工具条，长边 342 DIP，尺寸按图片比例算。
 
-   这里照它做一扇同样形态的窗口。差别在于我们用的是 WebView2（不是 D2D 直接画），
-   所以必须：
-   · `transparent(true)` —— 不然圆角外面是一块白/黑底；
-   · `shadow(false)` —— 系统阴影只会画成方框，圆角就白做了；
-   · 前端 body 透明（`body.peek-body`）；
-   · 缩放**改窗口尺寸**而不是改 CSS transform —— 这才是"连窗口一起缩放"的手感，
-     也是截图时最需要的行为（窗口边缘始终贴着图）。 */
+   0.10.0 起它是**贴图板**，不是"单张大图"：
+   · 想贴几张就贴几张（Q 键位/右键/中键各开一扇，彼此独立）；
+   · 默认置顶、Ctrl+滚轮调不透明度、双击撕掉；
+   · **关掉软件 / 重启电脑后，上次没手动关的贴图会自己回来**（`peeks.json`）。
 
-/// 无边框窗口的默认长边（DIP）。和果核看图同一个数：342。
+   三种来源（素材库 / 截图 / 剪贴板）在窗口看来完全一样：都是一条 `PeekItem`。 */
+
 const PEEK_LONG_EDGE: f64 = 342.0;
-/// 长边允许范围（逻辑像素）：再小点不到、再大就是放大糊图
 const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
+const CLIP_HISTORY: usize = 10;
 
-/// 图片比例 → 窗口逻辑尺寸。未知尺寸按 4:3 兜底（和瓦片骨架同一口径）。
+/// 一张"可以贴到屏幕上"的图
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeekItem {
+    src: String,
+    w: u32,
+    h: u32,
+    /// 磁盘上的真实文件（Ctrl+C 复制原图 / Ctrl+S 另存都靠它）
+    path: String,
+    name: String,
+    /// 素材的全局 id（0 = 磁盘文件）。换图后要写回存档，靠它才能重启还原成"素材模式"
+    gid: i64,
+}
+
+/// 一扇贴图的"存档"：重启后靠它原样恢复
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PeekRecall {
+    label: String,
+    /// `asset` = 素材库里的（重开走 thumb://，快）；`file` = 磁盘文件（截图/剪贴板）
+    kind: String,
+    path: String,
+    /// 素材的全局 id（0 = 文件模式）
+    gid: i64,
+    x: i32,
+    y: i32,
+    /// 逻辑长边（DIP）
+    long_edge: f64,
+    top: bool,
+    opacity: f64,
+}
+
+impl Default for PeekRecall {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            kind: "file".into(),
+            path: String::new(),
+            gid: 0,
+            x: 0,
+            y: 0,
+            long_edge: PEEK_LONG_EDGE,
+            top: true,
+            opacity: 1.0,
+        }
+    }
+}
+
+/* peekfile:// 的可信文件表。**只放我们自己刚写出来的文件**（剪贴板历史、截图临时文件），
+   不接受任意路径：这个协议要是能读全盘，WebView 里一段脚本就能把用户文件发出去。 */
+static MEDIA: OnceLock<Mutex<HashMap<u64, PathBuf>>> = OnceLock::new();
+static MEDIA_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn media_url(path: &Path) -> String {
+    let t = MEDIA_SEQ.fetch_add(1, Ordering::Relaxed);
+    let m = MEDIA.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() > 128 {
+        g.clear();
+    }
+    g.insert(t, path.to_path_buf());
+    format!("http://peekfile.localhost/{t}")
+}
+
+/// 程序所在目录（截图目录、剪贴板缓存都放它下面 —— owner 定的位置）
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn shot_dir() -> PathBuf {
+    exe_dir().join("screenshots")
+}
+
+fn clip_cache_dir() -> PathBuf {
+    exe_dir().join("clipboard-cache")
+}
+
+fn mime_of(p: &Path) -> &'static str {
+    match p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" | "jpe" | "jfif" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    }
+}
+
 fn peek_size_for(w: u32, h: u32, long_edge: f64) -> (f64, f64) {
     let (w, h) = if w > 0 && h > 0 { (w as f64, h as f64) } else { (4.0, 3.0) };
     let long = long_edge.clamp(PEEK_MIN_EDGE, PEEK_MAX_EDGE);
@@ -1419,7 +1506,6 @@ fn peek_size_for(w: u32, h: u32, long_edge: f64) -> (f64, f64) {
     }
 }
 
-/// 把窗口居中到鼠标所在的那块屏（双屏用户常在副屏截图，居中到主屏就跑到另一边去了）
 fn peek_center_on_cursor(win: &tauri::WebviewWindow) {
     let Ok(cur) = win.cursor_position() else { return };
     let Ok(size) = win.outer_size() else { return };
@@ -1432,7 +1518,7 @@ fn peek_center_on_cursor(win: &tauri::WebviewWindow) {
             && cur.y >= p.y as f64
             && cur.y < (p.y + s.height as i32) as f64
     });
-    let (cx, cy) = match m {
+    let (mut cx, mut cy) = match m {
         Some(m) => {
             let p = m.position();
             let s = m.size();
@@ -1441,15 +1527,17 @@ fn peek_center_on_cursor(win: &tauri::WebviewWindow) {
                 p.y as f64 + (s.height as f64 - size.height as f64) / 2.0,
             )
         }
-        None => (
-            cur.x - size.width as f64 / 2.0,
-            cur.y - size.height as f64 / 2.0,
-        ),
+        None => (cur.x - size.width as f64 / 2.0, cur.y - size.height as f64 / 2.0),
     };
+    /* 级联错位：不这样的话连开三张会**严丝合缝叠在一起**，
+       用户以为只开了一张（实测就是这样）。每张往右下挪 28px，绕 6 个循环回来。 */
+    let n = peeks().lock().map(|g| g.len().saturating_sub(1)).unwrap_or(0) % 6;
+    let step = 28.0 * n as f64;
+    cx += step;
+    cy += step;
     let _ = win.set_position(tauri::PhysicalPosition::new(cx.round(), cy.round()));
 }
 
-/// 从 `ids` 里截出最多 `cap` 个，并让 `index` 落在窗口内。
 fn trim_around(ids: &[i64], index: usize, cap: usize) -> (Vec<i64>, usize) {
     let i = index.min(ids.len().saturating_sub(1));
     if ids.len() <= cap {
@@ -1460,66 +1548,172 @@ fn trim_around(ids: &[i64], index: usize, cap: usize) -> (Vec<i64>, usize) {
     (ids[start..start + cap].to_vec(), i - start)
 }
 
-/// 开一扇无边框看图窗口。`ids` 是这次浏览的整个集合（方向键在其中切换），`index` 是当前那张。
-///
-/// **必须是 `async fn`**（六个 peek 命令都是）：同步命令跑在主线程上，
-/// 而 `WebviewWindowBuilder::build()` / `set_size()` / `set_position()` 都要回主线程执行，
-/// 于是它们等自己 —— 自死锁。症状很迷惑：窗口对象被建出来了（能枚举、能截图），
-/// 但里面什么都不渲染、`on_page_load` 永不触发、命令也永不返回（日志停在调用前一行）。
-#[tauri::command]
-async fn am_peek_open(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-    index: usize,
-    // 上次用的长边（DIP）；前端从 localStorage 里带过来，没有就用默认 342
-    long_edge: Option<f64>,
-) -> Result<(), String> {
-    if ids.is_empty() {
-        return Err("没有可看的素材".into());
+fn item_of_file(p: &Path) -> Option<PeekItem> {
+    let (w, h) = screen::dims(p);
+    Some(PeekItem {
+        src: media_url(p),
+        w,
+        h,
+        path: p.to_string_lossy().to_string(),
+        name: p.file_name()?.to_string_lossy().to_string(),
+        gid: 0,
+    })
+}
+
+fn items_of_assets(app: &App, ids: &[i64]) -> Vec<PeekItem> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Ok(Some(a)) = app.asset(*id) else { continue };
+        let (w, h) = (a.width.unwrap_or(0).max(0) as u32, a.height.unwrap_or(0).max(0) as u32);
+        out.push(PeekItem {
+            src: format!("http://thumb.localhost/{}?px=1600&r={}", a.id, a.mtime),
+            w,
+            h,
+            path: a.path.clone(),
+            name: a.name.clone(),
+            gid: *id,
+        });
     }
-    /* 上限 600 个，且**围着当前这张截窗**：直接 `take(600)` 会把"第 800 个"截成第 599 个，
-       用户按 B 看到的是一张完全不相干的图（而且不报错）。 */
-    let (ids, i) = trim_around(&ids, index, 600);
-    // 只在锁里取尺寸，拿到立刻放开 —— 建窗口要走主线程，别在持锁期间干慢事
-    let (w, h) = {
-        let a = lock(&state);
-        match a.asset(ids[i])? {
-            Some(x) => (x.width.unwrap_or(0).max(0) as u32, x.height.unwrap_or(0).max(0) as u32),
-            None => return Err("这张素材已经不在库里了".into()),
+    out
+}
+
+/* ---------------- 贴图存档（重启恢复） ---------------- */
+
+static PEEKS: OnceLock<Mutex<Vec<PeekRecall>>> = OnceLock::new();
+static PEEK_SEQ: AtomicU64 = AtomicU64::new(1);
+static LAST_PERSIST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// 正在退出：这时候贴图窗口被销毁**不删存档**（下次开机要还原）
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+fn peeks() -> &'static Mutex<Vec<PeekRecall>> {
+    PEEKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn peeks_file() -> PathBuf {
+    LOG_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| exe_dir())
+        .join("peeks.json")
+}
+
+fn load_peeks() -> Vec<PeekRecall> {
+    std::fs::read_to_string(peeks_file())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<PeekRecall>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 原子写（先写 .tmp 再改名）：写到一半掉电也不会留一个坏 JSON，
+/// 坏掉的后果是"上次贴的图全没了"，用户没有任何办法找回来。
+fn save_peeks() {
+    let list = peeks().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let path = peeks_file();
+    let Ok(body) = serde_json::to_string_pretty(&list) else { return };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// 拖动/缩放时高频触发，节流到 350ms 一次；关闭窗口或退出时走 `save_peeks` 立即落盘
+fn save_peeks_throttled() {
+    let mut last = LAST_PERSIST.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    if let Some(t) = *last {
+        if now.duration_since(t) < Duration::from_millis(350) {
+            return;
         }
-    };
-    let (lw, lh) = peek_size_for(w, h, long_edge.unwrap_or(PEEK_LONG_EDGE));
-    if let Some(old) = app.get_webview_window("peek") {
+    }
+    *last = Some(now);
+    drop(last);
+    save_peeks();
+}
+
+fn peek_touch<F: FnOnce(&mut PeekRecall)>(label: &str, f: F) {
+    {
+        let mut g = peeks().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = g.iter_mut().find(|r| r.label == label) {
+            f(r);
+        }
+    }
+    save_peeks_throttled();
+}
+
+fn next_label() -> String {
+    let n = PEEK_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("peek-{n}")
+}
+
+/// 存档 → 可显示的条目。拿不到就返回 None（文件被删 / 换了盘），
+/// 这条会被安静丢掉 —— 比留一扇空白窗口好。
+fn recall_to_item(app: &AppHandle, rec: &PeekRecall) -> Option<PeekItem> {
+    let p = Path::new(&rec.path);
+    if !p.is_file() {
+        return None;
+    }
+    if rec.kind == "asset" && rec.gid > 0 {
+        let st = app.state::<AppState>();
+        let a = lock(&st);
+        if let Ok(Some(x)) = a.asset(rec.gid) {
+            if x.path == rec.path {
+                let (w, h) = (x.width.unwrap_or(0).max(0) as u32, x.height.unwrap_or(0).max(0) as u32);
+                return Some(PeekItem {
+                    src: format!("http://thumb.localhost/{}?px=1600&r={}", x.id, x.mtime),
+                    w,
+                    h,
+                    path: x.path.clone(),
+                    name: x.name.clone(),
+                    gid: rec.gid,
+                });
+            }
+        }
+    }
+    // 文件模式：WebView 能直接画的格式才贴（PSD/RAW 贴出来是空白）
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "avif") {
+        return None;
+    }
+    item_of_file(p)
+}
+
+/// 开一扇贴图窗口（三种来源 + 重启恢复共用这一条路）
+async fn spawn_peek(
+    app: &AppHandle,
+    item: PeekItem,
+    rec: PeekRecall,
+    restore: bool,
+) -> Result<(), String> {
+    let (lw, lh) = peek_size_for(item.w, item.h, rec.long_edge);
+    if let Some(old) = app.get_webview_window(&rec.label) {
         let _ = old.close();
     }
-    /* 启动数据用**初始化脚本**注入，不走 URL。
-       踩过两次：`WebviewUrl::App` 收的是 PathBuf，`index.html#/peek?ids=…` 与
-       `index.html?peek=1&ids=…` 都让新窗口全透明、连 on_page_load 都不触发
-       （runtime.log 里只有 `peek open`，没有 `peek page`）。
-       换成纯 `index.html` + `initialization_script` 之后导航正常，
-       而且省掉了 URL 长度限制（一屏 200 个 id 就是 3 KB 的查询串）。 */
-    let ids_js = ids.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
-    let boot = format!("window.__AM_PEEK__ = {{ ids: [{ids_js}], i: {i} }};");
-    if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, &format!("peek open n={} i={i}", ids.len()));
-    }
-    let win = tauri::WebviewWindowBuilder::new(&app, "peek", tauri::WebviewUrl::App("index.html".into()))
-        .title("看图")
-        .inner_size(lw, lh)
-        .decorations(false)
-        /* **不透明**：窗口尺寸就是图片尺寸、图正好铺满，没有任何地方需要透出桌面。
-           反而 `transparent(true)` 在"运行中新建的窗口"上不工作（实测：窗口有了、
-           全透明，webview 却连 on_page_load 都不触发）。果核看图的窗口也是方的。 */
-        .transparent(false)
-        .shadow(false)
-        .resizable(true)
-        .maximizable(false)
-        .minimizable(false)
-        .initialization_script(&boot)
-        .build();
-    // build() 失败**不能 `?` 提前返回**：窗口对象可能已经建了一半（实测能枚举到窗口，
-    // 但里面什么都没有），错误又被前端 toast 吞掉，排查时完全不可见。先留证。
+    let boot = serde_json::json!({
+        "id": rec.label,
+        "items": [item],
+        "i": 0,
+        "opacity": rec.opacity,
+    });
+    let script = format!("window.__AM_PEEK__ = {boot};");
+    let b = tauri::WebviewWindowBuilder::new(
+        app,
+        &rec.label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("看图")
+    .inner_size(lw, lh)
+    .decorations(false)
+    // 透明：Ctrl+滚轮调不透明度才有意义（不透明窗只能调成"对着黑底变暗"）
+    .transparent(true)
+    .shadow(false)
+    .resizable(true)
+    .maximizable(false)
+    .minimizable(false)
+    .always_on_top(rec.top)
+    .skip_taskbar(true)
+    .initialization_script(&script);
+    let win = b.build();
+    // build() 失败**不能 `?` 提前返回**：窗口可能已经建了一半，错误又被前端 toast 吞掉
     let win = match win {
         Ok(w) => w,
         Err(e) => {
@@ -1529,13 +1723,85 @@ async fn am_peek_open(
             return Err(format!("无边框窗口创建失败：{e}"));
         }
     };
-    peek_center_on_cursor(&win);
+    if restore {
+        /* 存档里记的是**物理像素**（`Moved` 事件给的也是物理），
+           而 `WindowBuilder::position()` 收的是**逻辑像素** —— 直接喂过去在高 DPI 上
+           会偏移 25%（实测 983 变成 1229）。所以恢复用 set_position(Physical…)。 */
+        let _ = win.set_position(tauri::PhysicalPosition::new(rec.x, rec.y));
+    } else {
+        peek_center_on_cursor(&win);
+    }
+    /* 拖动/缩放要记进存档，否则重启后全都回到屏幕正中（用户摆的位置白摆了）。
+       拖动事件 ~60/s，所以走 `peek_touch` 的 350ms 节流。
+       注意：这是 `WebviewWindow` 上的方法，`WebviewWindowBuilder` 没有 `on_window_event`。 */
+    let lbl = rec.label.clone();
+    let sc0 = win.scale_factor().unwrap_or(1.0);
+    win.on_window_event(move |event| match event {
+        tauri::WindowEvent::Moved(p) => {
+            peek_touch(&lbl, |r| {
+                r.x = p.x;
+                r.y = p.y;
+            });
+        }
+        tauri::WindowEvent::Resized(s) => {
+            if s.width > 0 && s.height > 0 {
+                let long = (s.width.max(s.height) as f64 / sc0).round();
+                peek_touch(&lbl, |r| r.long_edge = long);
+            }
+        }
+        _ => {}
+    });
+    // 位置/尺寸变了就记下来（下次开机原地还原）
+    let scale = win.scale_factor().unwrap_or(1.0);
+    if let Ok(pos) = win.outer_position() {
+        peek_touch(&rec.label, |r| {
+            r.x = pos.x;
+            r.y = pos.y;
+        });
+    }
+    let _ = scale;
     let _ = win.show();
     let _ = win.set_focus();
     Ok(())
 }
 
-/// 缩放窗口（**连窗口一起缩放**，锚定窗口中心）—— 滚轮走这里。
+/// 开一扇无边框看图窗口（素材）。`ids` 是这次浏览的整个集合。
+///
+/// **必须是 `async fn`**：同步命令跑在主线程上，而 `WebviewWindowBuilder::build()` /
+/// `set_size()` 又要回主线程执行 —— 于是它们等自己，自死锁（见 WORKLOG §14.3）。
+#[tauri::command]
+async fn am_peek_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    index: usize,
+    long_edge: Option<f64>,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("没有可看的素材".into());
+    }
+    let (ids, i) = trim_around(&ids, index, 600);
+    let items = {
+        let a = lock(&state);
+        items_of_assets(&a, &ids)
+    };
+    let Some(item) = items.get(i).cloned() else {
+        return Err("这张素材已经不在库里了".into());
+    };
+    let rec = PeekRecall {
+        label: next_label(),
+        kind: "asset".into(),
+        path: item.path.clone(),
+        gid: ids.get(i).copied().unwrap_or(0),
+        long_edge: long_edge.unwrap_or(PEEK_LONG_EDGE),
+        ..Default::default()
+    };
+    peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
+    save_peeks();
+    spawn_peek(&app, item, rec, false).await
+}
+
+/// 缩放窗口（连窗口一起缩放，锚定中心）
 #[tauri::command]
 async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     if !(0.5..=2.0).contains(&step) {
@@ -1550,7 +1816,6 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     let long = w.max(h);
     let min = PEEK_MIN_EDGE * scale;
     let max = PEEK_MAX_EDGE * scale;
-    // 撞到上下限时按同一比例回拉，形状不能变
     let k = if long < min {
         min / long
     } else if long > max {
@@ -1562,18 +1827,17 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     h = (h * k).round().max(24.0);
     let nx = (pos.x as f64 + (size.width as f64 - w) / 2.0).round();
     let ny = (pos.y as f64 + (size.height as f64 - h) / 2.0).round();
-    let r = win.set_size(tauri::PhysicalSize::new(w, h)).and_then(|_| {
-        win.set_position(tauri::PhysicalPosition::new(nx, ny))
+    win.set_size(tauri::PhysicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(nx, ny)).map_err(|e| e.to_string())?;
+    peek_touch(win.label(), |r| {
+        r.long_edge = (w.max(h) / scale).round();
+        r.x = nx as i32;
+        r.y = ny as i32;
     });
-    if let Err(e) = &r {
-        if let Some(d) = LOG_DIR.get() {
-            log_runtime(d, &format!("peek zoom FAIL {e}"));
-        }
-    }
-    r.map_err(|e| e.to_string())
+    Ok(())
 }
 
-/// 换图时按新图比例改窗口尺寸（长边保持当前大小，中心不动）。
+/// 换图时按新图比例改窗口尺寸（长边保持当前大小，中心不动）
 #[tauri::command]
 async fn am_peek_ratio(win: tauri::Window, w: u32, h: u32) -> Result<(), String> {
     let size = win.outer_size().map_err(|e| e.to_string())?;
@@ -1582,35 +1846,486 @@ async fn am_peek_ratio(win: tauri::Window, w: u32, h: u32) -> Result<(), String>
     let (nw, nh) = peek_size_for(w, h, long);
     let nx = (pos.x as f64 + (size.width as f64 - nw) / 2.0).round();
     let ny = (pos.y as f64 + (size.height as f64 - nh) / 2.0).round();
-    win.set_size(tauri::PhysicalSize::new(nw.round(), nh.round()))
-        .map_err(|e| e.to_string())?;
-    win.set_position(tauri::PhysicalPosition::new(nx, ny))
-        .map_err(|e| e.to_string())?;
+    win.set_size(tauri::PhysicalSize::new(nw.round(), nh.round())).map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(nx, ny)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 关掉这扇贴图（用户主动关 = 从存档里删掉，下次开机不再回来）
+#[tauri::command]
+async fn am_peek_close(win: tauri::Window) -> Result<(), String> {
+    let label = win.label().to_string();
+    peek_forget(&label);
+    win.close().map_err(|e| e.to_string())
+}
+
+fn peek_forget(label: &str) {
+    {
+        let mut g = peeks().lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|r| r.label != label);
+    }
+    save_peeks();
+}
+
+#[tauri::command]
+async fn am_peek_top(win: tauri::Window, on: bool) -> Result<bool, String> {
+    win.set_always_on_top(on).map_err(|e| e.to_string())?;
+    peek_touch(win.label(), |r| r.top = on);
+    Ok(on)
+}
+
+/// 不透明度（Ctrl+滚轮）。窗口是真透明的，所以这里只是让前端把画布调淡，
+/// 存档里记一份，下次恢复还是这个浓度。
+#[tauri::command]
+fn am_peek_opacity(win: tauri::Window, v: f64) -> Result<(), String> {
+    let v = v.clamp(0.15, 1.0);
+    peek_touch(win.label(), |r| r.opacity = v);
+    Ok(())
+}
+
+/// 窗口里换了图（←/→）：把存档指向新文件，重启后还原的是最后看到的那张
+#[tauri::command]
+fn am_peek_track(win: tauri::Window, path: String, gid: i64) {
+    peek_touch(win.label(), |r| {
+        r.path = path;
+        r.gid = gid;
+        r.kind = if gid > 0 { "asset".into() } else { "file".into() };
+    });
+}
+
+/// 开机/启动恢复上次没关的贴图
+async fn restore_peeks(app: AppHandle) {
+    let list = load_peeks();
+    if list.is_empty() {
+        return;
+    }
+    {
+        let mut g = peeks().lock().unwrap_or_else(|e| e.into_inner());
+        g.clear();
+    }
+    // 标签序号要从已有存档之后接着走，否则新开的窗口会和恢复的撞 label
+    let mut max_seq = 0u64;
+    for rec in &list {
+        if let Some(n) = rec.label.strip_prefix("peek-").and_then(|x| x.parse::<u64>().ok()) {
+            max_seq = max_seq.max(n);
+        }
+    }
+    PEEK_SEQ.store(max_seq + 1, Ordering::Relaxed);
+
+    let mut alive: Vec<PeekRecall> = Vec::new();
+    for rec in list {
+        let Some(item) = recall_to_item(&app, &rec) else { continue };
+        if spawn_peek(&app, item, rec.clone(), true).await.is_ok() {
+            alive.push(rec);
+        }
+    }
+    {
+        let mut g = peeks().lock().unwrap_or_else(|e| e.into_inner());
+        *g = alive;
+    }
+    save_peeks();
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("peeks restored: {}", peeks().lock().map(|g| g.len()).unwrap_or(0)));
+    }
+}
+
+/* ---------------- 复制 / 另存 ---------------- */
+
+/// 复制**原文件**（CF_HDROP：粘到 PS / 资源管理器是文件，不是位图）
+#[tauri::command]
+fn am_peek_copy_file(paths: Vec<String>) -> Result<(), String> {
+    let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    fsops::copy_files_to_clipboard(&list)
+}
+
+#[tauri::command]
+fn am_clip_text(text: String) -> Result<(), String> {
+    clipimg::set_text(&text)
+}
+
+/// 另存为：把 `src` 拷到用户选的位置。返回最终路径（取消 = None）
+#[tauri::command]
+async fn am_save_as(src: String, suggest: Option<String>) -> Result<Option<String>, String> {
+    let from = PathBuf::from(&src);
+    if !from.is_file() {
+        return Err("原文件已经不在了".into());
+    }
+    let name = suggest
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| from.file_name().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "image.png".to_string());
+    let picked = rfd::AsyncFileDialog::new().set_file_name(&name).save_file().await;
+    let Some(handle) = picked else { return Ok(None) };
+    let to = handle.path().to_path_buf();
+    if to != from {
+        std::fs::copy(&from, &to).map_err(|e| format!("写入失败：{e}"))?;
+    }
+    Ok(Some(to.to_string_lossy().to_string()))
+}
+
+/* ---------------- 剪贴板图片（F3，带 10 张历史） ---------------- */
+
+fn clip_history() -> Vec<PathBuf> {
+    let dir = clip_cache_dir();
+    let mut out: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
+                .filter_map(|e| {
+                    let t = e.metadata().ok()?.modified().ok()?;
+                    Some((t, e.path()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, p)| p).collect()
+}
+
+fn prune_clip_history() {
+    for p in clip_history().into_iter().skip(CLIP_HISTORY) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+async fn clip_peek_begin(app: AppHandle) -> Result<(), String> {
+    let (_w, _h, png) = clipimg::get_png()?;
+    let dir = clip_cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了剪贴板缓存目录：{e}"))?;
+    let (stamp, _) = screen::local_stamp();
+    let path = dir.join(format!("clip-{}.png", stamp.replace(' ', "_").replace(':', "-")));
+    std::fs::write(&path, &png).map_err(|e| format!("写剪贴板缓存失败：{e}"))?;
+    prune_clip_history();
+
+    // 历史一起带过去：在这扇窗里按 ←/→ 就能翻之前 10 张
+    let mut items: Vec<PeekItem> = Vec::new();
+    let mut idx = 0usize;
+    for p in clip_history() {
+        if let Some(it) = item_of_file(&p) {
+            if it.path == path.to_string_lossy() {
+                idx = items.len();
+            }
+            items.push(it);
+        }
+    }
+    if items.is_empty() {
+        return Err("剪贴板图片存不下来".into());
+    }
+    let rec = PeekRecall {
+        label: next_label(),
+        kind: "file".into(),
+        path: path.to_string_lossy().to_string(),
+        long_edge: PEEK_LONG_EDGE,
+        ..Default::default()
+    };
+    peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
+    save_peeks();
+    spawn_peek(&app, items[idx].clone(), rec, false).await
+}
+
+/// F3：把剪贴板里的图片贴到屏幕上（并进历史）
+#[tauri::command]
+async fn am_clip_peek(app: AppHandle) -> Result<(), String> {
+    clip_peek_begin(app).await
+}
+
+/// 剪贴板历史：`(路径, 宽, 高)`，最新在前
+#[tauri::command]
+fn am_clip_history() -> Result<Vec<(String, u32, u32)>, String> {
+    Ok(clip_history()
+        .into_iter()
+        .map(|p| {
+            let (w, h) = screen::dims(&p);
+            (p.to_string_lossy().to_string(), w, h)
+        })
+        .collect())
+}
+
+/* ---------------- 截图（F1 / Alt+F1） ---------------- */
+
+struct SnipState {
+    shot: screen::Shot,
+    mode: String,
+}
+
+static SNIP: OnceLock<Mutex<Option<SnipState>>> = OnceLock::new();
+
+fn snip_slot() -> &'static Mutex<Option<SnipState>> {
+    SNIP.get_or_init(|| Mutex::new(None))
+}
+
+async fn snip_begin(app: AppHandle, mode: &str) -> Result<(), String> {
+    // 截屏要在开覆盖窗**之前**：覆盖窗一开，截到的就是它自己
+    let shot = screen::capture_virtual()?;
+    let png = shot.png()?;
+    let tmp = std::env::temp_dir().join(format!(
+        "am-snip-{}.png",
+        std::process::id() as u64 * 1000 + (db::now_ts() as u64 % 1000)
+    ));
+    std::fs::write(&tmp, &png).map_err(|e| format!("写截图临时文件失败：{e}"))?;
+
+    let scale = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let (vx, vy, vw, vh) = (shot.x, shot.y, shot.w, shot.h);
+    *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(SnipState { shot, mode: mode.to_string() });
+
+    if let Some(old) = app.get_webview_window("snip") {
+        let _ = old.close();
+    }
+    let boot = serde_json::json!({
+        "src": media_url(&tmp),
+        "scale": scale,
+        "x": vx, "y": vy, "w": vw, "h": vh,
+        "mode": mode,
+    });
+    let script = format!("window.__AM_SNIP__ = {boot};");
+    tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
+        .title("截图")
+        .inner_size(vw as f64 / scale, vh as f64 / scale)
+        .position(vx as f64 / scale, vy as f64 / scale)
+        .decorations(false)
+        .transparent(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .initialization_script(&script)
+        .build()
+        .map_err(|e| {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("snip build FAIL {e}"));
+            }
+            format!("截图窗口创建失败：{e}")
+        })?;
+    Ok(())
+}
+
+fn remember_shot_dir(app: &AppHandle) {
+    let dir = shot_dir().to_string_lossy().to_string();
+    let st = app.state::<AppState>();
+    let mut a = lock(&st);
+    if a.lib_for_path(&dir).is_some() {
+        let mut set = HashSet::new();
+        set.insert(PathBuf::from(&dir));
+        refresh_dirs(&mut a, &set);
+        return;
+    }
+    if a.lib_count().unwrap_or(0) >= 3 {
+        return; // 库满了：截图照样存盘，只是不自动进库
+    }
+    if let Err(e) = a.scan(&dir, |_p| {}) {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("截图目录加入素材库失败：{e}"));
+        }
+    }
+}
+
+/// 确认选区。`x/y/w/h` 是截图窗口里的 CSS 像素，这里换算成屏幕物理像素再裁。
+#[tauri::command]
+async fn am_snip_commit(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    save_as: Option<bool>,
+) -> Result<Option<String>, String> {
+    let (shot, mode) = {
+        let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
+        match g.take() {
+            Some(s) => (s.shot, s.mode),
+            None => return Err("截图数据已经过期，请重新按一次快捷键".into()),
+        }
+    };
+    let scale = app
+        .get_webview_window("snip")
+        .and_then(|v| v.scale_factor().ok())
+        .unwrap_or(1.0);
+    let img = shot
+        .crop(
+            (x * scale).round() as i32,
+            (y * scale).round() as i32,
+            (w * scale).round() as i32,
+            (h * scale).round() as i32,
+        )
+        .ok_or_else(|| "选区太小了".to_string())?;
+    let png = screen::png_of(&img)?;
+
+    /* 顺序很重要：**先落盘/进剪贴板，成功了才关窗**。
+       反过来的话，任何一步失败都会表现为"窗口一闪就没了、什么都没留下"，
+       用户完全无从判断（我就是这么被坑了一次）。失败时保持覆盖层不关，
+       前端把原因显示在提示条上。 */
+    if mode == "copy" {
+        clipimg::set_png(&png).map_err(|e| {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("snip copy FAIL {e}"));
+            }
+            e
+        })?;
+        if let Some(win) = app.get_webview_window("snip") {
+            let _ = win.close();
+        }
+        return Ok(None);
+    }
+
+    let dir = shot_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("snip mkdir FAIL {dir:?} {e}"));
+        }
+        format!("建不了截图目录 {}：{e}", dir.display())
+    })?;
+    let (stamp, _) = screen::local_stamp();
+    let default_name = format!("截图 {}.png", stamp);
+    let target = if save_as.unwrap_or(false) {
+        let picked = rfd::AsyncFileDialog::new()
+            .set_directory(&dir)
+            .set_file_name(&default_name)
+            .save_file()
+            .await;
+        match picked {
+            Some(h) => h.path().to_path_buf(),
+            None => return Ok(None),
+        }
+    } else {
+        dir.join(&default_name)
+    };
+    std::fs::write(&target, &png).map_err(|e| {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("snip write FAIL {target:?} {e}"));
+        }
+        format!("写截图失败 {}：{e}", target.display())
+    })?;
+    let saved = target.to_string_lossy().to_string();
+    if let Some(win) = app.get_webview_window("snip") {
+        let _ = win.close();
+    }
+
+    // 顺手进剪贴板（Snipaste 的行为：截完就能直接粘）
+    let _ = clipimg::set_png(&png);
+    remember_shot_dir(&app);
+    let _ = app.emit("shot://saved", saved.clone());
+    Ok(Some(saved))
+}
+
+#[tauri::command]
+async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
+    *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Some(win) = app.get_webview_window("snip") {
+        let _ = win.close();
+    }
     Ok(())
 }
 
 #[tauri::command]
-async fn am_peek_close(win: tauri::Window) -> Result<(), String> {
-    win.close().map_err(|e| e.to_string())
+async fn am_snip_start(app: AppHandle, mode: Option<String>) -> Result<(), String> {
+    snip_begin(app, mode.as_deref().unwrap_or("save")).await
 }
 
-/// 置顶（对着参考图改稿时，它必须压在 PS 上面）
-#[tauri::command]
-async fn am_peek_top(win: tauri::Window, on: bool) -> Result<bool, String> {
-    win.set_always_on_top(on).map_err(|e| e.to_string())?;
-    Ok(on)
+/* ---------------- 系统级快捷键（F1 / F3 / Alt+F1） ---------------- */
+
+static HOTKEYS: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
+
+fn hotkey_slot() -> &'static Mutex<Vec<(String, String)>> {
+    HOTKEYS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// 无边框窗口里双击 / 按 F11 的"铺满屏幕"（不抢任务栏，仍可 Esc 退出）
+fn dispatch_hotkey(app: &AppHandle, accel: &str) {
+    let action = hotkey_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(accel))
+        .map(|(_, b)| b.clone());
+    let Some(action) = action else {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("hotkey {accel} -> 没有对应动作（表里没有）"));
+        }
+        return;
+    };
+    let app = app.clone();
+    // **必须 spawn**：快捷键回调在主线程上，而开窗口 / 弹对话框都要回主线程，直接做就是自死锁
+    tauri::async_runtime::spawn(async move {
+        let r = match action.as_str() {
+            "snip" => snip_begin(app, "save").await,
+            "snip_copy" => snip_begin(app, "copy").await,
+            "clip_peek" => clip_peek_begin(app).await,
+            _ => Ok(()),
+        };
+        if let Err(e) = r {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("hotkey {action} FAIL {e}"));
+            }
+        }
+    });
+}
+
+/// 设置面板改键后调这个：先全注销再按新表注册。返回注册失败的 accelerators。
 #[tauri::command]
-async fn am_peek_fullscreen(win: tauri::Window, on: bool) -> Result<bool, String> {
-    win.set_fullscreen(on).map_err(|e| e.to_string())?;
-    Ok(on)
+async fn am_hotkeys_set(app: AppHandle, list: Vec<(String, String)>) -> Result<Vec<String>, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+
+    let mut ok_list: Vec<(String, String)> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for (accel, action) in list {
+        let a = accel.trim().to_string();
+        if a.is_empty() {
+            continue;
+        }
+        match a.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+            Ok(sc) => match gs.register(sc) {
+                Ok(_) => ok_list.push((a, action)),
+                Err(_) => failed.push(a),
+            },
+            Err(_) => failed.push(a),
+        }
+    }
+    if let Some(d) = LOG_DIR.get() {
+        let ok: Vec<String> = ok_list.iter().map(|(a, act)| format!("{a}={act}")).collect();
+        log_runtime(d, &format!("hotkeys ok=[{}] failed=[{}]", ok.join(", "), failed.join(", ")));
+    }
+    *hotkey_slot().lock().unwrap_or_else(|e| e.into_inner()) = ok_list;
+    Ok(failed)
+}
+
+/* ---------------- peekfile:// 协议 ---------------- */
+
+fn serve_media(req_path: &str) -> Response<Vec<u8>> {
+    let token: u64 = req_path.trim_start_matches('/').parse().unwrap_or(0);
+    let path = {
+        let m = MEDIA.get_or_init(|| Mutex::new(HashMap::new()));
+        let g = m.lock().unwrap_or_else(|e| e.into_inner());
+        g.get(&token).cloned()
+    };
+    let Some(path) = path else { return not_found() };
+    match std::fs::read(&path) {
+        Ok(bytes) => Response::builder()
+            .status(200)
+            .header(header::CONTENT_TYPE, mime_of(&path))
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(bytes)
+            .unwrap(),
+        Err(_) => not_found(),
+    }
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(WatchState(Mutex::new(None)))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        dispatch_hotkey(app, &shortcut.to_string());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             /* 数据目录可配置（照 FontManager 的「字体库文件夹」）：
                `%LOCALAPPDATA%\AssetManager\data-root.json` 记着自定义位置；
@@ -1666,6 +2381,24 @@ fn main() {
                         let _ = handle.emit("fs://changed", Vec::<String>::new());
                     }
                 }
+                /* 顺手补一批主色板。为什么放这儿：0.8.0 的色板只写进了预览那条路径，
+                   65k 张图的 palette 全是 NULL（顶栏颜色筛选因此一直是空的）。
+                   现在每次启动补 1500 张（读的是已缓存的 256 档缩略图，1–3ms/张），
+                   几十次启动就补齐了，也不占用户时间。 */
+                if let Ok((done, _left)) = a.fill_palette(1500) {
+                    if done > 0 {
+                        let _ = handle.emit("fs://changed", Vec::<String>::new());
+                    }
+                }
+            });
+
+            /* 恢复上次没关的贴图（F3 贴的参考图、截图……）。
+               等主窗先画出来再开：一上来糊十几扇窗，用户会以为软件出问题了。
+               必须走 async runtime（建窗口不能在主线程上等自己）。 */
+            let h = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(900));
+                tauri::async_runtime::spawn(async move { restore_peeks(h).await });
             });
             Ok(())
         })
@@ -1677,6 +2410,7 @@ fn main() {
         //   ① 短锁：只取「路径 + 要不要回写」，微秒级；
         //   ② 不持锁：查缓存 / 解码 / 编码（几十到几百毫秒，互不阻塞）；
         //   ③ 短锁：仅在 key 或尺寸真的变了时写一行 —— 缓存命中是**零写入**。
+        .register_uri_scheme_protocol("peekfile", |_ctx, req| serve_media(req.uri().path()))
         .register_uri_scheme_protocol("thumb", |ctx, req| {
             let state = ctx.app_handle().state::<AppState>();
             let id: i64 = req
@@ -1735,6 +2469,18 @@ fn main() {
                         );
                         if need_dims {
                             let _ = app.set_dims_if_missing(id, o.width, o.height);
+                        }
+                        /* **主色板 / 指纹必须在这里写**：缩略图主路径是
+                           `ensure_path`（只出文件、不碰库），写库由这一层做。
+                           0.8.0 只把 palette 写进了 `ensure_for_asset`（那条路只有预览/预热走），
+                           结果 65k 张图 palette 全是 NULL —— 详情里的色板一栏永远不出现，
+                           顶栏按颜色筛也永远是空的。教训：**"算出来了"和"存进去了"是两件事**，
+                           两条写库路径都得写。 */
+                        if !o.palette.is_empty() {
+                            let _ = app.set_palette(id, &o.palette, &o.color);
+                        }
+                        if o.phash != 0 {
+                            let _ = app.set_phash(id, o.phash);
                         }
                     }
                     match std::fs::read(&o.path) {
@@ -1824,7 +2570,17 @@ fn main() {
             am_peek_ratio,
             am_peek_close,
             am_peek_top,
-            am_peek_fullscreen,
+            am_peek_opacity,
+            am_peek_track,
+            am_peek_copy_file,
+            am_clip_text,
+            am_clip_peek,
+            am_clip_history,
+            am_snip_start,
+            am_snip_commit,
+            am_snip_cancel,
+            am_save_as,
+            am_hotkeys_set,
             am_meta_missing,
             am_fill_palette,
             am_color_counts,
@@ -1860,7 +2616,12 @@ fn main() {
             let dir = LOG_DIR.get().cloned();
             if let Some(dir) = dir {
                 match &event {
-                    tauri::RunEvent::ExitRequested { .. } => log_runtime(&dir, "exit-requested"),
+                    tauri::RunEvent::ExitRequested { .. } => {
+                        // 先立旗：接下来贴图窗口被销毁是"关机/关软件"，**不能**从存档里删掉，
+                        // 否则重启后一扇都不会回来
+                        QUITTING.store(true, Ordering::SeqCst);
+                        log_runtime(&dir, "exit-requested")
+                    }
                     tauri::RunEvent::Exit => log_runtime(&dir, "exit"),
                     tauri::RunEvent::WindowEvent { event, .. } => {
                         if matches!(event, tauri::WindowEvent::Destroyed) {

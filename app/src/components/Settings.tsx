@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { HotkeyField } from "./HotkeyField";
+import { loadHotkeys, saveHotkeys, type HotkeySet } from "../lib/hotkeys";
 import { fmtSize, type Prefs, type Source, type WarmProgress } from "../types";
 import { Icon } from "./ui";
 import { DataFolderCard } from "./DataFolderCard";
@@ -93,6 +95,33 @@ export function Settings({
   const [refSum, setRefSum] = useState<[number, number] | null>(null);
   /* 每个库一个 DB 文件（T28）：用户要能看见"一个库一个文件" */
   const [libFiles, setLibFiles] = useState<[string, string, number][]>([]);
+  /* 系统级快捷键（F1/F3/Alt+F1）：改动立刻注册，注册失败的组合如实回显 */
+  const [hotkeys, setHotkeys] = useState<HotkeySet>(() => loadHotkeys());
+
+  /** 改一个系统快捷键：存起来 → 立刻重新注册三个 → 失败的单独说 */
+  const applyHotkey = useCallback(
+    async (which: keyof HotkeySet, accel: string) => {
+      const next = { ...hotkeys, [which]: accel };
+      setHotkeys(next);
+      saveHotkeys(next);
+      try {
+        const failed = await source.hotkeysSet([
+          [next.snip, "snip"],
+          [next.clip, "clip_peek"],
+          [next.snipCopy, "snip_copy"],
+        ]);
+        if (failed.length) {
+          onToast(`这些组合被别的软件占了：${failed.join("、")}`, true);
+        } else {
+          onToast(accel ? `已改为 ${accel}` : "已清空（这个功能暂时没有快捷键）");
+        }
+      } catch (e) {
+        onToast(String(e), true);
+      }
+    },
+    [hotkeys, onToast]
+  );
+
   /** 重建索引是重操作（几万文件要十几秒），点一次先变成"再点一次确认" */
   const [confirmRebuild, setConfirmRebuild] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -576,6 +605,39 @@ export function Settings({
         key: "shortcuts",
         title: "快捷键",
         rows: [
+          {
+            id: "hk-snip",
+            label: "截图（选完区存到截图目录）",
+            hint: "系统级：软件不在前台也能按",
+            kw: "截图 抓屏 snip screenshot f1 系统 全局",
+            node: (
+              <HotkeyField
+                value={hotkeys.snip}
+                onChange={(v) => void applyHotkey("snip", v)}
+              />
+            ),
+          },
+          {
+            id: "hk-copy",
+            label: "截图后直接复制（不落盘）",
+            hint: "选完区立刻进剪贴板，适合发消息",
+            kw: "截图 复制 剪贴板 alt f1 系统 全局",
+            node: (
+              <HotkeyField
+                value={hotkeys.snipCopy}
+                onChange={(v) => void applyHotkey("snipCopy", v)}
+              />
+            ),
+          },
+          {
+            id: "hk-clip",
+            label: "把剪贴板里的图用无边框看图打开",
+            hint: "最近 10 张会留在历史里，窗内按 ← → 翻",
+            kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局",
+            node: (
+              <HotkeyField value={hotkeys.clip} onChange={(v) => void applyHotkey("clip", v)} />
+            ),
+          },
           { id: "k1", label: "全屏预览选中的素材", kw: "空格 预览", node: <Kbd keys={["Space"]} /> },
           { id: "k2", label: "上一个 / 下一个", kw: "方向键 切换", node: <Kbd keys={["←", "→"]} /> },
           { id: "k3", label: "关闭预览 / 收起详情 / 关闭面板", kw: "esc 关闭 退出", node: <Kbd keys={["Esc"]} /> },
@@ -598,7 +660,7 @@ export function Settings({
             id: "ver",
             label: "版本",
             kw: "版本 version 号",
-            node: <span className="set-value mono">0.7.0 开发版</span>,
+            node: <span className="set-value mono">0.10.0 开发版</span>,
           },
           {
             id: "what",

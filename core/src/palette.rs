@@ -30,9 +30,20 @@ impl Palette {
 /// 从解码后的 RGBA 像素算主色板。`rgba` 长度不足时返回空结果（不做猜测）。
 pub fn compute(rgba: &[u8], w: u32, h: u32) -> Palette {
     let pixels = (w as usize) * (h as usize);
-    if pixels == 0 || rgba.len() < pixels * 4 {
+    if pixels == 0 {
         return Palette { hexes: Vec::new(), bucket: String::new() };
     }
+    /* 步长自适应：调用方可能给 RGB8（3 字节）也可能给 RGBA8（4 字节）。
+       以前只认 4 字节，而 `DynamicImage::as_raw()` 对 JPEG 给的是 **RGB8** ——
+       长度检查直接判空，于是 65k 张图的主色板一个都没算出来（0.8.0 到 0.10 一直是空）。
+       这类"参数语义"的坑不会报错，只会静默返回空。 */
+    let stride = if rgba.len() >= pixels * 4 {
+        4
+    } else if rgba.len() >= pixels * 3 {
+        3
+    } else {
+        return Palette { hexes: Vec::new(), bucket: String::new() };
+    };
     // 最多采 4096 个点：再多样本对结果没有影响，只是白花时间
     let step = ((pixels as f64 / 4096.0).sqrt().ceil() as usize).max(1);
 
@@ -43,8 +54,8 @@ pub fn compute(rgba: &[u8], w: u32, h: u32) -> Palette {
     while y < h as usize {
         let mut x = 0usize;
         while x < w as usize {
-            let i = (y * w as usize + x) * 4;
-            let a = rgba[i + 3];
+            let i = (y * w as usize + x) * stride;
+            let a = if stride == 4 { rgba[i + 3] } else { 255 };
             if a >= 16 {
                 let (r, g, b) = (rgba[i], rgba[i + 1], rgba[i + 2]);
                 bins[bin_index(r, g, b)] += 1;

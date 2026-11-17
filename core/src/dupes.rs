@@ -33,9 +33,18 @@ pub fn hash_file(path: &Path) -> std::io::Result<Vec<u8>> {
 /// 而相似检测的目的是"同一张图的不同版本"，aHash 对缩放/压缩已经足够稳
 /// （实测同一张图 384 档与 1024 档的 aHash 汉明距离通常 0–4）。
 pub fn ahash64(rgba: &[u8], w: u32, h: u32) -> i64 {
-    if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+    if w == 0 || h == 0 {
         return 0;
     }
+    // 同 `palette::compute`：RGB8 也要能算（3 或 4 字节步长）
+    let px = (w as usize) * (h as usize);
+    let stride = if rgba.len() >= px * 4 {
+        4
+    } else if rgba.len() >= px * 3 {
+        3
+    } else {
+        return 0;
+    };
     let mut cell = [0u32; 64];
     for gy in 0..8usize {
         let y0 = gy * h as usize / 8;
@@ -47,7 +56,7 @@ pub fn ahash64(rgba: &[u8], w: u32, h: u32) -> i64 {
             let mut n = 0u64;
             for y in y0..y1.min(h as usize) {
                 for x in x0..x1.min(w as usize) {
-                    let i = (y * w as usize + x) * 4;
+                    let i = (y * w as usize + x) * stride;
                     // 亮度用整数近似（R*2 + G*5 + B）/8
                     sum += (rgba[i] as u64 * 2 + rgba[i + 1] as u64 * 5 + rgba[i + 2] as u64) / 8;
                     n += 1;

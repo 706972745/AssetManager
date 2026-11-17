@@ -1543,7 +1543,7 @@ pub fn set_refs(c: &Connection, src_id: i64, rows: &[(String, Option<i64>, i32)]
 pub fn refs_pointing_to(c: &Connection, asset_id: i64, limit: i64) -> Res<Vec<RefRow>> {
     let mut st = c
         .prepare(
-            "SELECT r.src_id, a.name, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name,
+            "SELECT r.src_id, a.name, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name,
                     r.dst_path, COALESCE(dst.name, ''), r.dst_id, r.missing
              FROM refs r JOIN assets a ON a.id = r.src_id
              JOIN dirs d ON d.id = a.dir_id
@@ -1562,7 +1562,7 @@ pub fn refs_pointing_to(c: &Connection, asset_id: i64, limit: i64) -> Res<Vec<Re
 pub fn refs_of_project(c: &Connection, src_id: i64, limit: i64) -> Res<Vec<RefRow>> {
     let mut st = c
         .prepare(
-            "SELECT r.src_id, a.name, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name,
+            "SELECT r.src_id, a.name, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name,
                     r.dst_path, COALESCE(dst.name, ''), r.dst_id, r.missing
              FROM refs r JOIN assets a ON a.id = r.src_id
              JOIN dirs d ON d.id = a.dir_id
@@ -1592,7 +1592,7 @@ fn ref_row(r: &rusqlite::Row) -> rusqlite::Result<RefRow> {
 pub fn broken_refs(c: &Connection, limit: i64) -> Res<Vec<RefRow>> {
     let mut st = c
         .prepare(
-            "SELECT r.src_id, a.name, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name,
+            "SELECT r.src_id, a.name, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name,
                     r.dst_path, COALESCE(dst.name, ''), r.dst_id, r.missing
              FROM refs r JOIN assets a ON a.id = r.src_id
              JOIN dirs d ON d.id = a.dir_id
@@ -1609,7 +1609,7 @@ pub fn broken_refs(c: &Connection, limit: i64) -> Res<Vec<RefRow>> {
 pub fn assets_needing_refs(c: &Connection, limit: i64) -> Res<Vec<(i64, String, i64, i32)>> {
     let mut st = c
         .prepare(
-            "SELECT a.id, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name,
+            "SELECT a.id, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name,
                     a.size, a.kind
              FROM assets a JOIN dirs d ON d.id = a.dir_id
              WHERE a.missing=0 AND a.refs_at=0 AND a.kind IN (0,3,4,5) AND a.size <= ?2
@@ -1871,7 +1871,7 @@ pub fn set_hash_x(c: &Connection, id: i64, hash: &[u8]) -> Res<()> {
 pub fn assets_without_hash_paths(c: &Connection, limit: i64) -> Res<Vec<(i64, String, i64, i32)>> {
     let mut st = c
         .prepare(
-            "SELECT a.id, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name,
+            "SELECT a.id, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name,
                     a.size, a.kind
              FROM assets a JOIN dirs d ON d.id = a.dir_id
              WHERE a.missing=0 AND a.hash_x IS NULL AND a.size > 0
@@ -1890,7 +1890,7 @@ pub fn assets_without_hash_paths(c: &Connection, limit: i64) -> Res<Vec<(i64, St
 pub fn assets_without_palette_paths(c: &Connection, limit: i64) -> Res<Vec<(i64, String)>> {
     let mut st = c
         .prepare(
-            "SELECT a.id, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || a.name
+            "SELECT a.id, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || a.name
              FROM assets a JOIN dirs d ON d.id = a.dir_id
              WHERE a.missing=0 AND (a.palette IS NULL OR a.palette='') AND a.kind=0
              ORDER BY a.id ASC LIMIT ?1",
@@ -1951,7 +1951,7 @@ pub fn asset_id_by_name(c: &Connection, name: &str) -> Res<Option<i64>> {
 pub fn refs_using(c: &Connection, dst_id: i64, limit: i64) -> Res<Vec<(i64, String, String, i32)>> {
     let mut st = c
         .prepare(
-            "SELECT s.id, s.name, d.path || (CASE WHEN d.path LIKE '%\' THEN '' ELSE '\' END) || s.name,
+            "SELECT s.id, s.name, d.path || (CASE WHEN substr(d.path,-1) IN (char(92),'/') THEN '' ELSE char(92) END) || s.name,
                     r.missing
              FROM refs r
              JOIN assets s ON s.id = r.src_id

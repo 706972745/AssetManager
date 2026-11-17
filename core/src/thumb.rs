@@ -186,6 +186,7 @@ impl ThumbStore {
            用**缩略图**而不是原图算：色板和 aHash 都只需要"大致长什么样"，
            1024 档和原图算出来的结果对用户没有区别。 */
         let (tw, th) = (thumb.width(), thumb.height());
+        // `thumb` 是 RGB8（`resize` 的结果），`compute`/`ahash64` 现在按步长自适应认它
         let pal = crate::palette::compute(thumb.as_raw(), tw, th);
         let phash = crate::dupes::ahash64(thumb.as_raw(), tw, th);
         Ok(ThumbOut {

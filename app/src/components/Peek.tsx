@@ -1,69 +1,87 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { source } from "../data/source";
-import type { Asset } from "../types";
+import { ContextMenu, type CtxItem } from "./ContextMenu";
 
 /**
- * 无边框看图窗口（`#/peek?ids=1,2,3&i=0`）。
+ * 无边框看图窗口（UI 里叫「无边框看图」，也就是 owner 说的「贴图」——同一件事）。
  *
- * 形态照果核看图的「无边框模式」：**窗口就是那张图** —— 没有标题栏、没有边框、
- * 没有工具条，窗口尺寸由图片比例决定（后端算，长边 342 DIP 起）。
+ * 形态照果核看图的「无边框模式」：**窗口就是那张图** —— 没有标题栏、没有边框、没有工具条，
+ * 尺寸由图片比例决定（后端算，长边默认 342 DIP）。但它比果核多一层用法：
+ * **它是贴图板**，想贴几张贴几张，关软件/重启电脑后没手动关的会自己回来（后端 `peeks.json`）。
  *
- * 三条手感必须对齐（少一条就不是那个东西了）：
- * 1. **滚轮 = 连窗口一起缩放**，锚定窗口中心。不是 CSS transform —— 那样窗口边缘会
- *    脱离图片，截图时留一圈透明，穿帮；
- * 2. **窗口任意位置都能拖**（`data-tauri-drag-region`），不需要找标题栏；
- * 3. 鼠标进窗口才浮出小按钮（置顶 / 关闭），静止时完全干净。
- *
- * 为什么值得单独做一扇窗：owner 要拿它**配合屏幕截图**用 —— 把参考图贴在角落、
- * 缩到刚好不挡工作区，然后截屏。主窗口做不到这件事（它有侧栏、顶栏、详情栏）。
+ * 手感约定（每一层都不许互相抢）：
+ * - `滚轮`：连窗口一起缩放（锚定窗口中心）
+ * - `Shift+滚轮`：**图内**缩放，锚定鼠标位置（看细节用，窗口不动）
+ * - `Ctrl+滚轮`：整张贴图的不透明度
+ * - 左键拖：移动窗口；中键拖：图内平移（放大后才有意义）
+ * - 双击：撕掉这张贴图
  */
-const ZOOM_STEP = 1.09; // 和果核看图同一个步长（实测每格 ×1.09）
-
-/** 启动数据由 Rust 的 initialization_script 注入（`window.__AM_PEEK__`）。 */
-function bootData(): { ids: number[]; i: number } {
-  const b = (window as unknown as { __AM_PEEK__?: { ids?: number[]; i?: number } }).__AM_PEEK__;
-  const ids = (b?.ids ?? []).filter((v) => Number.isFinite(v) && v > 0);
-  const i = Math.max(0, Math.min(Number(b?.i ?? 0) || 0, Math.max(0, ids.length - 1)));
-  return { ids, i };
+interface PeekItem {
+  src: string;
+  w: number;
+  h: number;
+  path: string;
+  name: string;
+  gid: number;
 }
 
-/** 16px 线性图标（照 lucide 的路径，不额外引依赖：这里只要三个） */
+interface PeekBoot {
+  id?: string;
+  items?: PeekItem[];
+  i?: number;
+  opacity?: number;
+}
+
+const ZOOM_STEP = 1.09; // 和果核看图同一个步长（实测每格 ×1.09）
+const OPACITY_STEP = 0.08;
+
+function bootData(): { items: PeekItem[]; i: number; opacity: number } {
+  const b = (window as unknown as { __AM_PEEK__?: PeekBoot }).__AM_PEEK__ ?? {};
+  const items = (b.items ?? []).filter((x) => !!x?.src);
+  const i = Math.max(0, Math.min(Number(b.i ?? 0) || 0, Math.max(0, items.length - 1)));
+  const op = typeof b.opacity === "number" ? b.opacity : 1;
+  return { items, i, opacity: Math.min(1, Math.max(0.15, op)) };
+}
+
+/** 16px 线性图标（只用一个，不值得为它引依赖） */
 function Ico({ d, size = 12 }: { d: string[]; size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       {d.map((p, i) => (
         <path d={p} key={i} />
       ))}
     </svg>
   );
 }
-
-const ICO_PIN = [
-  "M12 17v5",
-  "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
-];
-const ICO_FULL = [
-  "M8 3H5a2 2 0 0 0-2 2v3",
-  "M21 8V5a2 2 0 0 0-2-2h-3",
-  "M3 16v3a2 2 0 0 0 2 2h3",
-  "M16 21h3a2 2 0 0 0 2-2v-3",
-];
 const ICO_CLOSE = ["M18 6 6 18", "M6 6l12 12"];
 
 export function Peek() {
   const boot = useMemo(bootData, []);
-  const [list, setList] = useState<Asset[]>([]);
   const [idx, setIdx] = useState(boot.i);
-  const [pinned, setPinned] = useState(false);
+  const [pinned, setPinned] = useState(true); // 默认置顶（owner 要求）
   const [hover, setHover] = useState(false);
-  const [err, setErr] = useState("");
-  /** Ctrl+滚轮的"图内缩放"（窗口不变，超出部分裁掉） */
-  const [scale, setScale] = useState(1);
+  const [err] = useState("");
+  const [opac, setOpac] = useState(boot.opacity);
+  /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点 */
+  const [view, setView] = useState({ s: 1, x: 0, y: 0 });
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
   const root = useRef<HTMLDivElement>(null);
   const busy = useRef(false);
+  const pan = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
 
-  /* 画布底色：图没铺满的几个像素（比例取整）用近黑垫底，不留白边。 */
+  const cur = boot.items[idx];
+
   useEffect(() => {
     document.body.classList.add("peek-body");
     document.documentElement.classList.add("peek-body");
@@ -73,65 +91,57 @@ export function Peek() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!boot.ids.length) {
-      setErr("没有可看的素材");
-      return;
-    }
-    let dead = false;
-    void source
-      .assetsByIds(boot.ids)
-      .then((rows) => {
-        if (dead) return;
-        // 后端可能漏掉已删除的 id：按 ids 顺序重整一遍，宁可少一张也不串位
-        const byId = new Map(rows.map((a) => [a.id, a]));
-        const ordered = boot.ids.map((id) => byId.get(id)).filter((a): a is Asset => !!a);
-        setList(ordered);
-        if (!ordered.length) setErr("这些素材都不在库里了");
-      })
-      .catch((e) => !dead && setErr(String(e)));
-    return () => {
-      dead = true;
-    };
-  }, [boot.ids]);
-
-  const cur = list[idx];
-
-  /* 关窗前记下当前长边：下次开同一张图不会又跳回 342 DIP */
-  const rememberSize = useCallback(() => {
-    try {
-      const long = Math.round(Math.max(window.innerWidth, window.innerHeight));
-      if (long > 0) localStorage.setItem("am.peek.longEdge", String(long));
-    } catch {
-      // localStorage 不可用就算了，不值得为它弹错
-    }
+  /* 关窗：**从存档里删掉**（用户主动关的，下次开机不该回来） */
+  const close = useCallback(() => {
+    void source.peekClose();
   }, []);
 
-
-  /* 换图：窗口跟着新图比例变（长边不变、中心不动）—— 否则 16:9 切到 3:4 会变形 */
+  /* 换图：窗口按新图比例变，并把存档指向新文件（重启还原的是最后看到的那张） */
   const goto = useCallback(
     (next: number) => {
-      if (!list.length) return;
-      const n = (next + list.length) % list.length;
-      setIdx(n);
-      setScale(1);
-      const a = list[n];
-      if (a?.width && a?.height) void source.peekRatio(a.width, a.height).catch(() => {});
+      const n = boot.items.length;
+      if (!n) return;
+      const k = (next + n) % n;
+      const it = boot.items[k];
+      setIdx(k);
+      setView({ s: 1, x: 0, y: 0 });
+      if (it.w && it.h) void source.peekRatio(it.w, it.h).catch(() => {});
+      void source.peekTrack(it.path, it.gid).catch(() => {});
     },
-    [list]
+    [boot.items]
   );
 
-  /* 滚轮：默认缩放窗口；Ctrl+滚轮缩放图内容（图不动窗口，超出裁切） */
+  /* 滚轮三分支：Shift=图内、Ctrl=不透明度、其余=连窗口一起缩放 */
   useEffect(() => {
     const el = root.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const up = e.deltaY < 0;
-      if (e.ctrlKey) {
-        setScale((s) => Math.min(8, Math.max(1, s * (up ? ZOOM_STEP : 1 / ZOOM_STEP))));
+
+      if (e.shiftKey) {
+        // 锚定鼠标：让指针底下那个像素在缩放前后**不动**
+        const rect = el.getBoundingClientRect();
+        const px = e.clientX - rect.left;
+        const py = e.clientY - rect.top;
+        setView((v) => {
+          const s2 = Math.min(12, Math.max(1, v.s * (up ? ZOOM_STEP : 1 / ZOOM_STEP)));
+          if (s2 === 1) return { s: 1, x: 0, y: 0 };
+          const k = s2 / v.s;
+          return { s: s2, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
+        });
         return;
       }
+
+      if (e.ctrlKey) {
+        setOpac((o) => {
+          const v = Math.min(1, Math.max(0.15, o + (up ? OPACITY_STEP : -OPACITY_STEP)));
+          void source.peekOpacity(v).catch(() => {});
+          return v;
+        });
+        return;
+      }
+
       if (busy.current) return;
       busy.current = true;
       void source
@@ -141,49 +151,110 @@ export function Peek() {
           busy.current = false;
         });
     };
-    // 原生 passive:false —— React 的 onWheel 在部分 WebView2 上是 passive，
-    // preventDefault 会失效，整个窗口跟着滚（踩过，见 WORKLOG §10.5 #28）
+    // 原生 passive:false（React 的 onWheel 在 WebView2 上可能是 passive，preventDefault 会失效）
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  /* 键盘 */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      switch (e.key) {
-        case "Escape":
-          if (scale > 1) {
-            setScale(1);
-            return;
-          }
-          rememberSize();
-          void source.peekClose();
-          break;
-        case "ArrowLeft":
-          goto(idx - 1);
-          break;
-        case "ArrowRight":
-          goto(idx + 1);
-          break;
-        case "F11":
-          e.preventDefault();
-          void source.peekFullscreen(true);
-          break;
-        case "t":
-        case "T":
-          if (e.altKey) {
-            e.preventDefault();
-            void source.peekTop(!pinned).then(setPinned).catch(() => {});
-          }
-          break;
-        default:
-          break;
+      const k = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === "c") {
+        e.preventDefault();
+        if (cur) void source.peekCopyFile([cur.path]).catch(() => {});
+        return;
       }
+      if ((e.ctrlKey || e.metaKey) && k === "s") {
+        e.preventDefault();
+        if (cur) void source.saveAs(cur.path).catch(() => {});
+        return;
+      }
+      if (e.key === "Escape") {
+        if (menu) {
+          setMenu(null);
+          return;
+        }
+        if (view.s > 1) {
+          setView({ s: 1, x: 0, y: 0 });
+          return;
+        }
+        close();
+        return;
+      }
+      if (e.key === "ArrowLeft") goto(idx - 1);
+      if (e.key === "ArrowRight") goto(idx + 1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goto, idx, scale, pinned, rememberSize]);
+  }, [close, cur, goto, idx, menu, view.s]);
 
-  const px = cur ? source.thumb(cur, 1600) : "";
+  /* 中键拖动 = 图内平移（放大后才有意义）。左键留给"拖窗口"（drag region）。 */
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 1 || view.s <= 1) return;
+      e.preventDefault();
+      pan.current = { x: e.clientX, y: e.clientY, ox: view.x, oy: view.y };
+    };
+    const onMove = (e: MouseEvent) => {
+      const p = pan.current;
+      if (!p) return;
+      setView((v) => ({ ...v, x: p.ox + (e.clientX - p.x), y: p.oy + (e.clientY - p.y) }));
+    };
+    const onUp = () => {
+      pan.current = null;
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [view.s]);
+
+  /* 右键菜单 */
+  const menuItems: CtxItem[] = [
+    {
+      label: "复制原图文件",
+      icon: "copy",
+      shortcut: "Ctrl+C",
+      action: () => cur && void source.peekCopyFile([cur.path]).catch(() => {}),
+    },
+    {
+      label: "复制当前显示尺寸",
+      icon: "copy",
+      action: () => {
+        // 屏幕上真实占用的像素（不是图片原始尺寸）—— 排版截图时要用的是这个数
+        const w = Math.round(window.innerWidth * window.devicePixelRatio);
+        const h = Math.round(window.innerHeight * window.devicePixelRatio);
+        void source.clipText(`${w}×${h}`).catch(() => {});
+      },
+    },
+    {
+      label: "保存到…",
+      icon: "reveal",
+      shortcut: "Ctrl+S",
+      action: () => cur && void source.saveAs(cur.path).catch(() => {}),
+    },
+    { kind: "separator" },
+    {
+      label: `${pinned ? "✓ " : ""}窗口置顶`,
+      icon: "star",
+      action: () => void source.peekTop(!pinned).then(setPinned).catch(() => {}),
+    },
+    {
+      label: "还原图内缩放",
+      icon: "search",
+      disabled: view.s <= 1,
+      action: () => setView({ s: 1, x: 0, y: 0 }),
+    },
+    { kind: "separator" },
+    { label: "关闭这扇无边框看图", icon: "close", shortcut: "Esc", danger: true, action: close },
+  ];
+
+  const px = cur?.src ?? "";
 
   return (
     <div
@@ -192,6 +263,11 @@ export function Peek() {
       data-tauri-drag-region
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onDoubleClick={close}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       {cur && !err && (
         <img
@@ -200,55 +276,44 @@ export function Peek() {
           alt=""
           draggable={false}
           data-tauri-drag-region
-          style={{ transform: scale > 1 ? `scale(${scale})` : undefined }}
-          onDoubleClick={() => setScale((s) => (s > 1 ? 1 : 2))}
+          style={{
+            opacity: opac,
+            transform:
+              view.s > 1 ? `translate(${view.x}px, ${view.y}px) scale(${view.s})` : undefined,
+            transformOrigin: "0 0",
+            cursor: view.s > 1 ? "grab" : undefined,
+          }}
         />
       )}
 
       {err && <div className="peek-err">{err}</div>}
 
-      {/* 底部左：序号 / 总数 · 尺寸。静止时半透明，不抢图。 */}
       {cur && (
         <div className={`peek-meta ${hover ? "on" : ""}`} data-tauri-drag-region>
-          <span className="mono">
-            {idx + 1} / {list.length}
-          </span>
-          {cur.width && cur.height && (
+          <span className="mono peek-name">{cur.name}</span>
+          {cur.w > 0 && (
             <span className="mono peek-dim">
-              {cur.width}×{cur.height}
+              {cur.w}×{cur.h}
             </span>
           )}
-          {scale > 1 && <span className="mono peek-dim">{Math.round(scale * 100)}%</span>}
+          {view.s > 1 && <span className="mono peek-dim">{Math.round(view.s * 100)}%</span>}
+          {opac < 0.999 && <span className="mono peek-dim">{Math.round(opac * 100)}%</span>}
         </div>
       )}
 
-      {/* 右上：置顶 / 全屏 / 关闭。只有鼠标进来才出现。 */}
+      {/* 只剩一个关闭键（置顶/全屏图标按 owner 要求撤掉，置顶默认开） */}
       <div className={`peek-tools ${hover ? "on" : ""}`}>
-        <button
-          className={`peek-btn ${pinned ? "on" : ""}`}
-          title={pinned ? "取消置顶（Alt+T）" : "窗口置顶（Alt+T）"}
-          onClick={() => void source.peekTop(!pinned).then(setPinned).catch(() => {})}
-        >
-          <Ico d={ICO_PIN} />
-        </button>
-        <button
-          className="peek-btn"
-          title="全屏（F11）"
-          onClick={() => void source.peekFullscreen(true).catch(() => {})}
-        >
-          <Ico d={ICO_FULL} />
-        </button>
-        <button
-          className="peek-btn"
-          title="关闭（Esc）"
-          onClick={() => {
-            rememberSize();
-            void source.peekClose();
-          }}
-        >
+        <button className="peek-btn" title="关闭（Esc / 双击）" onClick={close}>
           <Ico d={ICO_CLOSE} />
         </button>
       </div>
+
+      {menu && (
+        <ContextMenu
+          state={{ x: menu.x, y: menu.y, items: menuItems }}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

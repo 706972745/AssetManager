@@ -3884,3 +3884,150 @@ body.peek-body #root {
   color: #fff;
   background: var(--accent, #3b7ddd);
 }
+
+/* 贴图里显示文件名：长名字必须截断，否则会把整条角标撑出窗口 */
+.peek-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- 截图覆盖层（F1 / Alt+F1） ----------------
+   窗口盖住整个虚拟桌面，底图是后端 BitBlt 抓下来的那张静态图。
+   框外压暗用一个超大 box-shadow 实现：比铺四块遮罩省事，也不会有 1px 的缝。 */
+html.snip-body,
+body.snip-body {
+  background: transparent !important;
+  overflow: hidden;
+}
+body.snip-body #root {
+  height: 100vh;
+}
+.snip-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.snip-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
+.snip-sel {
+  position: absolute;
+  border: 1px solid var(--accent, #4a8cff);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.snip-size {
+  position: absolute;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.75);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.snip-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  background: #fff;
+  border: 1px solid var(--accent, #4a8cff);
+  pointer-events: none;
+}
+.snip-hint {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.66);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.snip-miss {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #17171a;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+}
+
+/* 快捷键录制框（设置 → 快捷键）：显示当前组合，点一下进入录制 */
+.hk-field {
+  min-width: 108px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-line);
+  border-radius: 4px;
+  background: var(--e1);
+  color: var(--text-1);
+  font-size: var(--fs-11);
+  transition: border-color var(--t-quick), background var(--t-quick), color var(--t-quick);
+}
+.hk-field:hover {
+  border-color: var(--ui-line-hover);
+}
+.hk-field.rec {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--e2);
+}
+
+.snip-err {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  max-width: 70vw;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(190, 48, 40, 0.92);
+}
+
+/* 详情顶部：预览 + 竖排色板（照 Eagle 的布局） */
+.detail-hero {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.detail-hero .detail-art {
+  flex: 1;
+  min-width: 0;
+}
+.detail-palette {
+  flex: none;
+  width: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.detail-palette button {
+  flex: 1;
+  min-height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(var(--ink-rgb), 0.12);
+  transition: transform var(--t-quick), border-color var(--t-quick);
+}
+.detail-palette button:hover {
+  transform: translateX(-1px);
+  border-color: rgba(var(--ink-rgb), 0.34);
+}
