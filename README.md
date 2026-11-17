@@ -24,7 +24,7 @@
 
 <br>
 
-<img src="docs/shots-0.1.1-主界面.png" alt="AssetManager — 侧栏（素材库 / 快照 / 标签）、素材网格、详情面板" width="900" />
+<img src="docs/screenshot.png" alt="AssetManager — 侧栏（素材库 / 快照 / 标签）、素材网格、详情面板" width="900" />
 
 <sub>左侧：素材库目录树 · 快照 · 标签；中间：缩略图网格；右侧：详情、评分、注释。</sub>
 
