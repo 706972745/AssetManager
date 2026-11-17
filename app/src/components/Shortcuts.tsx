@@ -63,11 +63,29 @@ const RIGHT: Group[] = [
   {
     title: "截图 · 贴图（系统级）",
     rows: [
-      { keys: ["F1"], label: "选区截图 → 存到截图目录" },
-      { keys: ["Alt", "F1"], label: "选区截图 → 直接进剪贴板" },
+      { keys: ["F1"], label: "选区截图", hint: "松手进标注态，不自动复制、不自动关闭" },
       { keys: ["F3"], label: "贴剪贴板图（无边框窗口）" },
-      { keys: ["Ctrl", "Z"], label: "截图标注：撤销", hint: "Ctrl+Shift+Z 重做" },
-      { keys: ["Enter"], label: "截图标注：保存", hint: "Ctrl+C 复制 / Ctrl+S 另存为" },
+    ],
+  },
+  {
+    /* 键位以 `Snip.tsx` 的 keydown 为准（0.1.20）：Enter 不再交付，复制只有 Ctrl+C。 */
+    title: "截图标注",
+    rows: [
+      { keys: ["Ctrl", "C"], label: "复制到剪贴板", hint: "只有显式复制才写剪贴板" },
+      { keys: ["Ctrl", "S"], label: "保存到截图库", hint: "只写文件，不动剪贴板" },
+      { keys: ["中键"], label: "贴到屏幕上（无边框窗口）", hint: "工具栏「贴图」同效" },
+      { keys: ["Enter"], label: "不结束截图", hint: "框完可直接画标注" },
+      { keys: ["V"], label: "选择 / 移动标注" },
+      { keys: ["R", "E", "L"], label: "矩形 / 椭圆 / 直线" },
+      { keys: ["A", "P", "H"], label: "箭头 / 铅笔 / 记号笔" },
+      { keys: ["M", "T", "X"], label: "马赛克 / 文字 / 橡皮擦" },
+      { keys: ["Delete"], label: "删掉选中的那条标注" },
+      { keys: ["Ctrl", "Z"], label: "撤销", hint: "Ctrl+Shift+Z 重做" },
+      { keys: ["Space", "拖动"], label: "移动选区", hint: "按住空格拖画面" },
+      { keys: ["Ctrl", "A"], label: "选中整屏" },
+      { keys: ["↑", "↓", "←", "→"], label: "微调选区", hint: "Shift = 改大小；W/A/S/D 微调光标" },
+      { keys: ["Shift"], label: "切换 RGB / HEX", hint: "放大镜取色" },
+      { keys: ["Esc"], label: "取消选区 / 退出截图" },
     ],
   },
   {
