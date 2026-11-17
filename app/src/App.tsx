@@ -2026,7 +2026,10 @@ export default function App() {
               onTagMenu={(tag, x, y) => tagMenu(tag, x, y)}
               onGroupMenu={(name, x, y) => groupMenu(name, x, y)}
               /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了 */
-              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt || snapCreating || !!snapRenaming}
+              /* hold 是「标签面板保持展开」的开关（TagDock: open = pinned || hold）。
+                 快照的新建/改名**不能**算进来 —— 就地输入行在侧栏上半部分，
+                 把它算进来会让"点新建快照 → 下面的标签面板自己弹开"（owner 2026-11-17 报的 bug）。 */
+              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt}
             />
           }
         />

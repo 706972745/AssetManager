@@ -65,7 +65,7 @@ AssetManager 是**独立项目**，和 FontManager 只做邻居，不做亲戚�
 | 代码 | 不 import / 不复制 FontManager 的源码。`tokens.css`、`app.css`、`ui.tsx` 是**照数值重写**的，注释里写清来源，改数值只改自己这份 |
 | 配置 | 独立 `identifier: com.assetmanager.desktop`、独立数据目录 `%LOCALAPPDATA%\AssetManager`、独立 dev 端口 `1430`。**不许复用 FontManager 的 state.json / api.json / 插件目录** |
 | 数据 | 用户素材库和 FontManager 的字体库没有任何关系，不共用目录、不共用缓存 |
-| 发版 | 独立版本号（当前 **0.12.3 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
+| 发版 | 独立版本号（当前 **0.12.4 开发版**）、独立安装包 `AssetManager_<ver>_x64-setup.exe`。**不并进 FontManager 的 Release、不挂 FontManager 的 tag 流水线** |
 | 仓库 | **将来是 GitHub 上的另一个仓库**（独立 remote / 独立 tag / 独立 CI）。**令牌共用**（同一账户），但令牌只做认证，绝不写进任何会提交的文件，也绝不往 FontManager 的 remote 推 |
 | 唯一共用 | 便携工具链 `../FontManager/Fonts工程文件/env.sh`（Rust/MSVC/SDK，宿主目录在 FontManager 下，见上两级 `工作区总览与规则.md` §2），以及「界面视觉语言」这一层设计审美 |
 
