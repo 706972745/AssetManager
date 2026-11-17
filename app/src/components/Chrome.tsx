@@ -357,6 +357,7 @@ function RatingStars({
   const [hover, setHover] = useState(0);
   const [pos, setPos] = useState({ left: -999, top: -999 });
   const btn = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLDivElement>(null);
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
 
@@ -410,6 +411,30 @@ function RatingStars({
     closeNow();
   };
 
+  /* 浮层是 portal 到 body 的，鼠标一旦移出去就收不起来（`onMouseLeave` 只挂在
+     星标和浮层自己身上）。补两条出口：点浮层外面、按 Esc —— 用户反馈
+     "打开了没办法取消"。 */
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node | null;
+      if (pop.current?.contains(t) || btn.current?.contains(t)) return;
+      closeNow();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeNow();
+      }
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
+
   return (
     <span className="rating-wrap">
       <button
@@ -430,6 +455,7 @@ function RatingStars({
       {createPortal(
         open ? (
           <div
+            ref={pop}
             className="rating-pop"
             style={{ left: pos.left, top: pos.top }}
             role="group"
@@ -473,6 +499,70 @@ function RatingStars({
   );
 }
 
+/** 详情顶栏的就地改名（owner 2026-11-17：全软件只此一处改名，不弹窗）。
+ *  回车 / 失焦 = 提交，Esc = 放弃。进入时只选中主名，扩展名留着不选 ——
+ *  改名十次有九次是换前半截。 */
+function TitleEdit({
+  name,
+  onCommit,
+  onCancel,
+}: {
+  name: string;
+  onCommit: (v: string) => void;
+  onCancel: () => void;
+}) {
+  const box = useRef<HTMLInputElement>(null);
+  /* Enter 提交后 input 会被卸掉，blur 还会再追一次 —— 用一次性闸门挡掉重复提交 */
+  const done = useRef(false);
+  /* 不能用 autoFocus：双击的第二次 mouseup 落在**刚挂上的 input** 上，
+     浏览器会把焦点丢回 body，input 立刻 blur → 当场提交 + 退出编辑（实测就是
+     "双击没反应"）。改成事件跑完之后再聚焦，鼠标那一下早就结束了。 */
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      const el = box.current;
+      if (!el) return;
+      el.focus();
+      const dot = name.lastIndexOf(".");
+      el.setSelectionRange(0, dot > 0 ? dot : name.length);
+      /* 名字比框长时，input 会跟着光标滚到尾部（用户只能看到后半截）。
+         全选之后把视口拉回开头，先看见的是文件名开头。 */
+      el.scrollLeft = 0;
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [name]);
+
+  const finish = (v: string) => {
+    if (done.current) return;
+    done.current = true;
+    onCommit(v);
+  };
+  const bail = () => {
+    if (done.current) return;
+    done.current = true;
+    onCancel();
+  };
+
+  return (
+    <input
+      ref={box}
+      className="detail-title detail-title-edit"
+      defaultValue={name}
+      spellCheck={false}
+      aria-label="重命名文件"
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          finish(e.currentTarget.value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          bail();
+        }
+      }}
+      onBlur={(e) => finish(e.currentTarget.value)}
+    />
+  );
+}
+
 export function Detail({
   asset,
   source,
@@ -480,6 +570,7 @@ export function Detail({
   thumbPx,
   onReveal,
   onRename,
+  onView,
   onOpenDefault,
   onCopyFile,
   onDelete,
@@ -498,6 +589,10 @@ export function Detail({
   onSetRating,
   onSetNote,
   onSetSource,
+  renaming,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
 }: {
   asset: Asset | null;
   source: Source;
@@ -506,7 +601,15 @@ export function Detail({
   thumbPx: number;
   onDragOut: (a: Asset) => void;
   onReveal: (a: Asset) => void;
+  /** 「重命名」入口：**不再弹窗**，改成让顶栏文件名进入就地编辑 */
   onRename: (a: Asset) => void;
+  /** 开大图（灯箱）——详情里那颗「看图」按钮 */
+  onView: (a: Asset) => void;
+  /** 顶栏文件名是否处于改名状态（由 App 统一管：右键菜单 / 操作区的重命名都走这里） */
+  renaming: boolean;
+  onStartRename: () => void;
+  onCommitRename: (name: string) => void;
+  onCancelRename: () => void;
   onOpenDefault: (a: Asset) => void;
   onCopyFile: (a: Asset) => void;
   onDelete: (a: Asset) => void;
@@ -575,6 +678,10 @@ export function Detail({
   useEffect(() => {
     setRefsOpen(false);
   }, [asset?.id]);
+
+  /* 顶栏文件名的单击复制延时器（见下面 onClick：双击时要把这一下取消掉） */
+  const titleClick = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(titleClick.current), []);
 
   /* 详情里的预览图也能直接拖出去（与网格里的瓦片同一套手势）：
      按下记坐标 → 移动超过 6px 交给 Rust 起 OLE 拖拽，出去的是原文件。 */
@@ -655,13 +762,42 @@ export function Detail({
             {/* 顶栏：格式徽标 + 文件名 + 评分 + 关闭。**吸附在顶部**，往下滚也不走 */}
             <header className="detail-head">
               <span className="detail-badge">{badge(asset.ext)}</span>
-              <button
-                className="detail-title"
-                title="点击复制文件名"
-                onClick={() => void copy(asset.name, "文件名")}
-              >
-                {asset.name}
-              </button>
+              {renaming ? (
+                <TitleEdit
+                  name={asset.name}
+                  onCommit={onCommitRename}
+                  onCancel={onCancelRename}
+                />
+              ) : (
+                <button
+                  className="detail-title"
+                  title="单击复制文件名 · 双击改名"
+                  onClick={(e) => {
+                    window.clearTimeout(titleClick.current);
+                    /* 用 click 的 detail 判双击，而不是 onDoubleClick：
+                       WebView2 在部分输入路径下不派发 dblclick（自测注入点击就是如此），
+                       detail 则是「这一串里的第几次点击」，稳。
+                       单击复制延后 220ms —— 双击时第一次 click 先到，
+                       不延后就会「复制两次 + 弹两次 toast + 又进改名」。 */
+                    if (e.detail >= 2) {
+                      onStartRename();
+                      return;
+                    }
+                    titleClick.current = window.setTimeout(
+                      () => void copy(asset.name, "文件名"),
+                      220
+                    );
+                  }}
+                  /* detail 判双击之外再挂一条 dblclick：两条任意一条先到都进改名，
+                     onStartRename 是幂等的（只设同一个 id）。 */
+                  onDoubleClick={() => {
+                    window.clearTimeout(titleClick.current);
+                    onStartRename();
+                  }}
+                >
+                  {asset.name}
+                </button>
+              )}
               <RatingStars
                 rating={asset.rating}
                 onChange={(n) => onSetRating([asset.id], n)}
@@ -717,7 +853,12 @@ export function Detail({
                   <dd className="mono">{fmtTime(asset.mtime)}</dd>
                   <dt>位置</dt>
                   <dd>
-                    <button className="path-link" onClick={() => onReveal(asset)} title={asset.path}>
+                    {/* 悬停 1 秒弹完整路径（图上只放得下一行，长路径必被截） */}
+                    <button
+                      className="path-link mono"
+                      onClick={() => onReveal(asset)}
+                      data-hint-text={asset.path}
+                    >
                       <Icon name="reveal" size={11} stroke={1.5} />
                       <span>{asset.path}</span>
                     </button>
@@ -886,8 +1027,12 @@ export function Detail({
                   </button>
                 </div>
                 <div className="act-row">
-                  <button className="btn" onClick={() => onRename(asset)} disabled={!source.desktop}>
-                    重命名
+                  {/* 改名不用按钮了：顶栏文件名双击就地改（owner 2026-11-17）。
+                      这一格换成「看图」——无边框，和旁边三个实心按钮区分开，
+                      它只是"换个方式看"，不碰磁盘上的文件。 */}
+                  <button className="act-link" onClick={() => onView(asset)}>
+                    <Icon name="image" size={13} stroke={1.5} />
+                    看图
                   </button>
                   <button
                     className="btn btn-danger"

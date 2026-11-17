@@ -24,6 +24,7 @@ import {
 } from "./types";
 import { AssetView, THUMB_PX, type ViewMode } from "./components/Views";
 import { Detail, TitleBar, TopBar } from "./components/Chrome";
+import { HoverHintHost } from "./components/HoverHint";
 import { Settings, type SettingsKey } from "./components/Settings";
 import { Shortcuts } from "./components/Shortcuts";
 import { Tools, type ToolTab } from "./components/Tools";
@@ -84,6 +85,9 @@ export default function App() {
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Asset | null>(null);
+  /** 正在改名的素材 id（owner 2026-11-17：改名**只**在详情顶栏就地做，不弹窗）。
+   *  右键菜单 / 操作区的「重命名」都只是把它设上，然后聚焦到顶栏那个输入框。 */
+  const [renameId, setRenameId] = useState<number | null>(null);
   /** 多选集合（T11）：详情面板盯 `selected`，批量操作作用于这个集合 */
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -1297,8 +1301,18 @@ export default function App() {
     }
   };
 
-  const onRename = async (a: Asset) => {
-    const name = window.prompt("新的文件名（改的是磁盘上的原文件）", a.name);
+  /* 改名：入口只负责「把详情顶栏切到编辑态」，真正的落盘在 commitRename。
+     以前这里弹 window.prompt（系统灰框，和整个界面不是一个东西），
+     owner 2026-11-17 明确要求：所有改名都在顶栏文件名上就地改，不弹窗。 */
+  const onRename = (a: Asset) => {
+    setSelected(a);
+    setSelectedIds(new Set([a.id]));
+    setRenameId(a.id);
+  };
+
+  const commitRename = async (a: Asset, raw: string) => {
+    setRenameId(null);
+    const name = raw.trim();
     if (!name || name === a.name) return;
     try {
       await source.rename(a.path, name);
@@ -1307,6 +1321,12 @@ export default function App() {
     } catch (e) {
       toast(String(e), true);
     }
+  };
+
+  /* 开大图：网格双击、详情里的「看图」都走这一处 */
+  const openLightbox = (a: Asset) => {
+    const i = items.findIndex((x) => x.id === a.id);
+    setLightbox(i >= 0 ? i : 0);
   };
 
   const onUndo = async () => {
@@ -2086,10 +2106,7 @@ export default function App() {
               resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}`}
               onPick={pickOne}
               onPickMany={pickMany}
-              onOpen={(a) => {
-                const i = items.findIndex((x) => x.id === a.id);
-                setLightbox(i >= 0 ? i : 0);
-              }}
+              onOpen={(a) => openLightbox(a)}
               onDragOut={(a) => void onDragOut(a)}
               onNearBottom={loadMore}
               thumbSrc={thumbSrc}
@@ -2182,6 +2199,15 @@ export default function App() {
           thumbPx={THUMB_PX[sizeIndex] ?? 384}
           onReveal={onReveal}
           onRename={onRename}
+          onView={openLightbox}
+          renaming={!!selected && renameId === selected.id}
+          onStartRename={() => {
+            if (selected) setRenameId(selected.id);
+          }}
+          onCommitRename={(name) => {
+            if (selected) void commitRename(selected, name);
+          }}
+          onCancelRename={() => setRenameId(null)}
           onOpenDefault={onOpenDefault}
           onCopyFile={(a) => void onCopyFile([a.path])}
           onDelete={(a) => void doDelete([a.path], `「${a.name}」`)}
@@ -2206,7 +2232,10 @@ export default function App() {
           onSetRating={onSetRating}
           onSetNote={onSetNote}
           onSetSource={onSetSource}
-          onClose={() => setSelected(null)}
+          onClose={() => {
+            setRenameId(null);
+            setSelected(null);
+          }}
         />
       </div>
 
@@ -2317,6 +2346,7 @@ export default function App() {
 
       {dlg.node}
       <Toaster items={toasts} />
+      <HoverHintHost />
     </div>
   );
 }

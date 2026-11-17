@@ -1020,26 +1020,33 @@
 .detail-meta dd.wrap {
   line-height: 1.55;
 }
+/* 位置：**照 FontManager 的 .path-link** —— 平时是普通次要文字（可换行，不省略），
+   悬停才铺一层 --e2（浅灰）表示"可以点"，颜色转主色。
+   以前这里 hover 是 `--accent-a` 蓝底 + 蓝字，看着像"这段文字被选中了"，
+   和 FontManager 完全不是一回事。 */
 .path-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  margin-left: -3px;
-  padding: 1px 3px;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 6px;
   border-radius: 4px;
   font-size: var(--fs-11);
   color: var(--text-2);
+  overflow-wrap: anywhere;
   transition: background var(--t-quick), color var(--t-quick);
 }
 .path-link span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .path-link:hover {
-  color: var(--accent);
-  background: var(--accent-a);
+  background: var(--e2);
+  color: var(--text-1);
+}
+.path-link svg {
+  flex-shrink: 0;
 }
 /* 主操作：整宽一行（FontManager .detail-activate 的几何：e1 底 + 8 圆角 + 13/15 内距） */
 .act-primary {
@@ -4593,15 +4600,18 @@ body.board-body #root {
   font-variant-numeric: tabular-nums;
 }
 
+/* 浮层底色用 --tooltip-bg（FontManager 的 .rating-pop 就是这条）：
+   不能用 --e2 —— 那是"面板上抬一档"的底色，实色化之前是半透明，压在预览图上
+   整块糊掉，五颗星和「清除」都看不清。 */
 .rating-pop {
   position: fixed;
-  z-index: 90;
+  z-index: 120;
   width: 176px;
   padding: 8px;
   border-radius: 9px;
-  background: var(--e2);
-  border: 1px solid rgba(var(--ink-rgb), 0.12);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-mass), var(--shadow-ambient);
 }
 .rating-pop-stars {
   display: flex;
@@ -5104,15 +5114,36 @@ body.board-body #root {
   border-radius: 5px;
 }
 
-/* 色板：一列方块均分预览高度（图 3 就是这样填满的） */
+/* 预览：**高度按图片自己的比例来**（owner 2026-11-17）。
+   以前是固定 1:1 方框：横图 / 4:3 图下面永远空一大块，看着像没加载完。
+   现在方框高度 = 图渲染高度；只有超高的长图才撞到 440px 上限，
+   顶到上限就**顶部对齐 + 框内纵向滚**（不居中、不裁切、不横向溢出）。 */
+.detail-hero {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.detail-hero .detail-art {
+  flex: 0 0 auto;
+  width: 100%;
+  aspect-ratio: auto;
+  height: auto;
+  max-height: 440px;
+}
+/* 色板：挪到预览下面，一行方块（原先是右侧竖列 —— 竖着会把预览挤窄，
+   预览改成按图高之后那一列又会吊在半空） */
 .detail-palette {
-  width: 26px;
-  gap: 4px;
+  flex-direction: row;
+  width: 100%;
+  gap: 6px;
+  justify-content: flex-start;
+  align-self: auto;
 }
 .detail-palette button {
-  flex: 1 1 0;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
   min-height: 0;
-  height: auto;
   border-radius: 4px;
 }
 
@@ -5143,7 +5174,7 @@ body.board-body #root {
 }
 .rating-btn:hover {
   background: var(--e2);
-  color: var(--text-3);
+  color: var(--warning);
 }
 .rating-btn.on,
 .rating-btn[aria-pressed="true"] {
@@ -5281,4 +5312,97 @@ body.board-body #root {
   height: 38px;
   border-radius: 8px;
   font-size: var(--fs-13);
+}
+
+/* ============================================================================
+   悬停说明气泡（照 FontManager 的 .hover-hint / HoverHintHost）
+   ——元素只要带 `data-hint-text`（已拼好的文案）或 `data-hint`（键），悬停 1 秒
+   由 <HoverHintHost> 统一弹一个小气泡。走事件委托，不包组件。
+   ============================================================================ */
+.hover-hint {
+  position: fixed;
+  /* 评分浮层是 120，气泡要在它之上；再高就会盖住原生菜单 */
+  z-index: 130;
+  max-width: 280px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--glass-border);
+  background: var(--e3);
+  box-shadow: var(--shadow-mass), var(--shadow-ambient);
+  font-size: 12px;
+  /* ↑ 12 不在 9/11/13 三档里，这是**故意**的：FontManager 的 .hover-hint 就是 12px，
+     气泡要跟它一致；只此一处，别拿去做别的东西 */
+  line-height: 1.45;
+  color: var(--text-2);
+  text-align: left;
+  /* 路径这类长文案按需换行；`pre-line` 让 data-hint-text 里的 \n 真的换行 */
+  white-space: pre-line;
+  word-break: break-word;
+  /* 气泡不能吃鼠标：否则「移到气泡上 → 离开按钮 → 收起 → 又落回按钮」会狂闪 */
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-micro) ease;
+}
+.hover-hint.on {
+  opacity: 1;
+}
+
+/* ---- 详情顶栏的文件名：就地改名（owner 2026-11-17，全软件只此一处改名单） ---- */
+.detail-title-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  margin: -3px 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent-glow);
+  border-radius: 4px;
+  background: var(--e1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-20);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.15;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow-soft);
+}
+
+/* 详情面板不画滚动条（owner 2026-11-17）：**能滚**，只是不显示条 ——
+   面板本来就窄，10px 的条会一直吃掉图片和文字右缘。滚轮 / 触控板 / 中键拖拽照旧。 */
+.detail-inner,
+.detail-art {
+  scrollbar-width: none;
+}
+.detail-inner::-webkit-scrollbar,
+.detail-art::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* ---- 操作区里的「看图」：无边框文字按钮（owner 2026-11-17）----
+   它和其他按钮动作性质不同：不碰文件，只是换个方式看。所以不画框，
+   只留图标 + 文字，悬停铺一层 e2 表示可点；高度仍与同排按钮齐平。 */
+.act-row .act-link {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-13);
+  transition: background var(--t-micro), color var(--t-micro);
+}
+.act-row .act-link:hover {
+  background: var(--e2);
+  color: var(--text-1);
+}
+.act-row .act-link svg {
+  flex-shrink: 0;
 }
