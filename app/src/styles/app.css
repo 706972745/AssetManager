@@ -2854,9 +2854,26 @@
   flex-direction: column;
   gap: 1px;
 }
-/* 选中行：用标签自己的淡色垫底，比统一灰底更能说明"就是这一条在筛" */
+/* 选中行：**中性灰底 + 2px 竖线**（FontManager 2.3.1 定版，owner 2026-11-17 截图指定）。
+   以前用标签自己的淡色垫底：一屏里几个彩色标签就像打翻了调色盘，而且没配色的标签
+   淡色会混成一块深灰，比任何选中行都重。现在选中只靠「竖线 + 灰底」表达。 */
 .tag-row.sel {
-  background: var(--tcs, var(--ui-hover));
+  background: var(--ui-hover);
+}
+/* 配过色的标签：**行名 + 竖线 + 圆点**一律用标签自己的颜色（同 FontManager 2.3.1）。
+   `tc-gray` = 没设颜色，保持「灰字 + 蓝竖线」，否则一屏全是彩色字反而看不出选中。 */
+.tag-row:not(.tc-gray) .tree-name {
+  color: var(--tc);
+}
+.tag-row:not(.tc-gray) .tag-dot {
+  background: var(--tc);
+  border-color: transparent;
+}
+.tag-row:not(.tc-gray).sel::before {
+  background: var(--tc);
+}
+.tag-row.sel.tc-gray::before {
+  background: var(--ui-accent);
 }
 /* 自动标签的维度小标题（格式/类型/像素/比例/体积） */
 .tag-ns-row,

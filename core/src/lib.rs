@@ -31,6 +31,7 @@ pub mod screen;
 pub mod shellthumb;
 pub mod snapshot;
 pub mod thumb;
+pub mod trash;
 pub mod watch;
 
 use std::collections::{HashMap, HashSet};

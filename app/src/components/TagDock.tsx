@@ -149,7 +149,16 @@ export function TagDock({
     <div
       key={t.name}
       className={`tree-row tag-row ${activeTag === t.name ? "sel" : ""} ${colorClass(t.color)}`}
-      onClick={() => onPickTag(activeTag === t.name ? null : t.name)}
+      onClick={() => {
+        /* 选中即**自动固定**（owner 2026-11-17）：用户点了标签就是想看结果，
+           面板随鼠标离开收起会让人以为"点了没生效"。取消选中时不解除固定 ——
+           那是用户的注意力，不该替他收回。 */
+        if (!pinned) {
+          setPinned(true);
+          savePinned(true);
+        }
+        onPickTag(activeTag === t.name ? null : t.name);
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();

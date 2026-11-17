@@ -1028,7 +1028,7 @@ export function Detail({
                 </div>
                 <div className="act-row">
                   <button className="btn" onClick={() => onPeek(asset)}>
-                    看图
+                    无边框看图
                   </button>
                   <button
                     className="btn btn-danger"

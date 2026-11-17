@@ -1008,6 +1008,40 @@ fn am_delete(paths: Vec<String>, state: State<AppState>) -> Result<usize, String
     Ok(n)
 }
 
+/* ---------------- 应用内回收站（0.1.5） ---------------- */
+
+#[tauri::command]
+fn am_trash_list(state: State<AppState>) -> Vec<am_core::trash::TrashEntry> {
+    let app = lock(&state);
+    am_core::trash::list(&app.data_dir)
+}
+
+#[tauri::command]
+fn am_trash_restore(ids: Vec<String>, state: State<AppState>) -> Result<usize, String> {
+    let mut app = lock(&state);
+    let back = am_core::trash::restore(&app.data_dir, &ids)?;
+    // 还原 = 磁盘上又出现了文件 → 把落点所在目录重新索引一遍
+    let dirty: HashSet<PathBuf> = back
+        .iter()
+        .map(PathBuf::from)
+        .filter_map(|p| p.parent().map(|x| x.to_path_buf()))
+        .collect();
+    refresh_dirs(&mut app, &dirty);
+    Ok(back.len())
+}
+
+#[tauri::command]
+fn am_trash_purge(ids: Vec<String>, state: State<AppState>) -> Result<usize, String> {
+    let app = lock(&state);
+    am_core::trash::purge(&app.data_dir, &ids)
+}
+
+#[tauri::command]
+fn am_trash_empty(state: State<AppState>) -> Result<usize, String> {
+    let app = lock(&state);
+    am_core::trash::empty(&app.data_dir)
+}
+
 #[tauri::command]
 fn am_undo(state: State<AppState>) -> Result<String, String> {
     let mut app = lock(&state);
@@ -3362,6 +3396,10 @@ fn main() {
             am_export_userdata,
             am_pick_folder,
             am_open_recycle,
+            am_trash_list,
+            am_trash_restore,
+            am_trash_purge,
+            am_trash_empty,
             am_reveal,
             am_open_path,
             am_copy_files,
