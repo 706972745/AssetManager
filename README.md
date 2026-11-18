@@ -11,10 +11,10 @@
 <br>
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.1.35%20dev-gray?style=flat-square)](../../releases)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
-[![Status](https://img.shields.io/badge/Status-开发版%20(0.x)-gray?style=flat-square)](#已知限制)
+[![Status](https://img.shields.io/badge/Status-正式版%20(0.2.1)-blue?style=flat-square)](#已知限制)
 
 <br>
 
@@ -85,9 +85,22 @@ cd .. && ./app/node_modules/.bin/tauri dev
 ./app/node_modules/.bin/tauri build
 ```
 
+## 0.2.1 更新了什么
+
+- **设置面板补齐**：素材库不再只能从侧栏那个不起眼的 `+` 添加，设置 → 素材库可以直接看路径、
+  看每个库有多少素材、打开、移除；内置截图库单独一行（不占 3 个名额、不能移除）。
+- **自动更新**：设置 → 更新，可查看当前版本、手动检查、**一键下载并静默安装**（校验 SHA-256，
+  只给按用户安装的 NSIS 版用）。默认每天最多自动查一次，只提醒，不会偷偷装；也可以跳过某个版本。
+- **修「打开位置不对」**：点详情里的「位置」现在会打开文件所在目录并选中它；
+  点素材库那行的「打开」会**进入**那个文件夹。目标文件被移走时会明确告诉你，而不是跳到「文档」。
+- 关于页补了项目主页、问题反馈、许可证入口。
+
+> 更新链路需要能访问 GitHub（api.github.com / github.com）。网络不通时检查会静默跳过，
+> 不会弹错误；需要用代理时，让系统代理对 `assetmanager.exe` 生效即可。
+
 ## 已知限制
 
-- 仍是 **0.x 开发版**：数据结构还可能动，不建议当唯一存档；
+- **0.2.1 是第一个对外正式版**，但版本号仍是 0.x：数据结构还可能动，不建议当唯一存档；
 - 只支持 Windows。
 
 ## 与 FontManager 的关系

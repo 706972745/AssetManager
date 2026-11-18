@@ -55,6 +55,12 @@ jobs:
         run: cargo test --release
         working-directory: core
 
+      # 更新器的单测（update::tests）在 src-tauri 里，core 那条跑不到 ——
+      # 0.1.35 时才补上这条，否则自动更新的闸门（白名单/版本比较/资产名）永远没人测。
+      - name: src-tauri 单测
+        run: cargo test --release
+        working-directory: src-tauri
+
       - name: 打包（NSIS）
         # 前端已经在上一步构建好了，这里把 beforeBuildCommand 清空，
         # 免得 tauri 再从错误的目录里跑一遍 npm run build。

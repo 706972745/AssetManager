@@ -506,14 +506,45 @@ fn copy_dir(src: &Path, dest: &Path) -> Res<()> {
     Ok(())
 }
 
+/// 计算 explorer 的命令参数（抽成纯函数，便于单测；不 spawn 任何进程）。
+///
+/// 为什么要 `raw_arg` 而不是 `arg`：`Command::arg` 会给**整个**参数套引号，
+/// 变成 `"/select,C:\...\截图 2026-11-18 09-59-51.png"`。explorer 只认
+/// `/select,"C:\..."`（引号只包路径），整条被包住时它解析失败，退回「文档」——
+/// owner 2026-11-18 报的「点位置打开的地方不对」就是这条。
+///
+/// 目录与文件分开：目录要**进去**（explorer "路径"），文件要**选中**
+/// （explorer /select,"路径"）。以前一律 /select，点素材库那行的「打开」
+/// 会跳到父目录并把库文件夹高亮 —— 也不是用户要的「打开这个文件夹」。
+#[cfg(windows)]
+fn reveal_arg(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if path.is_dir() {
+        format!("\"{}\"", s)
+    } else {
+        format!("/select,\"{}\"", s)
+    }
+}
+
 /// 在资源管理器中定位（Windows 兜底入口）。
+///
+/// 文件 → 打开所在文件夹并选中它；目录 → 直接进这个目录。
+/// 目标不存在时**如实报错**：交给 explorer 一个不存在的路径，它只会静默退回
+/// 某个默认文件夹，用户以为「软件乱跳」，其实文件早被移走了。
 pub fn reveal_in_explorer(path: &Path) -> Res<()> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
-        let arg = format!("/select,{}", path.to_string_lossy());
+
+        if !path.exists() {
+            return Err(format!(
+                "这个位置已经不在了：{}\n可能被移动或删除过，重新扫描一下这个目录就能对上。",
+                path.display()
+            ));
+        }
         Command::new("explorer.exe")
-            .arg(arg)
+            .raw_arg(reveal_arg(path))
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -834,5 +865,34 @@ mod tests {
         let d = unique_dest(&dir, "x.png");
         assert_eq!(d.file_name().unwrap().to_string_lossy(), "x (2).png");
         let _ = std::fs::remove_file(&a);
+    }
+
+    /* ---- 打开位置（0.2.1）：这三条钉住 owner 报的「点位置打开的地方不对」 ---- */
+
+    #[cfg(windows)]
+    #[test]
+    fn reveal_arg_quotes_only_the_path() {
+        let f = std::env::temp_dir().join("am test 截图.png");
+        let a = super::reveal_arg(&f);
+        assert_eq!(a, format!("/select,\"{}\"", f.display()));
+        // 整个参数被套引号（"/select,C:\..."）就是 explorer 退回「文档」的那条老 bug
+        assert!(!a.starts_with("\"/select"), "整条参数不许被引号包住：{a}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reveal_arg_enters_directory_instead_of_selecting_it() {
+        let d = std::env::temp_dir();
+        let a = super::reveal_arg(&d);
+        assert_eq!(a, format!("\"{}\"", d.display()));
+        assert!(!a.contains("/select"), "目录要进去，不是父目录高亮：{a}");
+    }
+
+    #[test]
+    fn missing_path_is_reported_instead_of_opening_somewhere() {
+        let p = std::env::temp_dir().join("am-missing-0.2.1-does-not-exist.png");
+        let _ = std::fs::remove_file(&p);
+        let e = super::reveal_in_explorer(&p).unwrap_err();
+        assert!(e.contains("已经不在了"), "要给出人话原因，实际：{e}");
     }
 }
