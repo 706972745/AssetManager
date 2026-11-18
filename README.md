@@ -14,7 +14,7 @@
 [![Version](https://img.shields.io/badge/Version-0.2.3-blue?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
-[![Status](https://img.shields.io/badge/Status-正式版%20(0.2.2)-blue?style=flat-square)](#已知限制)
+[![Status](https://img.shields.io/badge/Status-正式版%20(0.2.3)-blue?style=flat-square)](#已知限制)
 
 <br>
 
@@ -84,6 +84,15 @@ cd .. && ./app/node_modules/.bin/tauri dev
 # 打包（产出 src-tauri/target/release/bundle/nsis/AssetManager_<ver>_x64-setup.exe）
 ./app/node_modules/.bin/tauri build
 ```
+
+## 0.2.3 更新了什么
+
+- **修「截图开始时黑一下」**：冻结画面现在从按下 `F1` 的下一帧就铺满屏幕，工具栏在覆盖层真正
+  画好之后才揭幕——中间那段"窗口还没画出内容"的空档被原生底图整段盖住了（逐帧验证 0 黑帧）。
+- **侧栏改为切换视图**：点「分组 / 标签 / 快照」是切换到那个视图，不再是往当前结果上叠筛选；
+  叠加筛选只留在漏斗面板里做。点同一项再点一次退出该视图。
+- **修「点截图没反应」**：之前挂着的快照筛选没被清掉，会让结果变成 0 条。
+- 顶栏「添加素材文件夹」换成了文件夹图标；无边框贴图的蓝边/光晕收窄（20px→10px，阴影不再是三层）。
 
 ## 0.2.1 更新了什么
 
