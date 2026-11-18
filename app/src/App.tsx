@@ -2742,7 +2742,17 @@ export default function App() {
         onSettings={() => setSettingsOpen(true)}
         onUndo={onUndo}
         busy={busy}
-        where={dir?.name}
+        where={
+          /* 标题栏如实写"我在看什么"（0.2.2）：侧栏点标签/分组/快照 = 换了视图，
+             不是加了条件，所以位置写在这里，而不是在列表上方挂筛选条。 */
+          tagFilter
+            ? `标签：${isAutoTag(tagFilter) ? autoTagLabel(tagFilter) : tagFilter}`
+            : collFilter !== null
+              ? `分组：${colls.find((c) => c.id === collFilter)?.name ?? "分组"}`
+              : snapFilter !== null
+                ? `快照：${snaps.find((s) => s.id === snapFilter)?.name ?? "快照"}`
+                : dir?.name
+        }
       />
 
       {/* 布局骨架照 FontManager：标题栏通栏 → 侧栏通栏 → 右侧「顶栏 + 内容」两行。
@@ -2754,10 +2764,13 @@ export default function App() {
           source={source}
           selected={dir?.id ?? null}
           onSelect={(n) => {
-            // 点目录 = 离开标签 / 分组视图，否则两个筛选叠在一起会莫名其妙 0 结果
+            // 点目录 = 切换视图：离开标签 / 分组 / 快照，否则两个筛选叠在一起会莫名其妙 0 结果
             setDir(n);
             setTagFilter(null);
             setCollFilter(null);
+            /* 0.2.2 补：**快照也要清**。之前只清了标签与分组，
+               于是「点了截图表这一段没反应、列表还是空的」——快照筛选还挂着。 */
+            setSnapFilter(null);
             setPage("assets");
           }}
           onDropTo={(n) => {
@@ -2933,49 +2946,16 @@ export default function App() {
             </div>
           )}
 
-          {tagFilter && (
-            <div className="filter-strip">
-              <Icon name="tag" size={12} stroke={1.5} />
-              <span className="filter-strip-label">
-                标签：{isAutoTag(tagFilter) ? autoTagLabel(tagFilter) : tagFilter}
-              </span>
-              {isAutoTag(tagFilter) && <span className="filter-strip-kind">自动标签</span>}
-              <button className="btn btn-tiny" onClick={() => setTagFilter(null)}>
-                清除筛选
-              </button>
-            </div>
-          )}
+          {/* 标签 / 分组 / 快照不再是"筛选条"（owner 2026-11-18）：
+              从侧栏点它们 = **切换视图**（标题栏写「标签：X」，再点一次取消），
+              真正的筛选只在漏斗面板里下。挂一条「清除筛选」的条子会让人以为
+              自己是在叠条件，而不是换了个地方看东西。 */}
 
           {ratingFilter !== null && (
             <div className="filter-strip">
               <Icon name="star" size={12} stroke={1.5} />
               <span className="filter-strip-label">评分：{ratingFilter} 星及以上</span>
               <button className="btn btn-tiny" onClick={() => setRatingFilter(null)}>
-                清除筛选
-              </button>
-            </div>
-          )}
-
-          {collFilter !== null && (
-            <div className="filter-strip">
-              <Icon name="folder-open" size={12} stroke={1.5} />
-              <span className="filter-strip-label">
-                分组：{colls.find((c) => c.id === collFilter)?.name ?? "分组"}
-              </span>
-              <button className="btn btn-tiny" onClick={() => setCollFilter(null)}>
-                清除筛选
-              </button>
-            </div>
-          )}
-
-          {snapFilter !== null && (
-            <div className="filter-strip">
-              <Icon name="camera" size={12} stroke={1.5} />
-              <span className="filter-strip-label">
-                快照：{snaps.find((s) => s.id === snapFilter)?.name ?? "快照"}
-              </span>
-              <span className="filter-strip-kind">按图片内容匹配</span>
-              <button className="btn btn-tiny" onClick={() => setSnapFilter(null)}>
                 清除筛选
               </button>
             </div>

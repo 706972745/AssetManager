@@ -537,7 +537,7 @@ export function Tree({
         {shotRoot && (
           <div className="tree-section">
             <div
-              className="tree-heading-row shot-head"
+              className={`tree-heading-row shot-head ${selected === shotRoot.id ? "sel" : ""}`}
               data-dir-path={shotRoot.path}
               data-dir-name={shotRoot.name}
               data-dir-root="1"

@@ -281,28 +281,34 @@ export function Snip() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot?.src]);
 
-  /* 像素源：同源 data URL → 能 getImageData / toDataURL（放大镜、马赛克、导出都要） */
+  /* 像素源：同源 data URL → 能 getImageData / toDataURL（放大镜、马赛克、导出都要）
+     **必须晚 400ms 再要**（0.2.3）：这张是整屏 PNG，2MB 级，base64 回来是 2.7MB 字符串，
+     解码 + 建 canvas 会把渲染主线程占住 300ms 上下。挂在 mount 上就直接把首帧挤掉了 ——
+     表现就是"覆盖层已经出来了，但屏幕上还是一片底色"。等首帧画完再取，肉眼看不到这段。 */
   useEffect(() => {
     let alive = true;
-    void source
-      .snipFull()
-      .then(async (url) => {
-        if (!alive) return;
-        const img = new Image();
-        img.src = url;
-        await img.decode().catch(() => {});
-        if (!alive || !img.width) return;
-        const c = document.createElement("canvas");
-        c.width = img.width;
-        c.height = img.height;
-        c.getContext("2d")?.drawImage(img, 0, 0);
-        base.current = c;
-        setBaseReady(true);
-        paint();
-      })
-      .catch(() => {});
+    const t = window.setTimeout(() => {
+      void source
+        .snipFull()
+        .then(async (url) => {
+          if (!alive) return;
+          const img = new Image();
+          img.src = url;
+          await img.decode().catch(() => {});
+          if (!alive || !img.width) return;
+          const c = document.createElement("canvas");
+          c.width = img.width;
+          c.height = img.height;
+          c.getContext("2d")?.drawImage(img, 0, 0);
+          base.current = c;
+          setBaseReady(true);
+          paint();
+        })
+        .catch(() => {});
+    }, 400);
     return () => {
       alive = false;
+      window.clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -69,7 +69,9 @@ export function TitleBar({
             <Icon name="undo" size={14} stroke={1.5} />
           </button>
           <button className="tb-action" title="添加素材文件夹" onClick={onAddFolder} disabled={busy}>
-            <Icon name="plus" size={14} stroke={1.5} />
+            {/* 照 FontManager 的「打开文件夹 + 外挂加号」（owner 2026-11-18 指定），
+                不是 lucide 的 FolderPlus —— 那个是闭合文件夹，认不出来。 */}
+            <Icon name="folder-plus" size={14} />
           </button>
           <button className="tb-action" title="重新扫描" onClick={onRescan} disabled={busy}>
             <Icon name="scan" size={14} stroke={1.5} />

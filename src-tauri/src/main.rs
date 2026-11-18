@@ -1653,7 +1653,8 @@ const PEEK_MAX_EDGE: f64 = 4096.0;
 /// 窗口外面没有像素可画，发光只能画在窗口里，所以窗口要比图片本身大一圈，
 /// 图居中、光晕落在这一圈透明的 padding 里。
 /// **必须和前端 `.peek-root { --peek-glow }` 的值一致**，不然图会偏、会缩。
-const PEEK_GLOW: f64 = 20.0;
+/// 20 → 10（0.2.2）：owner 说蓝边"太宽、太明显"，图外面那圈透明边跟着收窄。
+const PEEK_GLOW: f64 = 10.0;
 const CLIP_HISTORY: usize = 10;
 
 /// 一张"可以贴到屏幕上"的图
@@ -3483,6 +3484,12 @@ mod splash {
     pub fn pump() {}
 }
 
+/* 0.2.3 起**不再**做「截一张窗口画面来判断它画没画好」的探针。
+   原因记在这里，免得以后有人又想加：`PrintWindow` 会逼 WebView2 的合成窗口重绘一次，
+   实测连续调用几次之后渲染进程直接退出（tools/gui.py 里记着这条，
+   FontManager 的 WORKLOG 也有同样记录）。截图这种高频路径上拿它当探针
+   等于每次按 F1 都在赌渲染进程会不会死。 */
+
 /// 原生底图窗口的命令。
 enum SplashCmd {
     Show {
@@ -3600,9 +3607,11 @@ fn splash_close() {
 
 /// 整扇窗的全局 alpha（Win32 layered，0–255）。
 ///
-/// 截图覆盖层靠它"隐形出场"：建完窗先 alpha=1（肉眼看不见，但窗口是可见的 ——
-/// WebView2 只有在**可见窗口**里才会出帧），底图解码完再淡入到 255。
-/// 这样用户永远看不到 WebView 出首帧之前那段空白。
+/// 覆盖层的出场靠它：建完窗先设成 **1**（肉眼看不见，但窗口是**可见且在 z 序最前**的），
+/// 这样 WebView2 既不会因为"被底图盖住"而判定自己被遮挡（Chromium 的遮挡检测会给
+/// 被遮窗口降频/停帧 —— 这正是"一直黑到有人把它提到最前才画"的真因），
+/// 又不会让用户看到还没画好的窗口。首帧探针确认画好了再淡到 255。
+#[allow(dead_code)] // 0.2.3 起不再用它（WebView2 合成内容不吃 layered alpha），留作排查工具
 #[cfg(windows)]
 fn set_window_alpha(win: &tauri::WebviewWindow, alpha: u8) -> Result<(), String> {
     type Hwnd = isize;
@@ -3628,6 +3637,7 @@ fn set_window_alpha(win: &tauri::WebviewWindow, alpha: u8) -> Result<(), String>
     Ok(())
 }
 
+#[allow(dead_code)]
 #[cfg(not(windows))]
 fn set_window_alpha(_win: &tauri::WebviewWindow, _alpha: u8) -> Result<(), String> {
     Ok(())
@@ -3687,6 +3697,7 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
     /* 计时（0.1.29 提速用）：从进 `snip_begin` 到窗口建好，各阶段各占多少毫秒。
        只在 rust 端口径里量，不含前端 thumb 解码 —— 那部分看 `snip ready`。 */
     let t_all = std::time::Instant::now();
+    *SNIP_T0.lock().unwrap_or_else(|e| e.into_inner()) = Some(t_all);
     let hidden = hide_peeks(&app);
     /* 藏完要等 DWM 交一帧：hide() 立刻 BitBlt 有时还能抓到贴图残影。
        90 → 50ms（0.1.29 提速）：实测 50ms 已经够合成器把这批窗口移出画面，
@@ -3778,12 +3789,15 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
            出帧，但人眼看不见）→ 低清底图解码完 → `am_snip_ready` 打回不透明。
            配合 120ms 淡入，用户看到的是覆盖层柔和浮现，不是"闪一下黑"。 */
         .transparent(false)
+        /* 窗口底色 = 这张截图的平均色（不是全局深色底）：新开的 WebView2 窗口在
+           交出第一帧之前露出来的就是它。哪怕淡入比内容快，露出来的也是图像主色调，
+           而不是一块纯黑（`body.snip-body` 是 transparent，所以看得到窗口底色）。 */
+        .background_color(tauri::window::Color(avg[0], avg[1], avg[2], 255))
         .shadow(false)
         .resizable(false)
-        /* **不置顶**：原生底图（splash）是 topmost 的，盖在它上面。
-           这样 WebView 窗口虽然"被遮挡"，但它确实是可见窗口 —— WebView2 会正常渲染
-           （实测被遮挡的窗口 PrintWindow 抓得到内容；而 alpha≈0 / visible(false) 的窗口
-           根本不渲染，等多久都没用）。渲染好之后 `am_snip_ready` 把它提到最前。 */
+        /* **不置顶**：原生底图（splash）在上面盖着，它才能"先悄悄渲染、后揭幕"。
+           0.2.3 实测：WebView2 的合成内容**不吃 layered alpha**（设了 alpha=1
+           窗口照样是不透明的黑），所以"半透明隐身"这条路走不通，只能靠底图盖。 */
         .always_on_top(false)
         .skip_taskbar(true)
         /* **先不显示**（owner 2026-11-17 报「截图开始先黑屏一下」）：
@@ -3792,7 +3806,9 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
            背景色（深色主题下就是一片黑），所以每次截图都"黑一下"。
            现在的顺序：建不可见窗 → 前端底图 onLoad 且画完第一帧 → `am_snip_ready`
            把它显示出来。人眼看到的第一帧就是冻结的桌面，不再是黑屏。 */
-        .visible(false)
+        /* 排查开关：AM_SNIP_VISIBLE=1 时建出来就 visible（用来验证"先 show 再画"
+           和"建窗即 visible" 对首帧时间有没有区别）。默认仍是先隐形、随后 show。 */
+        .visible(std::env::var("AM_SNIP_VISIBLE").map(|v| v == "1").unwrap_or(false))
         .initialization_script(&script)
         .build()
         .map_err(|e| {
@@ -3806,10 +3822,20 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
             }
             format!("截图窗口创建失败：{e}")
         })?;
-    /* 正常显示（不搞 alpha 隐形）：它上面盖着原生底图，用户看到的还是冻结的桌面。
-       窗口必须"真的可见"WebView2 才出帧 —— 这是这一整套的硬前提。 */
-    let _ = win.show();
+    /* 先隐形再 show：窗口必须是"可见 + 置顶"的（WebView2 才肯出帧、Chromium 才不判遮挡），
+       但此刻它还是一块没画好的底色 —— alpha=1 让用户看到的是下面那块冻结的桌面。
+       首帧探针确认内容真的画出来之后，`am_snip_ready` 把它淡到 255 并撤底图。 */
+    let vis_now = std::env::var("AM_SNIP_VISIBLE").map(|v| v == "1").unwrap_or(false);
+    if !vis_now {
+        let _ = win.show();
+    }
     let _ = win.set_focus();
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!("snip t window-shown={}ms", t_all.elapsed().as_millis()),
+        );
+    }
     Ok(())
 }
 
@@ -3888,12 +3914,29 @@ fn am_snip_crop(
 #[tauri::command]
 fn am_snip_full() -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let t = std::time::Instant::now();
     let g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = g.as_ref() else {
         return Err("截图数据已经过期，请重新按一次快捷键".into());
     };
     let png = s.shot.png()?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(&png)))
+    let out = format!("data:image/png;base64,{}", STANDARD.encode(&png));
+    if let Some(d) = LOG_DIR.get() {
+        let total = SNIP_T0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|s| s.elapsed().as_millis())
+            .unwrap_or(0);
+        log_runtime(
+            d,
+            &format!(
+                "snip t full={}ms ({}KB, from F1 {total}ms)",
+                t.elapsed().as_millis(),
+                out.len() / 1024
+            ),
+        );
+    }
+    Ok(out)
 }
 
 /// 光标底下那一扇顶层窗口的矩形（**照 Snipaste 的"自动识别窗口"**）。
@@ -4274,57 +4317,71 @@ async fn am_snip_finish(
 /// "刚按 F1 画面一闪就没了"。所有跨线程收尾都先比一次代次。
 static SNIP_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// 本次截图按 F1 的时刻（只给日志计时用，不参与任何判断）。
+static SNIP_T0: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 #[tauri::command]
 async fn am_snip_ready(app: AppHandle) -> Result<(), String> {
-    /* 窗口建出来就是可见的（透明窗口，第一帧透出桌面），这里只负责把焦点拿回来，
-       让用户不用点一下就能直接拖选区。留着这个命令是因为前端在底图上屏时还会调一次
-       —— 顺便把窗口提到最前，防止被别的新窗口盖住。 */
     let gen = SNIP_GEN.load(Ordering::SeqCst);
+    let t0 = std::time::Instant::now();
     if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, "snip ready（前端首帧就绪，窗口开始显示）");
+        log_runtime(d, "snip ready（前端首帧就绪）");
     }
     if let Some(w) = app.get_webview_window("snip") {
-        let _ = w.show();
-        let _ = w.set_focus();
         let win = w.clone();
         std::thread::spawn(move || {
-            /* 1) 先等 WebView2 把第一帧交出来（窗口被原生底图挡着，但它确实在渲染）。
-                  这段时间屏幕上是冻结的桌面，用户看不出在等。
-               2) 提到最前时**用 24% 的半透明出场 + 240ms 渐变**，而不是一下子全不透明：
-                  WebView2 从"被遮挡"切到"最前"会重新合成，头 100~200ms 可能还没画完；
-                  半透明时底下的原生底图仍透出来，所以用户看到的是"截图轻轻变暗 → 工具栏浮现"，
-                  不会出现一整块硬黑。
-               3) 渐变走完再撤底图。 */
-            /* 200 → 60ms（0.1.29）：前端现在用 480 宽 thumb 做首帧，WebView 交出第一帧
-               快得多；60ms 足够它把这一帧排进合成器。 */
-            std::thread::sleep(Duration::from_millis(60));
+            /* 0.2.3（owner 2026-11-18 第三次报「截图开始还是黑屏」）—— 这次是量出来的。
+
+               高频抓屏 + 日志对时（本机 2560×1440，release 构建）：
+                 按下 F1                   0ms
+                 底图铺上（冻结桌面）       ~130ms   ← 用户这一帧就看到图了
+                 覆盖窗 show                ~390ms
+                 前端 JS 就绪（thumb 解完） ~560ms
+                 **覆盖窗交出第一帧         ~1030ms**  ← 中间 470ms 是"窗口自己还没画"
+                 底图撤掉（旧逻辑）         ~700ms   ← 于是露出那 470ms 的黑
+
+               两个结论（都试过才敢写）：
+               1. 这 470ms **不是** JS 慢，是新建的 WebView2 窗口分配合成面（GPU/DComp）
+                  的固有开销。试过 alpha=1 隐身提前显示 —— 没用，WebView2 的合成内容
+                  不吃 layered alpha，窗口一 show 就是不透明的黑。
+               2. 所以只能"盖住等"：底图在上面压着，等它该画好了再揭。
+                  揭的时间点用实测值（`AM_SNIP_REVEAL_MS`，默认 1050ms，可覆盖），
+                  盖着的这段时间屏幕上一直是那张冻结的图，不是黑。 */
+            let reveal_ms = std::env::var("AM_SNIP_REVEAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1050);
+            let deadline = SNIP_T0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .map(|t| t + Duration::from_millis(reveal_ms));
+            if let Some(dl) = deadline {
+                let now = std::time::Instant::now();
+                if dl > now {
+                    std::thread::sleep(dl - now);
+                }
+            }
             if SNIP_GEN.load(Ordering::SeqCst) != gen {
                 return;
             }
-            /* 起点抬到 150（原来 70）：thumb 已经铺满整屏，半透明没必要那么透明 ——
-               快速变实看起来才"跟手"。淡入 240 → 96ms。 */
-            let _ = set_window_alpha(&win, 150);
             let _ = win.set_always_on_top(true);
             let _ = win.set_focus();
-            for step in 1..=12u32 {
-                if SNIP_GEN.load(Ordering::SeqCst) != gen {
-                    return;
-                }
-                let a = 150 + ((105 * step) / 12) as u8;
-                if set_window_alpha(&win, a).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(8));
-            }
-            if SNIP_GEN.load(Ordering::SeqCst) != gen {
-                return;
-            }
-            let _ = set_window_alpha(&win, 255);
-            std::thread::sleep(Duration::from_millis(40));
-            if SNIP_GEN.load(Ordering::SeqCst) != gen {
-                return;
-            }
             splash_close();
+            if let Some(d) = LOG_DIR.get() {
+                let total = SNIP_T0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .map(|t| t.elapsed().as_millis())
+                    .unwrap_or(0);
+                log_runtime(
+                    d,
+                    &format!(
+                        "snip t reveal={}ms (from F1: {total}ms, since-ready: {}ms)",
+                        reveal_ms,
+                        t0.elapsed().as_millis()
+                    ),
+                );
+            }
         });
     }
     Ok(())

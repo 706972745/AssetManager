@@ -83,6 +83,35 @@ function SettingsGlyph({
 
 type Glyph = (p: { size?: number; stroke?: number; className?: string }) => ReactElement;
 
+/**
+ * 「添加素材文件夹」：照 FontManager 的 `ImportFolderGlyph`（Titlebar.tsx）原样搬。
+ *
+ * 为什么不用 lucide 的 `FolderPlus`：那是「闭合文件夹 + 内部加号」，和用户认的
+ * 「打开文件夹」不是一个形状。这里是 FolderOpen 原路径 + 外挂加号，加号下面垫一道
+ * `--canvas` 的粗描边，避免加号与文件夹线条糊在一起（FM 上就是这么定的稿）。
+ */
+function FolderPlusGlyph({ size = 14, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <g
+        transform="scale(0.86)"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+      </g>
+      <g strokeLinecap="round" fill="none">
+        <path d="M17.9 14.7v6.3" stroke="var(--canvas)" strokeWidth={4.2} />
+        <path d="M14.7 17.85h6.3" stroke="var(--canvas)" strokeWidth={4.2} />
+        <path d="M17.9 14.7v6.3" stroke="currentColor" strokeWidth={1.5} />
+        <path d="M14.7 17.85h6.3" stroke="currentColor" strokeWidth={1.5} />
+      </g>
+    </svg>
+  );
+}
+
 /** 名字 → 图标。名字保持中文语义（grid / waterfall / scan…），实现换成 lucide。 */
 const ICONS: Record<string, Glyph> = {
   sliders: ({ size, stroke, className }) => (
@@ -113,6 +142,8 @@ const ICONS: Record<string, Glyph> = {
     <FolderOpen size={size} strokeWidth={stroke} className={className} />
   ),
   plus: ({ size, stroke, className }) => <Plus size={size} strokeWidth={stroke} className={className} />,
+  /* 添加素材库：FM 那枚「打开文件夹 + 外挂加号」（0.2.2 owner 指定） */
+  "folder-plus": ({ size, className }) => <FolderPlusGlyph size={size} className={className} />,
   close: ({ size, stroke, className }) => <X size={size} strokeWidth={stroke} className={className} />,
   chevron: ({ size, stroke, className }) => (
     <ChevronRight size={size} strokeWidth={stroke} className={className} />

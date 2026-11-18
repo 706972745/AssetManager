@@ -379,6 +379,22 @@
 .tree-section:first-child .tree-heading-row {
   padding-top: 8px;
 }
+/* 「截图」段头被选中时和普通目录行一个样子（0.2.2）：
+   以前点它只换列表、段头毫无反馈，看着像"点了没反应"（owner 报的原话）。
+   段头本身比目录行高一点点（上下 padding 14/5），所以不做左侧 2px 竖线，
+   只给底和字色——和 `.tree-row.sel` 同一组值。 */
+.tree-heading-row.shot-head {
+  cursor: default;
+  transition: background var(--t-quick), color var(--t-quick);
+}
+.tree-heading-row.shot-head:hover {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
+.tree-heading-row.shot-head.sel {
+  background: var(--ui-hover);
+  color: var(--text-1);
+}
 .tree-heading-row .caret {
   display: grid;
   place-items: center;
@@ -4184,9 +4200,11 @@ body.peek-body #root {
 
 .peek-root {
   /* 四周留一圈透明边距，专门给「向外的蓝色渐变」用（窗口外没有像素，
-     光晕只能画在窗口里）。后端按同一个 16px 给窗口加了同样的边，
-     所以图片**仍然是截图那个尺寸、那个位置**。 */
-  --peek-glow: 20px;
+     光晕只能画在窗口里）。后端按同一个值给窗口加了同样的边，
+     所以图片**仍然是截图那个尺寸、那个位置**。
+     20 → 10px（0.2.2 owner：「边框阴影太宽、太明显」）：光晕越宽，
+     图与桌面之间那圈"安全距离"越大，看起来越像浮窗而不是贴纸。 */
+  --peek-glow: 10px;
   padding: var(--peek-glow);
   box-sizing: border-box;
   position: fixed;
@@ -4237,13 +4255,13 @@ body.peek-body #root {
   /* 只圈住"图"那一块，外发光落到 padding 里向外扩散 */
   inset: var(--peek-glow);
   pointer-events: none;
-  /* 1px 实边 + 两层向外扩散的光：近处一小圈实、远处一大圈淡，
-     看起来就是边框向外渐变的蓝色窗口阴影（owner 2026-11-18）。 */
+  /* 1px 实边 + 两圈短扩散（0.2.2 收窄：原来 4/12/26px 三层，
+     在浅色桌面上像一盏蓝灯）。现在最远只到 6px，仍然是"由边框向外渐变"，
+     但只起勾边的用，不再抢图片本身。 */
   box-shadow:
-    inset 0 0 0 1px rgba(27, 79, 224, 0.95),
-    0 0 4px 1px rgba(27, 79, 224, 0.75),
-    0 0 12px 4px rgba(27, 79, 224, 0.42),
-    0 0 26px 12px rgba(27, 79, 224, 0.16);
+    inset 0 0 0 1px rgba(27, 79, 224, 0.8),
+    0 0 2px 1px rgba(27, 79, 224, 0.45),
+    0 0 6px 2px rgba(27, 79, 224, 0.2);
   z-index: 5;
 }
 
