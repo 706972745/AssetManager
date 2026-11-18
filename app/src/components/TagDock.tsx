@@ -64,6 +64,7 @@ export function TagDock({
   onEditTag,
   onEditGroup,
   onNewGroup,
+  onNewTag,
   onTagMenu,
   onGroupMenu,
   hold,
@@ -77,6 +78,8 @@ export function TagDock({
   onEditTag: (name: string) => void;
   onEditGroup: (name: string) => void;
   onNewGroup: (name: string) => void;
+  /** 新建一个空标签（owner 2026-11-18：标签面板里该建标签，不是建分组） */
+  onNewTag: (name: string) => void;
   /** 右键一条标签 → 交给 App 弹自己的菜单（不要整库那套） */
   onTagMenu: (tag: string, x: number, y: number) => void;
   onGroupMenu: (name: string, x: number, y: number) => void;
@@ -178,11 +181,12 @@ export function TagDock({
     saveClosed(n);
   };
 
-  const commitGroup = () => {
+  /** 这里只建**标签**：分组有它自己的面板（CollDock），别在标签面板里建分组 */
+  const commitTag = () => {
     const v = draft.trim();
     setAdding(false);
     setDraft("");
-    if (v) onNewGroup(v);
+    if (v) onNewTag(v);
   };
 
   const colorOf = (name: string) => tags.find((t) => t.name === name)?.color ?? null;
@@ -220,7 +224,9 @@ export function TagDock({
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!isAuto) onTagMenu(t.name, e.clientX, e.clientY);
+        /* 自动标签也要能弹（只是卡片里只读）—— 以前这里 `if (!isAuto)` 直接吞掉，
+           用户右键自动标签时"什么都没发生"，报的就是「标签右击菜单打不开」。 */
+        onTagMenu(t.name, e.clientX, e.clientY);
       }}
       title={`${isAuto ? autoTagLabel(t.name) : t.name} · ${t.count}`}
     >
@@ -325,15 +331,15 @@ export function TagDock({
           </button>
           <button
             className="tag-tool-btn"
-            title="新建分组"
-            aria-label="新建分组"
+            title="新建标签"
+            aria-label="新建标签"
             onClick={() => {
               setAdding((v) => !v);
               setDraft("");
             }}
           >
             <Icon name="plus" size={11} stroke={1.8} />
-            <span>分组</span>
+            <span>标签</span>
           </button>
         </div>
 
@@ -342,17 +348,17 @@ export function TagDock({
             <BlinkCaretInput
               value={draft}
               onChange={setDraft}
-              placeholder="新分组名，回车建立"
-              ariaLabel="新分组名"
+              placeholder="新标签名，回车建立"
+              ariaLabel="新标签名"
               onKeyDown={(e) => {
-                if (e.key === "Enter") commitGroup();
+                if (e.key === "Enter") commitTag();
                 else if (e.key === "Escape") {
                   e.stopPropagation();
                   setAdding(false);
                   setDraft("");
                 }
               }}
-              onBlur={commitGroup}
+              onBlur={commitTag}
             />
           </div>
         )}

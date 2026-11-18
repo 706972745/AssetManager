@@ -210,7 +210,9 @@ export default function App() {
    */
   const [snapPrompt, setSnapPrompt] = useState<SnapPromptState | null>(null);
   /** 正在编辑的标签/分组（null = 没开编辑卡） */
-  const [tagEdit, setTagEdit] = useState<{ kind: "tag" | "group"; name: string } | null>(null);
+  const [tagEdit, setTagEdit] = useState<
+    { kind: "tag" | "group"; name: string; x: number; y: number } | null
+  >(null);
   /** 正在编辑的标签的自动规则（T34）：null = 没有规则 */
   const [tagRule, setTagRuleState] = useState<AutoRule | null>(null);
   const [autoTagCounts, setAutoTagCounts] = useState<TagCount[]>([]);
@@ -733,6 +735,26 @@ export default function App() {
     [denied, toast]
   );
 
+  /** 打开编辑卡。坐标优先用右键点（浮层就出现在那儿），否则退回鼠标当前位置。 */
+  /* ⋯ 按钮 / 键盘 F2 打开卡片时没有右键坐标，用它兜底 */
+  const lastMouse = useRef({ x: window.innerWidth / 2, y: 160 });
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      lastMouse.current = { x: e.clientX, y: e.clientY };
+    };
+    window.addEventListener("mousemove", onMove, { passive: true });
+    return () => window.removeEventListener("mousemove", onMove);
+  }, []);
+
+  const openTagEdit = useCallback(
+    (kind: "tag" | "group", name: string, x?: number, y?: number) => {
+      const px = x ?? lastMouse.current.x;
+      const py = y ?? lastMouse.current.y;
+      setTagEdit({ kind, name, x: px, y: py });
+    },
+    []
+  );
+
   /* ---------------- 标签自己的右键菜单 ---------------- */
 
   const tagMenu = useCallback(
@@ -779,7 +801,7 @@ export default function App() {
             label: isAutoTag(tag) ? "这个标签是自动生成的（只读）" : "编辑标签（颜色 / 分组 / 改名）",
             icon: "tag",
             disabled: isAutoTag(tag),
-            action: () => setTagEdit({ kind: "tag", name: tag }),
+            action: () => openTagEdit("tag", tag, x, y),
           },
           {
             label: "从所有素材上移除",
@@ -1294,7 +1316,7 @@ export default function App() {
       x,
       y,
       items: [
-        { label: "编辑分组（颜色 / 改名 / 解散）", icon: "tag", action: () => setTagEdit({ kind: "group", name }) },
+        { label: "编辑分组（颜色 / 改名 / 解散）", icon: "tag", action: () => openTagEdit("group", name, x, y) },
       ],
     });
   }, []);
@@ -1337,11 +1359,11 @@ export default function App() {
             false,
             merged > 0 ? `${merged} 项素材的标签合并了过去` : undefined
           );
-          setTagEdit({ kind: "tag", name: next });
+          setTagEdit((e) => ({ kind: "tag", name: next, x: e?.x ?? lastMouse.current.x, y: e?.y ?? lastMouse.current.y }));
         } else {
           await source.renameGroup(e.name, next);
           toast(`分组已改名为「${next}」`);
-          setTagEdit({ kind: "group", name: next });
+          setTagEdit((e) => ({ kind: "group", name: next, x: e?.x ?? lastMouse.current.x, y: e?.y ?? lastMouse.current.y }));
         }
         setRefreshKey((k) => k + 1);
       } catch (err) {
@@ -1395,6 +1417,20 @@ export default function App() {
       toast(String(err), true);
     }
   }, [tagEdit, deleteTagEverywhere, toast]);
+
+  /** 新建空标签（侧栏「+ 标签」）。已存在时后端静默成功，这里提示一句就够。 */
+  const createTag = useCallback(
+    async (name: string) => {
+      try {
+        await source.tagCreate(name);
+        toast(`已新建标签「${name}」`, false, "选中素材后在右侧「标签」里就能挂上它");
+        setRefreshKey((k) => k + 1);
+      } catch (err) {
+        toast(String(err), true);
+      }
+    },
+    [toast]
+  );
 
   const createGroup = useCallback(
     async (name: string) => {
@@ -2690,11 +2726,12 @@ export default function App() {
                   setCollFilter(null);
                 }
               }}
-              onEditTag={(name) => setTagEdit({ kind: "tag", name })}
-              onEditGroup={(name) => setTagEdit({ kind: "group", name })}
+              onEditTag={(name) => openTagEdit("tag", name)}
+              onEditGroup={(name) => openTagEdit("group", name)}
               onNewGroup={(name) => void createGroup(name)}
-              onTagMenu={(tag, x, y) => tagMenu(tag, x, y)}
-              onGroupMenu={(name, x, y) => groupMenu(name, x, y)}
+              onNewTag={(name) => void createTag(name)}
+              onTagMenu={(tag, x, y) => openTagEdit("tag", tag, x, y)}
+              onGroupMenu={(name, x, y) => openTagEdit("group", name, x, y)}
               /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了 */
               /* hold 是「标签面板保持展开」的开关（TagDock: open = pinned || hold）。
                  快照的新建/改名**不能**算进来 —— 就地输入行在侧栏上半部分，
@@ -2992,7 +3029,7 @@ export default function App() {
             setDir(null);
           }}
           onDenyAutoTag={denyAutoTag}
-          onEditTag={(name) => setTagEdit({ kind: "tag", name })}
+          onEditTag={(name) => openTagEdit("tag", name)}
           onSetRating={onSetRating}
           onSetNote={onSetNote}
           onSetSource={onSetSource}
@@ -3007,6 +3044,8 @@ export default function App() {
         <TagEdit
           kind={tagEdit.kind}
           name={tagEdit.name}
+          x={tagEdit.x}
+          y={tagEdit.y}
           color={
             tagEdit.kind === "tag"
               ? tags.find((t) => t.name === tagEdit.name)?.color ?? null
@@ -3019,6 +3058,55 @@ export default function App() {
           onGroup={(g) => void moveTagToGroup(g)}
           onDelete={() => void deleteEntity()}
           onClose={() => setTagEdit(null)}
+          readOnly={tagEdit.kind === "tag" && isAutoTag(tagEdit.name)}
+          extra={
+            tagEdit.kind === "tag" && !isAutoTag(tagEdit.name) ? (
+              <div className="tag-edit-extra">
+                <button
+                  onClick={() => {
+                    setTagFilter(tagEdit.name);
+                    setDir(null);
+                    setSnapFilter(null);
+                    setTagEdit(null);
+                  }}
+                >
+                  只看这个标签
+                </button>
+                <button
+                  onClick={() => {
+                    const n = tagEdit.name;
+                    setTagEdit(null);
+                    void source.boardOpen(n).catch((e) => toast(String(e)));
+                  }}
+                >
+                  灵感板
+                </button>
+                <button
+                  onClick={() => {
+                    const n = tagEdit.name;
+                    setTagEdit(null);
+                    setSnapPrompt({
+                      mode: "tag",
+                      tag: n,
+                      count: tags.find((x) => x.name === n)?.count,
+                    });
+                  }}
+                >
+                  加入快照…
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => {
+                    const n = tagEdit.name;
+                    setTagEdit(null);
+                    void deleteTagEverywhere(n);
+                  }}
+                >
+                  从素材上移除
+                </button>
+              </div>
+            ) : null
+          }
           rule={tagRule}
           onRule={(r) => {
             const name = tagEdit.name;

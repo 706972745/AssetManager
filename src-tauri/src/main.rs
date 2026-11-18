@@ -298,6 +298,13 @@ fn am_auto_tags_for(
 }
 
 /// 批量打标签（单个素材也走这个）。返回真正新增的条数，已经打过的重复调用无害。
+/// 建空标签（侧栏「+ 标签」）。已存在就静默成功，不报错。
+#[tauri::command]
+fn am_tag_create(name: String, state: State<AppState>) -> Result<(), String> {
+    let mut a = lock(&state);
+    a.create_tag(&name)
+}
+
 #[tauri::command]
 fn am_tag_assets(ids: Vec<i64>, tag: String, state: State<AppState>) -> Result<i64, String> {
     lock(&state).tag_assets(&ids, &tag)
@@ -4774,6 +4781,7 @@ fn main() {
             am_auto_tags,
             am_auto_tags_for,
             am_asset_tags,
+            am_tag_create,
             am_tag_assets,
             am_untag_assets,
             am_delete_tag,

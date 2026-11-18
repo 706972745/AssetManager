@@ -349,6 +349,9 @@ export const mockSource: Source = {
   async assetTags() {
     return [];
   },
+  async tagCreate() {
+    /* mock：新建空标签，列表本来就随 refreshKey 重算 */
+  },
   async tagAssets() {
     throw new Error("浏览器预览模式不支持打标签");
   },

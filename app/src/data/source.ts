@@ -97,6 +97,7 @@ export const tauriSource: Source = {
   autoTags: () => invoke!<TagCount[]>("am_auto_tags"),
   autoTagsFor: (a, manual) => invoke!<AutoTag[]>("am_auto_tags_for", { asset: a, manual }),
   assetTags: (ids) => invoke!<[number, string[]][]>("am_asset_tags", { ids }),
+  tagCreate: (name) => invoke!<void>("am_tag_create", { name }),
   tagAssets: (ids, tag) => invoke!<number>("am_tag_assets", { ids, tag }),
   untagAssets: (ids, tag) => invoke!<number>("am_untag_assets", { ids, tag }),
   deleteTag: (tag) => invoke!<number>("am_delete_tag", { tag }),

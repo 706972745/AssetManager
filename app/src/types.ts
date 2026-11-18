@@ -396,6 +396,8 @@ export interface Source {
   /** 一批素材各自的手工标签 */
   assetTags(ids: number[]): Promise<[number, string[]][]>;
   /** 批量打标签，返回真正新增条数 */
+  /** 建一个空标签（还没有素材也会出现在侧栏） */
+  tagCreate(name: string): Promise<void>;
   tagAssets(ids: number[], tag: string): Promise<number>;
   /** 批量去标签 */
   untagAssets(ids: number[], tag: string): Promise<number>;

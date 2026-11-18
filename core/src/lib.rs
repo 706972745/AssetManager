@@ -814,6 +814,16 @@ impl App {
         self.gc_tags()
     }
 
+    /// 建一个**空标签**（还没有素材挂着它也算数）。
+    ///
+    /// 侧栏「+ 标签」用它：用户的心智是"我先建一个标签，回头再往上挂素材"，
+    /// 而不是"必须先去素材上打一次"。`tags()` 是从 meta 表列出来的，count 可以是 0，
+    /// 所以插一行就能出现在侧栏里。
+    pub fn create_tag(&mut self, name: &str) -> Result<(), String> {
+        let n = reg::validate_tag_name(name)?;
+        reg::ensure_tag(&self.reg, &n).map(|_| ())
+    }
+
     pub fn set_tag_color(&mut self, name: &str, color: Option<&str>) -> Result<(), String> {
         reg::set_tag_color(&self.reg, name, color)
     }

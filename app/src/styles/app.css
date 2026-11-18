@@ -3150,43 +3150,138 @@
 
 
 /* ---------------------------------------------------------------- 编辑卡 */
+/* 标签 / 分组编辑卡（0.1.28 照 FontManager 改成**跟随鼠标的浮层**）。
+   以前是带遮罩的居中模态框 —— owner 说「和之前的也不对」。现在：236px 宽、
+   紧挨右键点、不遮界面、点外面就关。数值全部对着 FontManager 的 `.tag-edit` 抄。 */
 .tag-edit {
-  width: 344px;
+  position: fixed;
+  z-index: 80;
+  width: 236px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ui-line);
+  background: var(--e2);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
 }
-.tag-edit-title {
+.tag-edit-head {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-.tag-edit-field {
-  margin: 1px 0 2px;
+  font-size: var(--fs-11);
+  font-weight: 600;
+  color: var(--text-2);
 }
 .tag-edit-input {
-  height: 28px;
+  height: 26px;
   font-size: var(--fs-12);
 }
 .tag-edit-label {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 8px 0 6px;
+  margin-top: 4px;
   font-size: var(--fs-10);
   color: var(--text-3);
 }
-.tag-edit-sub {
-  font-size: var(--fs-9);
-  color: var(--text-3);
+/* 只读（自动标签）：名称变成纯文本，色点不可点，删除按钮禁用 */
+.tag-edit-ro {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--ui-line);
+  background: var(--e1);
+  font-size: var(--fs-12);
+  color: var(--text-2);
   opacity: 0.85;
+}
+.tag-swatches.ro {
+  opacity: 0.45;
+  pointer-events: none;
+}
+/* 卡片底部的额外动作（只看这个标签 / 灵感板 / 加入快照 / 从素材上移除） */
+.tag-edit-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.tag-edit-extra button {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--ui-line);
+  font-size: var(--fs-10);
+  color: var(--text-2);
+}
+.tag-edit-extra button:hover {
+  background: var(--e1);
+  color: var(--text-1);
+}
+.tag-edit-extra button.danger {
+  color: var(--danger, #d9534f);
+}
+.tag-edit-danger:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tag-edit-hint {
+  margin: 2px 0 0;
+  font-size: var(--fs-10);
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.tag-edit-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.tag-edit-newgroup {
+  margin-top: 2px;
+}
+.tag-edit-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+.tag-edit-danger {
+  padding: 4px 6px;
+  border-radius: 5px;
+  font-size: var(--fs-10);
+  color: var(--danger, #d9534f);
+}
+.tag-edit-danger:hover {
+  background: rgba(217, 83, 79, 0.12);
+}
+.tag-edit-done {
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 5px;
+  font-size: var(--fs-11);
+  color: var(--text-1);
+  border: 1px solid var(--ui-line);
+  background: var(--e1);
+}
+.tag-edit-done:hover {
+  background: var(--e2);
 }
 .tag-swatches {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .tag-swatch {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   padding: 0;
   border: 1px solid var(--hairline);
   border-radius: 50%;
@@ -4007,10 +4102,30 @@
   font-size: var(--fs-9);
   color: var(--text-3);
 }
+.tag-edit-fold {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  height: 22px;
+  font-size: var(--fs-10);
+  color: var(--text-3);
+  border-radius: 5px;
+}
+.tag-edit-fold:hover {
+  color: var(--text-1);
+}
+.tag-edit-fold svg {
+  transition: transform 110ms ease;
+}
+.tag-edit-fold.open svg {
+  transform: rotate(90deg);
+}
 .tag-rule-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 12px;
+  /* 规则区现在住在 236px 的编辑卡里，两列会把输入框挤成一条缝 */
+  grid-template-columns: 1fr;
+  gap: 6px;
 }
 .tag-rule-grid label {
   display: flex;
