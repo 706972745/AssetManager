@@ -467,6 +467,8 @@ export interface Source {
     png: string,
     action: "copy" | "save" | "saveas" | "peek",
     from?: string,
+    /** 贴图落点：选区在虚拟桌面上的物理 `[x, y, w, h]`（同尺寸同位置） */
+    place?: [number, number, number, number] | null,
   ): Promise<string | null>;
   snipCancel(): Promise<void>;
   /** 覆盖层底图上屏后调它，窗口这时才显示（先显示会黑闪一下） */

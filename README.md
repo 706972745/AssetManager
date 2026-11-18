@@ -11,7 +11,7 @@
 <br>
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.1.26%20dev-gray?style=flat-square)](../../releases)
+[![Version](https://img.shields.io/badge/Version-0.1.27%20dev-gray?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
 [![Status](https://img.shields.io/badge/Status-开发版%20(0.x)-gray?style=flat-square)](#已知限制)
@@ -55,7 +55,7 @@
 | **标签 / 分组** | 手工标签 + 自动标签（格式、类型、尺寸、色彩等从文件事实推导，只读）；标签分组、颜色、批量打标 |
 | **快照** | 把一批图"记下来"（不搬文件）。身份是**文件内容指纹**（xxh3-128），所以**改名、换目录、换素材库之后导回来照样对得上**；右键可**只看这份快照**（主列表据此筛选）、两份快照可合并（并集）/ 差集；可导出清单 `.json`、可把原图打包 `.zip` |
 | **灵感板** | 任意标签 / 任意快照右键 → 一块**无限、无边界**的画布：任意拖动、滚轮缩放、单张改大小，**位置与大小会记住**（下次开板还原）；板上复制 / 打开 / 定位一律作用原文件；板内 `Ctrl+V` 把剪贴板图存进 `screenshots` 并自动打标 |
-| **截图标注** | `F1` 选区 → 矩形/椭圆/箭头/画笔/文字/马赛克（可拖动/删除单条）+ 撤销重做 → **点按钮**复制或保存（没有交付快捷键）；`F3` 贴图板 |
+| **截图标注** | `F1` 选区 → 矩形/椭圆/箭头/画笔/文字/马赛克（可拖动/删除单条）+ 撤销重做 → `Ctrl+C` 复制 / `Ctrl+S` 保存（或点工具栏按钮）；`F3` 贴图板 |
 | **工具面板** | 重复文件、丢失引用、批量重命名 |
 | **命令面板** | `Ctrl+K` 找命令、跳转、新建快照、导入快照 |
 

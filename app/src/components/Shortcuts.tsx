@@ -68,12 +68,14 @@ const RIGHT: Group[] = [
     ],
   },
   {
-    /* 0.1.26：截图标注**没有任何交付快捷键**（owner 要求取消一切自动快捷键）。
-       交付只认工具栏按钮 + 中键，键位以 `Snip.tsx` 的 keydown 为准。 */
+    /* 键位以 `Snip.tsx` 的 keydown 为准（0.1.27）：Ctrl+C 复制、Ctrl+S 保存，
+       两者只认真人按键（外部程序注入的会被静默丢弃）。 */
     title: "截图标注",
     rows: [
-      { keys: ["按钮"], label: "复制 / 保存 / 贴图", hint: "右下角三个按钮，没有快捷键" },
-      { keys: ["中键"], label: "贴到屏幕上（无边框窗口）", hint: "工具栏「贴图」同效" },
+      { keys: ["Ctrl", "C"], label: "复制到剪贴板", hint: "只有显式复制才写剪贴板" },
+      { keys: ["Ctrl", "S"], label: "保存到截图库", hint: "直接写安装目录的 screenshots" },
+      { keys: ["Ctrl", "Shift", "S"], label: "另存为…", hint: "自己选路径" },
+      { keys: ["中键"], label: "贴到屏幕上（无边框窗口）", hint: "与截图同尺寸、同位置" },
       { keys: ["Enter"], label: "不结束截图", hint: "框完可直接画标注" },
       { keys: ["V"], label: "选择 / 移动标注" },
       { keys: ["R", "E", "L"], label: "矩形 / 椭圆 / 直线" },

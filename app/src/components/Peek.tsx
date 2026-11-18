@@ -61,8 +61,19 @@ export function Peek() {
   const [rot, setRot] = useState(0);
   const [flip, setFlip] = useState({ h: false, v: false });
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /* 蓝色边框（owner 2026-11-18）：截图贴到屏幕上时，图和桌面颜色接近就看不出边界。
+     右键可开关，**默认开**，并且记在 localStorage —— 所有贴图窗口共用这一个偏好，
+     不用每贴一张设一次。 */
+  const [frame, setFrame] = useState(() => localStorage.getItem("am.peek.frame") !== "0");
+  const toggleFrame = useCallback(() => {
+    setFrame((v) => {
+      localStorage.setItem("am.peek.frame", v ? "0" : "1");
+      return !v;
+    });
+  }, []);
 
   const root = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const busy = useRef(false);
   const pan = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   /* 窗口建出来是**不可见**的（后端 `.visible(false)`），首帧真画上去了才让它露面 ——
@@ -140,8 +151,10 @@ export function Peek() {
       const up = e.deltaY < 0;
 
       if (e.shiftKey) {
-        // 锚定鼠标：让指针底下那个像素在缩放前后**不动**
-        const rect = el.getBoundingClientRect();
+        // 锚定鼠标：让指针底下那个像素在缩放前后**不动**。
+        // 用 **img 的** rect，不是 root 的 —— root 里有 16px 的发光的边距，
+        // 拿 root 算会让锚点整体偏 16px。
+        const rect = (imgRef.current ?? el).getBoundingClientRect();
         const px = e.clientX - rect.left;
         const py = e.clientY - rect.top;
         setView((v) => {
@@ -295,6 +308,11 @@ export function Peek() {
       icon: "star",
       action: () => void source.peekTop(!pinned).then(setPinned).catch(() => {}),
     },
+    {
+      label: `${frame ? "✓ " : ""}蓝色边框`,
+      icon: "image",
+      action: toggleFrame,
+    },
     { kind: "separator" },
     {
       label: `顺时针转 90°${rot ? `（已转 ${rot}°）` : ""}`,
@@ -334,7 +352,7 @@ export function Peek() {
   return (
     <div
       ref={root}
-      className="peek-root"
+      className={frame ? "peek-root peek-framed" : "peek-root"}
       data-tauri-drag-region
       onDoubleClick={close}
       onContextMenu={(e) => {
@@ -344,6 +362,7 @@ export function Peek() {
     >
       {cur && !err && (
         <img
+          ref={imgRef}
           className="peek-img"
           src={px}
           alt=""

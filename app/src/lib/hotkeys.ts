@@ -18,7 +18,7 @@ export interface HotkeySet {
 
 /* `Alt+F1`（截完直接进剪贴板）在 0.1.20 删掉了：
    它的唯一效果就是"框完区就复制并把覆盖层关掉"，用户既看不到工具栏、也没机会加标注，
-   而这正是 owner 反复报的「截图完成后老是自动复制」。0.1.26 起复制/保存只能点按钮，连快捷键都没有了。 */
+   而这正是 owner 反复报的「截图完成后老是自动复制」。0.1.27 起 Ctrl+C / Ctrl+S 恢复了，但只认真人按键（见 core/src/keywatch.rs）。 */
 export const DEFAULT_HOTKEYS: HotkeySet = { snip: "F1", clip: "F3" };
 
 const KEY = "am.hotkeys.v1";

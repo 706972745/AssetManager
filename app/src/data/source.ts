@@ -146,8 +146,14 @@ export const tauriSource: Source = {
   snipStart: () => invoke!<void>("am_snip_start"),
   snipCrop: (x, y, w, h, scale) =>
     invoke!<[string, number, number]>("am_snip_crop", { x, y, w, h, scale }),
-  snipFinish: (png, action, from) =>
-    invoke!<string | null>("am_snip_finish", { png, action, from: from ?? "btn" }),
+  /** `place` = 选区在虚拟桌面上的物理 `[x, y, w, h]`；贴图靠它"摆在截图那个位置"。 */
+  snipFinish: (png, action, from, place) =>
+    invoke!<string | null>("am_snip_finish", {
+      png,
+      action,
+      from: from ?? "btn",
+      place: place ?? null,
+    }),
   snipCancel: () => invoke!<void>("am_snip_cancel"),
   snipReady: () => invoke!<void>("am_snip_ready"),
   snipFull: () => invoke!<string>("am_snip_full"),

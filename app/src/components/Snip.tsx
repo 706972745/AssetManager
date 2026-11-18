@@ -7,7 +7,7 @@ import { source } from "../data/source";
  * 本软件**框完不自动交付**，复制 / 保存 / 贴图都必须由用户显式按键。
  *
  * 参照物是用 Snipaste 实机截图量出来的（2026-11-17，2560×1600 @125%）：
- * - 选区边框 1px `#2080f0`，8 颗蓝点把手（白圈）；
+ * - 选区边框 1px `#1b4fe0`（软件里那支宝蓝 --ui-accent），8 颗蓝点把手（白圈）；
  * - 选区外压暗 **55% 黑**（实测 255→115、45→20）；
  * - 尺寸标签：白色 13px 带投影，贴在选区**左上方**外侧；
  * - 工具栏：**浅灰 `#f2f2f2` + 1px 蓝边**、圆角 3、高 34、**右对齐选区右边界**、
@@ -19,8 +19,8 @@ import { source } from "../data/source";
  *
  * 交互也照它：一开始**没有激活任何工具**（拖框内 = 移动选区），
  * 点工具才进入标注；右键 = 取消选区（没有选区时退出）；Esc = 退出；
- * **交付只认鼠标**（0.1.26 起）：工具栏三个按钮「贴图 / 保存到截图库 / 复制到剪贴板」+ 中键贴图。
- * 没有任何键盘快捷键能交付 —— 不复制、不保存、不关窗，除非你点了按钮；
+ * **交付入口**：工具栏三个按钮（贴图 / 保存到截图库 / 复制到剪贴板）+ 中键贴图，
+ * 以及 `Ctrl+C` 复制 / `Ctrl+S` 保存（0.1.27 恢复；只认**真人**按键，注入的静默丢弃）；
  * Enter **不结束截图**（0.1.20 定案：框完直接画标注）；Ctrl+A = 全屏；方向键微调（Shift = 改大小）。
  * 历史包袱：0.10～0.1.18 是「Enter 复制并退出」（照 Snipaste），0.1.19 是「Enter 保存并退出」，
  * 0.1.20 起 Enter 不交付任何东西 —— 否则用户框完顺手按 Enter 就再也进不到标注这一步。
@@ -85,10 +85,10 @@ const isFreehand = (op: Op): op is Extract<Op, { t: "pen" | "marker" }> =>
 const isBoxOp = (op: Op): op is Extract<Op, { a: P; b: P }> =>
   op.t === "rect" || op.t === "ellipse" || op.t === "line" || op.t === "arrow" || op.t === "mosaic";
 
-const BLUE = "#2080f0";
+const BLUE = "#1b4fe0";
 const SHAPE_LABEL: Record<ShapeTool, string> = { rect: "矩形", ellipse: "椭圆", line: "直线" };
 const DIM = 0.55;
-const COLORS = ["#f5222d", "#fa8c16", "#fadb14", "#52c41a", "#13c2c2", "#2080f0", "#722ed1", "#ffffff", "#000000"];
+const COLORS = ["#f5222d", "#fa8c16", "#fadb14", "#52c41a", "#13c2c2", "#1b4fe0", "#722ed1", "#ffffff", "#000000"];
 const LOUPE = { w: 184, h: 136, zoom: 8 };
 const BAR_H = 34;
 
@@ -359,7 +359,7 @@ export function Snip() {
     ctx.drawImage(src, sx, sy, sw, sh, 0, 0, LOUPE.w, LOUPE.h);
 
     /* 十字线（半透明蓝）+ 中心像素框 */
-    ctx.strokeStyle = "rgba(32,128,240,0.55)";
+    ctx.strokeStyle = "rgba(27,79,224,0.55)";
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.moveTo(LOUPE.w / 2, 0);
@@ -737,7 +737,21 @@ export function Snip() {
     setErr("");
     try {
       const png = await compose();
-      await source.snipFinish(png, action, from);
+      /* 贴图的"落点"：选区在**虚拟桌面**上的物理坐标 `[x, y, w, h]`。
+         `boot.x / boot.y` 是覆盖窗（也就是整块虚拟桌面截图）的原点，
+         `rect` 是选区在窗内的 CSS 坐标，× scale 才是物理像素。
+         后端拿到它就不再按长边等比缩放、也不居中到鼠标 —— 贴图与截图**同尺寸同位置**。 */
+      let place: [number, number, number, number] | null = null;
+      const r = rectRef.current;
+      if (action === "peek" && boot && r) {
+        place = [
+          boot.x + Math.round(r.x * scale),
+          boot.y + Math.round(r.y * scale),
+          Math.max(1, Math.round(r.w * scale)),
+          Math.max(1, Math.round(r.h * scale)),
+        ];
+      }
+      await source.snipFinish(png, action, from, place);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -796,10 +810,27 @@ export function Snip() {
         }
         return;
       }
-      /* **交付没有快捷键**（owner 2026-11-18：「不允许软件自己用 Ctrl+C，
-         所有自动实现快捷键的功能全部取消」）。
-         复制 / 保存 / 贴图只能点工具栏按钮或按中键 —— 每个交付都是一次明确的鼠标动作。
-         这条同时堵死了「注入的 Ctrl+C 被当成用户意图」那条路（历史事故见 WORKLOG §38）。 */
+      /* 交付快捷键（0.1.27 恢复，owner 要的）：`Ctrl+C` 复制、`Ctrl+S` 保存。
+         这两条只认**真人按键** —— 本机有程序会向前台窗口注入 Ctrl+C（见 WORKLOG §38），
+         判据在 Rust 侧（core/src/keywatch.rs + am_snip_finish）。注入的键**静默丢弃**：
+         不复制、不关窗、也不弹任何提示。 */
+      if (mod && low === "c") {
+        e.preventDefault();
+        void finish("copy", "ctrl+c");
+        return;
+      }
+      /* Ctrl+Shift+S = 另存为（自己选路径）；Ctrl+S = 直接进截图库。
+         必须先判 Shift 版 —— 否则会被下面那条吃掉。 */
+      if (mod && e.shiftKey && low === "s") {
+        e.preventDefault();
+        void finish("saveas", "ctrl+shift+s");
+        return;
+      }
+      if (mod && low === "s") {
+        e.preventDefault();
+        void finish("save", "ctrl+s");
+        return;
+      }
       if (mod && low === "a") {
         e.preventDefault();
         setOps([]);
@@ -818,7 +849,7 @@ export function Snip() {
            历史：0.10.0～0.1.18 是「复制并退出」（照 Snipaste），0.1.19 改成「保存并退出」。
            但 owner 反复报的「框完就复制、没法加线条文字」，根因是**框选完下意识按 Enter**
            —— 只要 Enter 还会关窗，他就永远进不到标注那一步。所以 Enter 不再交付任何东西。 */
-        say("Enter 不再结束截图 · 框完直接画标注 · 保存 / 复制请点右下角按钮");
+        say("Enter 不再结束截图 · Ctrl+S 存到截图库 / Ctrl+Shift+S 另存为 / Ctrl+C 复制，或点右下角按钮");
         return;
       }
       if (!mod && (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown")) {
@@ -1139,8 +1170,8 @@ export function Snip() {
           <span className="snip-sep" />
           <BarBtn label="取消" keyHint="Esc" danger onPick={() => void source.snipCancel()} icon={<X size={15} strokeWidth={1.6} />} />
           <BarBtn label="贴图" keyHint="中键" onPick={() => void finish("peek", "btn")} icon={<Pin size={15} strokeWidth={1.5} />} />
-          <BarBtn label="保存到截图库" onPick={() => void finish("save", "btn")} icon={<Save size={15} strokeWidth={1.5} />} />
-          <BarBtn label="复制到剪贴板" onPick={() => void finish("copy", "btn")} icon={<Copy size={15} strokeWidth={1.5} />} />
+          <BarBtn label="保存到截图库" keyHint="Ctrl+S ｜ 另存 Ctrl+Shift+S" onPick={() => void finish("save", "btn")} icon={<Save size={15} strokeWidth={1.5} />} />
+          <BarBtn label="复制到剪贴板" keyHint="Ctrl+C" onPick={() => void finish("copy", "btn")} icon={<Copy size={15} strokeWidth={1.5} />} />
         </div>
       )}
 

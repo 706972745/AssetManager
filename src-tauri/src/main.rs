@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use am_core::fsops::MovePolicy;
 use am_core::model::{Asset, AssetQuery, DirNode, ScanStats};
-use am_core::{clipimg, db, fsops, scan, screen, thumb, watch, App};
+use am_core::{clipimg, db, fsops, keywatch, scan, screen, thumb, watch, App};
 use serde::{Deserialize, Serialize};
 use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
@@ -1597,6 +1597,13 @@ fn not_found() -> Response<Vec<u8>> {
 const PEEK_LONG_EDGE: f64 = 342.0;
 const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
+/// 贴图窗口四周的透明边距（**CSS px**，逻辑单位；前端 `.peek-root` 的 `--peek-glow` 必须同值）。
+///
+/// 用途只有一个：「由边框向外的渐变蓝色窗口阴影」（owner 2026-11-18）。
+/// 窗口外面没有像素可画，发光只能画在窗口里，所以窗口要比图片本身大一圈，
+/// 图居中、光晕落在这一圈透明的 padding 里。
+/// **必须和前端 `.peek-root { --peek-glow }` 的值一致**，不然图会偏、会缩。
+const PEEK_GLOW: f64 = 20.0;
 const CLIP_HISTORY: usize = 10;
 
 /// 一张"可以贴到屏幕上"的图
@@ -1627,6 +1634,13 @@ struct PeekRecall {
     y: i32,
     /// 逻辑长边（DIP）
     long_edge: f64,
+    /// 精确几何 `[x, y, w, h]`（**物理像素**）。
+    ///
+    /// 只有「截图 → 贴图」这条路会填：owner 要求**贴图和截图一样大、落在同一个位置**，
+    /// 所以不能再按长边等比缩放、也不能居中到鼠标那里。填了它就以它为准
+    /// （`spawn_peek` 里 `set_size(Physical)` + `set_position(Physical)`），
+    /// 拖动 / 缩放窗口时同步更新，重启后也能原地原尺寸回来。
+    place: Option<[f64; 4]>,
     top: bool,
     opacity: f64,
 }
@@ -1641,6 +1655,7 @@ impl Default for PeekRecall {
             x: 0,
             y: 0,
             long_edge: PEEK_LONG_EDGE,
+            place: None,
             top: true,
             opacity: 1.0,
         }
@@ -1917,7 +1932,24 @@ async fn spawn_peek(
     rec: PeekRecall,
     restore: bool,
 ) -> Result<(), String> {
-    let (lw, lh) = peek_size_for(item.w, item.h, rec.long_edge);
+    /* 「截图 → 贴图」要 1:1 摆在原位（`place` 有值），这时**不许**按长边等比缩放：
+       先按目标物理尺寸 / 屏幕 scale 给个接近的逻辑初值，`build()` 之后再用
+       `set_size(Physical)` 精确对齐（多显示器 DPI 不同也不会偏）。 */
+    let app_scale = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .filter(|s| *s > 0.1)
+        .unwrap_or(1.0);
+    /* 逻辑尺寸 = 图的尺寸 + 两侧发光边。`inner_size` 收的是逻辑像素，
+       所以这里用的是 CSS px 的 PEEK_GLOW（不乘 scale）。 */
+    let pad = PEEK_GLOW * 2.0;
+    let (lw, lh) = {
+        let (iw, ih) = match rec.place {
+            Some([_, _, w, h]) if w > 2.0 && h > 2.0 => (w / app_scale, h / app_scale),
+            _ => peek_size_for(item.w, item.h, rec.long_edge),
+        };
+        (iw + pad, ih + pad)
+    };
     if let Some(old) = app.get_webview_window(&rec.label) {
         let _ = old.close();
     }
@@ -1960,7 +1992,22 @@ async fn spawn_peek(
             return Err(format!("无边框窗口创建失败：{e}"));
         }
     };
-    if restore {
+    if let Some([px, py, pw, ph]) = rec.place {
+        /* 原位原尺寸：先把窗口量准（图 + 两侧发光边），再挪到"选区左上角减去发光边"那个点 ——
+           图就正好落在选区原来的位置、原来的大小。
+           顺序不能反 —— 先定位后改尺寸的话某些 DPI 下 set_size 会顺带挪一次。 */
+        let sc = win.scale_factor().unwrap_or(1.0);
+        let g = (PEEK_GLOW * sc).round();
+        let ww = (pw + 2.0 * g).round().max(1.0);
+        let wh = (ph + 2.0 * g).round().max(1.0);
+        let wx = (px - g).round() as i32;
+        let wy = (py - g).round() as i32;
+        let _ = win.set_size(tauri::PhysicalSize::new(ww as u32, wh as u32));
+        let _ = win.set_position(tauri::PhysicalPosition::new(wx, wy));
+        /* 存档里的 `place` 语义统一成**窗口 rect**（含发光边）——
+           拖动/缩放事件记的也是窗口 rect，恢复时直接照用，不会一次次把边距叠上去。 */
+        peek_touch(&rec.label, |r| r.place = Some([wx as f64, wy as f64, ww, wh]));
+    } else if restore {
         /* 存档里记的是**物理像素**（`Moved` 事件给的也是物理），
            而 `WindowBuilder::position()` 收的是**逻辑像素** —— 直接喂过去在高 DPI 上
            会偏移 25%（实测 983 变成 1229）。所以恢复用 set_position(Physical…)。 */
@@ -1978,12 +2025,24 @@ async fn spawn_peek(
             peek_touch(&lbl, |r| {
                 r.x = p.x;
                 r.y = p.y;
+                /* 精确几何也要跟着走：`place` 是"这次贴图摆在哪"的唯一事实，
+                   重启还原靠它，别只在建窗那一次算。 */
+                if let Some(q) = r.place.as_mut() {
+                    q[0] = p.x as f64;
+                    q[1] = p.y as f64;
+                }
             });
         }
         tauri::WindowEvent::Resized(s) => {
             if s.width > 0 && s.height > 0 {
                 let long = (s.width.max(s.height) as f64 / sc0).round();
-                peek_touch(&lbl, |r| r.long_edge = long);
+                peek_touch(&lbl, |r| {
+                    r.long_edge = long;
+                    if let Some(q) = r.place.as_mut() {
+                        q[2] = s.width as f64;
+                        q[3] = s.height as f64;
+                    }
+                });
             }
         }
         _ => {}
@@ -2064,8 +2123,11 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     let pos = win.outer_position().map_err(|e| e.to_string())?;
     let scale = win.scale_factor().map_err(|e| e.to_string())?;
 
-    let mut w = size.width as f64 * step;
-    let mut h = size.height as f64 * step;
+    /* 缩放的是「图」，不是整扇窗：先把四周的发光边减掉，缩完再加回去，
+       这样滚轮缩放时那一圈渐变不会跟着变胖变瘦。 */
+    let g = (PEEK_GLOW * scale).round();
+    let mut w = (size.width as f64 - 2.0 * g).max(8.0) * step;
+    let mut h = (size.height as f64 - 2.0 * g).max(8.0) * step;
     let long = w.max(h);
     let min = PEEK_MIN_EDGE * scale;
     let max = PEEK_MAX_EDGE * scale;
@@ -2078,9 +2140,10 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     };
     w = (w * k).round().max(24.0);
     h = (h * k).round().max(24.0);
-    let nx = (pos.x as f64 + (size.width as f64 - w) / 2.0).round();
-    let ny = (pos.y as f64 + (size.height as f64 - h) / 2.0).round();
-    win.set_size(tauri::PhysicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    let (ww, wh) = (w + 2.0 * g, h + 2.0 * g);
+    let nx = (pos.x as f64 + (size.width as f64 - ww) / 2.0).round();
+    let ny = (pos.y as f64 + (size.height as f64 - wh) / 2.0).round();
+    win.set_size(tauri::PhysicalSize::new(ww, wh)).map_err(|e| e.to_string())?;
     win.set_position(tauri::PhysicalPosition::new(nx, ny)).map_err(|e| e.to_string())?;
     peek_touch(win.label(), |r| {
         r.long_edge = (w.max(h) / scale).round();
@@ -2095,8 +2158,12 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
 async fn am_peek_ratio(win: tauri::Window, w: u32, h: u32) -> Result<(), String> {
     let size = win.outer_size().map_err(|e| e.to_string())?;
     let pos = win.outer_position().map_err(|e| e.to_string())?;
-    let long = (size.width.max(size.height)) as f64;
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+    let g = (PEEK_GLOW * scale).round();
+    /* `peek_size_for` 收的是**逻辑**长边，这里减掉发光边、再按 scale 折回逻辑 */
+    let long = ((size.width.max(size.height) as f64 - 2.0 * g) / scale).max(24.0);
     let (nw, nh) = peek_size_for(w, h, long);
+    let (nw, nh) = (nw * scale + 2.0 * g, nh * scale + 2.0 * g);
     let nx = (pos.x as f64 + (size.width as f64 - nw) / 2.0).round();
     let ny = (pos.y as f64 + (size.height as f64 - nh) / 2.0).round();
     win.set_size(tauri::PhysicalSize::new(nw.round(), nh.round())).map_err(|e| e.to_string())?;
@@ -3517,8 +3584,18 @@ fn set_window_alpha(_win: &tauri::WebviewWindow, _alpha: u8) -> Result<(), Strin
 async fn snip_begin(app: AppHandle) -> Result<(), String> {
     /* 新会话：让上一次迟到的收尾线程（`am_snip_ready` 里那条）失效 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
-    /* 0.1.26：截图界面**没有任何交付快捷键**，所以不再需要「真人按键」监视钩子 ——
-       没有哪颗键能让它自己复制/保存。历史根因见 WORKLOG §38。 */
+    /* 0.1.27：`Ctrl+C` / `Ctrl+S` 恢复（owner 要的），所以又要判「这颗键是真人按的还是
+       外部程序注入的」—— 见 core/src/keywatch.rs。钩子必须装在有消息泵的**主线程**上，
+       走 run_on_main_thread；装不上/没收到任何事件时判据自动放行，不会让快捷键失效。 */
+    keywatch::reset();
+    {
+        /* 钩子在自己的专用线程上装并跑消息泵（见 core/src/keywatch.rs），
+           所以这里可以直接调 —— 不必再投到主线程。 */
+        let ok = keywatch::install();
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("keywatch install ok={ok} tid={} err={}", keywatch::hook_tid(), keywatch::last_error()));
+        }
+    }
     /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
        `am_snip_cancel` 不会执行，slot 一直占着 → 之后每次按 F1 都回"上一次截图还没结束"，
        永久失效，用户只会说"F1 坏了"。有窗口才算真在进行中。 */
@@ -3927,10 +4004,50 @@ async fn am_snip_finish(
     png: String,
     action: String,
     from: Option<String>,
+    place: Option<Vec<f64>>,
 ) -> Result<Option<String>, String> {
+    /* 闸门（只拦 `ctrl+c` / `ctrl+s` 这两条快捷键）：
+       本机有程序会向前台窗口注入 Ctrl+C（`core/src/keywatch.rs` 抓到同毫秒的
+       `0xa2` + `C`，两条都带 INJECTED）。判据是「最近 1.2s 内真人按的是不是这颗键」。
+
+       **挡下来必须静默**：不关窗、不写剪贴板、不落盘，也**不往界面弹任何东西**
+       （0.1.25 那次弹了个红条、整块覆盖层变红，owner 明确说"这种是什么情况，从源头解决"）。
+       用户看到的应该是"这次 Ctrl+C 没有任何反应"，而不是一个报错。
+       按钮 / 中键是鼠标动作，不经过这里，不受影响。 */
+    let shortcut_vk = match from.as_deref() {
+        Some("ctrl+c") => Some(0x43u32), // 'C'
+        Some("ctrl+s") => Some(0x53u32),           // 'S'
+        Some("ctrl+shift+s") => Some(0x53u32),     // 'S'（另存为）
+        _ => None,
+    };
+    if let Some(vk) = shortcut_vk {
+        let (inst, seen, last) = keywatch::state();
+        let pass = keywatch::real_key_matches(vk, 1200);
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(
+                d,
+                &format!(
+                    "snip gate vk={vk:#x} pass={pass} installed={inst} seen={seen} tid={} last={last:?}",
+                    keywatch::hook_tid()
+                ),
+            );
+        }
+        if !pass {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(
+                    d,
+                    &format!(
+                        "snip ignore injected action={action} from={}（不是真人按键，静默丢弃）",
+                        from.as_deref().unwrap_or("?")
+                    ),
+                );
+            }
+            return Ok(None);
+        }
+    }
     /* 一行审计：谁触发的交付。这个软件出过两次「截完自动复制」，两次都是靠回看
        某一个入口才定位到的 —— 所以每个交付都记，别只在 copy 记。
-       0.1.26 起 `from` 只会是 `btn` / `middle-click`：交付没有键盘快捷键。 */
+       0.1.27 起 `from` 可能是 `ctrl+c` / `ctrl+s` / `btn` / `middle-click`。 */
     if let Some(d) = LOG_DIR.get() {
         log_runtime(
             d,
@@ -3940,12 +4057,24 @@ async fn am_snip_finish(
             ),
         );
     }
+    /* 贴图要"摆回原处"：`[x, y, w, h]` 全是**物理像素**（虚拟桌面坐标）。
+       前端从 boot 的窗口原点 + 选区 CSS 坐标 × scale 算出来，形状不对就当没有。 */
+    let place_rect = place.and_then(|p| {
+        if p.len() == 4 && p[2] > 2.0 && p[3] > 2.0 {
+            Some([p[0], p[1], p[2], p[3]])
+        } else {
+            None
+        }
+    });
     let bytes = png_from_b64(&png)?;
     /* 这条会话到此结束：正在淡入的收尾线程不许再动窗口 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
 
     let win = app.get_webview_window("snip");
     let close_snip = || {
+        /* 卸掉「真人按键」监视钩子。卸载动作由钩子线程自己做（它收到 STOP 就
+           Unhook 并退出），这里只是叫它停 —— 扔后台，别让收尾命令等它。 */
+        std::thread::spawn(keywatch::uninstall);
         /* 底图必须一起撤：它是全屏 topmost 的原生窗口，忘了会一直挡着桌面 */
         splash_close();
         if let Some(w) = app.get_webview_window("snip") {
@@ -3992,6 +4121,9 @@ async fn am_snip_finish(
                 kind: "file".into(),
                 path: path.to_string_lossy().to_string(),
                 long_edge: PEEK_LONG_EDGE,
+                /* 截图贴图：**与选区同尺寸、同位置**（owner 2026-11-18）。
+                   有它就绕开"按长边等比缩放 + 居中到鼠标"那套（那是给素材浏览用的）。 */
+                place: place_rect,
                 ..Default::default()
             };
             peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
@@ -4121,6 +4253,8 @@ async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
     /* 取消也算一次会话结束：正在淡入的那条线程必须立刻停手，
        不然它会把底图重新撤一遍、把已经关掉的窗口再设一次 alpha */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
+    /* 会话结束：卸掉「真人按键」监视钩子（扔后台，不挡取消） */
+    std::thread::spawn(keywatch::uninstall);
     let (hidden, tmp) = {
         let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
         match g.take() {
