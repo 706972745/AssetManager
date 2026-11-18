@@ -2387,8 +2387,10 @@ fn spawn_board(
         tauri::WebviewUrl::App("index.html".into()),
     )
     .title(title)
-    .inner_size(1280.0, 860.0)
-    .min_inner_size(720.0, 520.0)
+    /* 默认 900×650（owner 2026-11-18）；最小 100×100 —— 板子常被当成"随手看一眼"的
+       临时窗口，1280 太占屏、720 的下限又不让它缩成角落小图。 */
+    .inner_size(900.0, 650.0)
+    .min_inner_size(100.0, 100.0)
     .decorations(false)
     .transparent(false)
     .resizable(true)

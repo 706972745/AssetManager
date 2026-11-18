@@ -1120,6 +1120,8 @@ export default function App() {
       setCtx({
         x,
         y,
+        /* 标记来源：只有它能让分组面板保持展开（见 CtxState.source） */
+        source: "coll",
         items: [
           /* 顺序照 FontManager `collectionMenu`：改名 → 从分组建快照 → 筛选 → 删除 */
           { label: "重命名…", action: () => setCollRenameId(row.id) },
@@ -2757,7 +2759,9 @@ export default function App() {
                 void renameCollInline(id, name);
               }}
               onMenu={(row, x, y) => collMenu(row, x, y)}
-              hold={!!ctx}
+              /* 只有**分组自己的**右键菜单才保持展开。以前是 `!!ctx`，
+                 右键素材/空白也会把分组面板顶开（owner 报的 bug）。 */
+              hold={ctx?.source === "coll"}
               half={false}
             />
           }
@@ -2784,7 +2788,8 @@ export default function App() {
               /* hold 是「标签面板保持展开」的开关（TagDock: open = pinned || hold）。
                  快照的新建/改名**不能**算进来 —— 就地输入行在侧栏上半部分，
                  把它算进来会让"点新建快照 → 下面的标签面板自己弹开"（owner 2026-11-17 报的 bug）。 */
-              hold={!!tagEdit || !!tagPrompt || !!ctx || !!snapPrompt}
+              /* 标签面板同理：编辑卡 / 打标签弹窗会用到面板里的行，其它菜单不该顶开它 */
+              hold={!!tagEdit || !!tagPrompt}
             />
           }
         />

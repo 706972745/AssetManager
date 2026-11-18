@@ -6503,8 +6503,14 @@ body.board-body #root {
    ============================================================================ */
 .detail-body .tag-editor {
   display: flex;
+  /* **必须显式写 row**：下面 5658 行那份旧定义是 `flex-direction: column`，
+     而 column + align-items:center 会把 chip 和输入框**水平居中** ——
+     owner 截图里"标签就一个 chip 却缩在面板中间、右边一大片空白"就是这么来的。
+     写回 row 之后 align-items:center 才是"行内垂直居中"，所有东西左对齐。 */
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
 }
 
@@ -6612,4 +6618,46 @@ body.board-body #root {
   background: var(--e2);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
   overflow: hidden;
+}
+
+/* ============================================================================
+   灵感板窄窗口（owner 2026-11-18：默认 900×650，**最小可缩到 100×100**）
+   顶栏那一排按钮在 260px 以下会溢出/被裁，按视口宽度逐级收起：
+   先藏标题 → 再藏分隔线与缩放百分比 → 最后只留「关闭」。
+   ============================================================================ */
+@media (max-width: 520px) {
+  .board-title {
+    display: none;
+  }
+  .board-top {
+    justify-content: flex-end;
+    padding-left: 8px;
+  }
+}
+@media (max-width: 380px) {
+  .board-actions .board-sep,
+  .board-actions .board-zoom {
+    display: none;
+  }
+}
+@media (max-width: 300px) {
+  /* 小到角落尺寸时，30px 高的顶栏会吃掉三分之一画面 —— 默认藏起来，
+     鼠标扫到顶部再浮出来（拖拽区仍然在，`data-tauri-drag-region` 不受 opacity 影响）。 */
+  .board-top {
+    height: 22px;
+    padding: 0 2px;
+    opacity: 0;
+  }
+  .board-top:hover {
+    opacity: 1;
+  }
+  .board-actions button {
+    padding: 0 2px;
+  }
+}
+@media (max-width: 240px) {
+  /* 只剩关闭：小到 100×100 时顶栏还是一整条拖拽区，别让按钮把它挤满 */
+  .board-actions > button:not(:last-child) {
+    display: none;
+  }
 }

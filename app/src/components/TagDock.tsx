@@ -196,7 +196,6 @@ export function TagDock({
     !needle || s.toLowerCase().includes(needle) || (label ?? "").toLowerCase().includes(needle);
   const shownTags = tags.filter((t) => hit(t.name));
   const shownAuto = autoTags.filter((t) => hit(t.name, autoTagLabel(t.name)));
-  const total = tags.length + autoTags.length;
 
   /** 组内排序：按使用数降序，同数按名字（「常用的浮前面」在组内也一样） */
   const sortIn = (list: TagCount[]) =>
@@ -309,17 +308,17 @@ export function TagDock({
 
       <div className="tag-dock-body">
         <div className="tag-dock-tools">
-          {total > 8 && (
-            <BlinkCaretInput
-              value={q}
-              onChange={setQ}
-              placeholder="过滤标签…"
-              fieldClassName="tag-dock-search"
-              ariaLabel="过滤标签"
-              onFocus={() => setFocusHold(true)}
-              onBlur={() => setFocusHold(false)}
-            />
-          )}
+          {/* 常显：分组面板一直是常显的（`过滤分组…`），标签这边按 `total > 8` 藏起来
+              就变成"同一个位置有时有框有时没有" —— owner 直接问"我标签搜索框去哪里了"。 */}
+          <BlinkCaretInput
+            value={q}
+            onChange={setQ}
+            placeholder="过滤标签…"
+            fieldClassName="tag-dock-search"
+            ariaLabel="过滤标签"
+            onFocus={() => setFocusHold(true)}
+            onBlur={() => setFocusHold(false)}
+          />
           <button
             className={`tag-tool-btn ${showingPinned ? "on" : ""}`}
             title={showingPinned ? "取消固定（收起后随鼠标离开自动收起）" : "固定展开（鼠标离开也不收）"}

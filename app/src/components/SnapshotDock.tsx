@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SnapshotRow } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
 
@@ -129,6 +129,10 @@ export function SnapshotDock({
   onImport: () => void;
 }) {
   const [closed, setClosed] = useState(loadClosed);
+  /* 单击「只看这份」要延后 200ms 再执行：
+     双击时浏览器会先发两次 click、再发 dblclick —— 立即执行的话双击等于
+     "筛上 → 取消 → 打开灵感板"，列表先闪一下，而且第二次点击可能落在重排后的另一行上。 */
+  const clickTimer = useRef<number | null>(null);
 
   useEffect(() => {
     saveClosed(closed);
@@ -200,8 +204,20 @@ export function SnapshotDock({
                 key={s.id}
                 className={`tree-row snap-row${activeId === s.id ? " sel" : ""}`}
                 title={`${s.name}｜${s.count} 张｜单击只看这份快照，双击打开灵感板，右键更多`}
-                onClick={() => onPick(s)}
-                onDoubleClick={() => onOpen(s)}
+                onClick={() => {
+                  if (clickTimer.current) window.clearTimeout(clickTimer.current);
+                  clickTimer.current = window.setTimeout(() => {
+                    clickTimer.current = null;
+                    onPick(s);
+                  }, 200);
+                }}
+                onDoubleClick={() => {
+                  if (clickTimer.current) {
+                    window.clearTimeout(clickTimer.current);
+                    clickTimer.current = null;
+                  }
+                  onOpen(s);
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();

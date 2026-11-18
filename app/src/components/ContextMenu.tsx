@@ -29,6 +29,14 @@ export interface CtxState {
   x: number;
   y: number;
   items: CtxItem[];
+  /**
+   * 这个菜单是谁弹的（"coll" = 分组行 / "tag" = 标签行 / 其它不填）。
+   *
+   * 用途只有一个：侧栏那两个停靠面板的「保持展开」要**按来源**判断。
+   * 以前写的是 `hold={!!ctx}` —— 于是右键**任何东西**（素材、空白、快照）
+   * 都会把分组和标签两个面板同时展开（owner 2026-11-18 报的 bug）。
+   */
+  source?: string;
 }
 
 export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () => void }) {
