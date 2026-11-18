@@ -3,7 +3,7 @@ import { source } from "../data/source";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 
 /**
- * 无边框看图窗口（UI 里叫「无边框看图」，也就是 owner 说的「贴图」——同一件事）。
+ * 无边框贴图窗口（UI 里叫「无边框贴图」，也就是 owner 说的「贴图」——同一件事）。
  *
  * 形态照果核看图的「无边框模式」：**窗口就是那张图** —— 没有标题栏、没有边框、没有工具条，
  * 尺寸由图片比例决定（后端算，长边默认 342 DIP）。但它比果核多一层用法：
@@ -344,7 +344,7 @@ export function Peek() {
       },
     },
     { kind: "separator" },
-    { label: "关闭这扇无边框看图", icon: "close", shortcut: "Esc", danger: true, action: close },
+    { label: "关闭这扇无边框贴图", icon: "close", shortcut: "Esc", danger: true, action: close },
   ];
 
   const px = cur?.src ?? "";

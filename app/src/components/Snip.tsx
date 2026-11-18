@@ -239,6 +239,27 @@ export function Snip() {
     requestAnimationFrame(() => requestAnimationFrame(() => void source.snipReady().catch(() => {})));
   }, []);
 
+  /* **低清底图解码完就算"能用"**（0.1.29）。
+     原来 ready 只挂在 `<img src=高清>` 的 onLoad 上：全屏 PNG 解码 + 上传纹理要 300~400ms，
+     再加上之前那 500ms 延迟挂载 —— 用户按下 F1 后要等一秒多才能框选（owner 报的"太长"）。
+     thumb 是 480 宽的 data URI（几十 KB），几十毫秒就能画完，构图/颜色已经对得上；
+     高清随后覆盖，不影响任何交互。没有 thumb 的兜底路径仍由 `<img>` 的 onLoad 触发。 */
+  useEffect(() => {
+    if (!boot?.thumb) return;
+    let alive = true;
+    const im = new Image();
+    const done = () => {
+      if (alive) callReady();
+    };
+    im.onload = done;
+    im.onerror = done;
+    im.src = boot.thumb;
+    if (im.complete) done();
+    return () => {
+      alive = false;
+    };
+  }, [boot?.thumb, callReady]);
+
   useEffect(() => {
     document.body.classList.add("snip-body");
     document.documentElement.classList.add("snip-body");
@@ -250,17 +271,15 @@ export function Snip() {
     };
   }, [callReady]);
 
-  /* 高清底图延后挂载：先让 480 宽的小图上屏，WebView 首帧来得更快 */
+  /* 高清底图**立刻**开始加载（0.1.29）。
+     原来要等 500ms 才挂 —— 那 500ms 是白等的：480 宽的 thumb 已经在 root 背景上画着，
+     高清并行加载不会让首帧变差，只会让它早 500ms 就绪（交付要用它算像素）。
+     ready 不再等它（见下面 thumb 预解码那段）。 */
   useEffect(() => {
     if (!boot) return;
-    if (!boot.thumb) {
-      setHiSrc(boot.src);
-      return;
-    }
-    const t = window.setTimeout(() => setHiSrc(boot.src), 500);
-    return () => window.clearTimeout(t);
+    setHiSrc(boot.src);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boot?.src, boot?.thumb]);
+  }, [boot?.src]);
 
   /* 像素源：同源 data URL → 能 getImageData / toDataURL（放大镜、马赛克、导出都要） */
   useEffect(() => {
@@ -736,6 +755,14 @@ export function Snip() {
     setBusy(true);
     setErr("");
     try {
+      /* ready 提前到 thumb 就绪后，理论上用户能在高清位图成 canvas 之前就交付。
+         这里最多等 1.2s（通常 100~200ms 就好了），别让"手快"变成一句报错。 */
+      if (!base.current) {
+        const t0 = Date.now();
+        while (!base.current && Date.now() - t0 < 1200) {
+          await new Promise((r) => window.setTimeout(r, 40));
+        }
+      }
       const png = await compose();
       /* 贴图的"落点"：选区在**虚拟桌面**上的物理坐标 `[x, y, w, h]`。
          `boot.x / boot.y` 是覆盖窗（也就是整块虚拟桌面截图）的原点，

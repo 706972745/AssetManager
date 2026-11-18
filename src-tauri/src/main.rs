@@ -3595,14 +3595,21 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        外部程序注入的」—— 见 core/src/keywatch.rs。钩子必须装在有消息泵的**主线程**上，
        走 run_on_main_thread；装不上/没收到任何事件时判据自动放行，不会让快捷键失效。 */
     keywatch::reset();
-    {
-        /* 钩子在自己的专用线程上装并跑消息泵（见 core/src/keywatch.rs），
-           所以这里可以直接调 —— 不必再投到主线程。 */
+    /* 钩子**不占关键路径**：它要等系统调度、还要建消息泵，慢的时候几十毫秒；
+       而用户至少要几百毫秒之后才会按 Ctrl+C/S。扔后台装，F1 → 可框选这段更快。 */
+    std::thread::spawn(|| {
         let ok = keywatch::install();
         if let Some(d) = LOG_DIR.get() {
-            log_runtime(d, &format!("keywatch install ok={ok} tid={} err={}", keywatch::hook_tid(), keywatch::last_error()));
+            log_runtime(
+                d,
+                &format!(
+                    "keywatch install ok={ok} tid={} err={}",
+                    keywatch::hook_tid(),
+                    keywatch::last_error()
+                ),
+            );
         }
-    }
+    });
     /* 残留状态清理。**这个不能省**：覆盖层被外部关掉（Alt+F4 / 崩溃 / 用户点了别处）时
        `am_snip_cancel` 不会执行，slot 一直占着 → 之后每次按 F1 都回"上一次截图还没结束"，
        永久失效，用户只会说"F1 坏了"。有窗口才算真在进行中。 */
@@ -3632,10 +3639,14 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    /* 计时（0.1.29 提速用）：从进 `snip_begin` 到窗口建好，各阶段各占多少毫秒。
+       只在 rust 端口径里量，不含前端 thumb 解码 —— 那部分看 `snip ready`。 */
+    let t_all = std::time::Instant::now();
     let hidden = hide_peeks(&app);
     /* 藏完要等 DWM 交一帧：hide() 立刻 BitBlt 有时还能抓到贴图残影。
-       90ms 人感觉不到，但足够合成器把这批窗口移出画面。 */
-    std::thread::sleep(Duration::from_millis(90));
+       90 → 50ms（0.1.29 提速）：实测 50ms 已经够合成器把这批窗口移出画面，
+       这 40ms 直接省在"按下 F1 到能框选"的路径上。 */
+    std::thread::sleep(Duration::from_millis(50));
 
     // 截屏要在开覆盖窗**之前**：覆盖窗一开，截到的就是它自己
     let shot = match screen::capture_virtual() {
@@ -3651,6 +3662,9 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        PNG 编码 + WebView2 起来要几百毫秒，这段时间屏幕上就是这张图 —— 不会黑。 */
     splash_show(shot.x, shot.y, shot.w, shot.h, &shot.rgba);
 
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("snip t capture+hide={}ms", t_all.elapsed().as_millis()));
+    }
     let png = match shot.png() {
         Ok(p) => p,
         Err(e) => {
@@ -3667,6 +3681,12 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         return Err(format!("写截图临时文件失败：{e}"));
     }
 
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!("snip t png+write={}ms (png {}KB)", t_all.elapsed().as_millis(), png.len() / 1024),
+        );
+    }
     let scale = app
         .get_webview_window("main")
         .and_then(|w| w.scale_factor().ok())
@@ -3698,6 +3718,9 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         "scale": scale,
         "x": vx, "y": vy, "w": vw, "h": vh,
     });
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("snip t thumb={}ms", t_all.elapsed().as_millis()));
+    }
     let script = format!("window.__AM_SNIP__ = {boot};");
     let win = tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
         .title("截图")
@@ -4212,6 +4235,9 @@ async fn am_snip_ready(app: AppHandle) -> Result<(), String> {
        让用户不用点一下就能直接拖选区。留着这个命令是因为前端在底图上屏时还会调一次
        —— 顺便把窗口提到最前，防止被别的新窗口盖住。 */
     let gen = SNIP_GEN.load(Ordering::SeqCst);
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, "snip ready（前端首帧就绪，窗口开始显示）");
+    }
     if let Some(w) = app.get_webview_window("snip") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -4224,22 +4250,26 @@ async fn am_snip_ready(app: AppHandle) -> Result<(), String> {
                   半透明时底下的原生底图仍透出来，所以用户看到的是"截图轻轻变暗 → 工具栏浮现"，
                   不会出现一整块硬黑。
                3) 渐变走完再撤底图。 */
-            std::thread::sleep(Duration::from_millis(200));
+            /* 200 → 60ms（0.1.29）：前端现在用 480 宽 thumb 做首帧，WebView 交出第一帧
+               快得多；60ms 足够它把这一帧排进合成器。 */
+            std::thread::sleep(Duration::from_millis(60));
             if SNIP_GEN.load(Ordering::SeqCst) != gen {
                 return;
             }
-            let _ = set_window_alpha(&win, 70);
+            /* 起点抬到 150（原来 70）：thumb 已经铺满整屏，半透明没必要那么透明 ——
+               快速变实看起来才"跟手"。淡入 240 → 96ms。 */
+            let _ = set_window_alpha(&win, 150);
             let _ = win.set_always_on_top(true);
             let _ = win.set_focus();
-            for step in 1..=24u32 {
+            for step in 1..=12u32 {
                 if SNIP_GEN.load(Ordering::SeqCst) != gen {
                     return;
                 }
-                let a = 70 + ((185 * step) / 24) as u8;
+                let a = 150 + ((105 * step) / 12) as u8;
                 if set_window_alpha(&win, a).is_err() {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(8));
             }
             if SNIP_GEN.load(Ordering::SeqCst) != gen {
                 return;

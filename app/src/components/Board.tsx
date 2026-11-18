@@ -8,7 +8,7 @@ import { ContextMenu, type CtxItem } from "./ContextMenu";
  *
  * 三条手感约定（和 PureRef 一致）：
  * - 空白处左键拖 / 中键拖 = 平移画布；滚轮 = 缩放（锚定鼠标，指针下的那张图不动）
- * - 左键拖某张图 = 移动它；拖右下角手柄 = **改它的大小**（保持比例）；双击 = 无边框看图
+ * - 左键拖某张图 = 移动它；拖右下角手柄 = **改它的大小**（保持比例）；双击 = 无边框贴图
  * - 画布没有边界，坐标可以是任意大/小（不夹紧，也不回弹）
  *
  * 「什么能上板」：**不看格式，只看软件能不能把它变成图**。JPG/PNG/WebP/AVIF/HEIC 自不必说，
@@ -606,7 +606,7 @@ export function Board() {
         action: () => void source.openDefault(it.path).catch(() => {}),
       },
       {
-        label: "用无边框看图打开",
+        label: "用无边框贴图打开",
         icon: "expand",
         action: () => void source.peekOpen([it.id], 0).catch(() => {}),
       },

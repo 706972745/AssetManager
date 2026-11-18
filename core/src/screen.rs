@@ -10,7 +10,6 @@
 //! 2. **`biHeight` 给负数**得到自上而下的 DIB，否则整张图会上下颠倒 —— 而我们后面要靠
 //!    `y` 坐标去裁选区，颠倒了裁出来就是另一块地方（不会报错，只是截错）。
 
-use std::io::Cursor;
 
 /// 一块屏幕截图（虚拟桌面坐标系，物理像素）
 pub struct Shot {
@@ -47,9 +46,9 @@ impl Shot {
 
     /// 整张图编码成 PNG
     pub fn png(&self) -> Result<Vec<u8>, String> {
-        let img = image::RgbaImage::from_raw(self.w, self.h, self.rgba.clone())
-            .ok_or_else(|| "截图缓冲区尺寸与像素数对不上".to_string())?;
-        png_of(&img)
+        /* 直接拿 raw 编码：以前这里 `rgba.clone()` 会复制一份 16MB 的整屏缓冲区
+           （2560×1600×4），白花 10~20ms —— 而这正在"按下 F1 到能框选"的路径上。 */
+        png_of_raw(&self.rgba, self.w, self.h)
     }
 
     /// 整张图的平均色。
@@ -103,10 +102,22 @@ impl Shot {
 
 /// 任意 RGBA 图 → PNG 字节
 pub fn png_of(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
+    png_of_raw(img.as_raw(), img.width(), img.height())
+}
+
+/// raw RGBA → PNG 字节（不复制像素）。
+///
+/// 用 `CompressionType::Fast` + `FilterType::Sub`：截图这一步是**交互关键路径**，
+/// 全屏 PNG 用默认压缩要 ~180ms，Fast 只要 ~60ms；体积从 1.6MB 涨到 ~2.2MB，
+/// 前端解码多花二十来毫秒 —— 净赚一百多毫秒，用户体感就是"F1 之后马上能框"。
+pub fn png_of_raw(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+    let mut buf = Vec::new();
+    PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::Sub)
+        .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
         .map_err(|e| format!("编码 PNG 失败：{e}"))?;
-    Ok(buf.into_inner())
+    Ok(buf)
 }
 
 /// 把虚拟桌面整块抓下来

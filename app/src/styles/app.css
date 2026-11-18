@@ -1316,7 +1316,7 @@
 }
 /* ---- 灯箱：边缘导航（T43） ----------------------------------------------
    光标进到左右 64px 才浮出来（平时完全看不见，不挡图）。
-   为什么需要它：无边框看图 / 灯箱里鼠标比键盘顺手，而顶栏那两个箭头离图太远。 */
+   为什么需要它：无边框贴图 / 灯箱里鼠标比键盘顺手，而顶栏那两个箭头离图太远。 */
 .lb-edge {
   position: absolute;
   top: 44px;
@@ -2752,13 +2752,11 @@
   transition: height 110ms ease;
 }
 .tag-dock.open {
-  /* **高度跟着内容走**（owner 2026-11-18：「ui 排布方式不对」—— 内容只有三四行时
-     也硬撑 300px，底下留一大片空白，看着就像"面板没画完"）。
-     上限仍是 min(300px,42vh)，超出了由 `.tag-dock-scroll` 自己滚。
-     分组面板（.coll-dock）与标签面板用同一组值：两边高度不同的话，
+  /* **和 FontManager 完全同值**（owner 2026-11-18：「高度和 fontmanager 软件不对」）。
+     FM 是 `height: min(300px, 42vh)` —— 固定值，不是随内容。
+     分组面板（.coll-dock）必须同一组值：两边高度不同的话，
      从标签移到分组时面板高度一变，指针会被甩出去。 */
-  height: auto;
-  max-height: min(300px, 42vh);
+  height: min(300px, 42vh);
   /* 展开时这条边界再深一档：它此刻是「内容区 / 面板」的分界 */
   border-top-color: rgba(var(--ink-rgb), 0.12);
 }
@@ -2766,8 +2764,7 @@
    两个都 min(300px,42vh) 就是 600px，目录树被压到接近零、底栏被挤出可视区 */
 .tag-dock.open.half,
 .coll-dock.open.half {
-  height: auto;
-  max-height: min(220px, 30vh);
+  height: min(220px, 30vh);
 }
 
 .tag-dock-head {
@@ -4168,7 +4165,7 @@
   opacity: 0;
 }
 
-/* ---------------- 无边框看图窗口（0.9.0，照果核看图的无边框模式） ----------------
+/* ---------------- 无边框贴图窗口（0.9.0，照果核看图的无边框模式） ----------------
 
    窗口尺寸由后端按图片比例算好，这里只管"图正好铺满、外面什么都没有"。
    **不做圆角、不留 padding**：窗口边缘 = 图片边缘，这样截图框选时不会带进来一圈
@@ -6488,4 +6485,131 @@ body.board-body #root {
   content: "—";
   margin-right: 8px;
   opacity: 0.6;
+}
+
+/* ============================================================================
+   详情面板「标签」区 —— 逐值照 FontManager（owner 2026-11-18：
+   「这个标签这里也和 fontmanager 软件中的详情面板的标签不一样，要一样的」）
+
+   FontManager 的真实结构（`DetailPanel.tsx` + `app.css`）：
+     .tag-editor          flex-wrap + gap 6，**chip / 输入框 / 选择按钮同一条流**
+     .tag-chip            4px 圆角小方块、fs-11 / 500、内距 4 7 4 10（手工，实线）
+     .tag-auto-row        width 100% 的独立一行，里面是 .tag-chip-auto（虚线 + 魔棒）
+     .tag-input           e1 底 + ink .06 发丝线 + radius 5 + 内距 6 9 6 12，输入宽 72px
+     .tag-pick-wrap       宽 100%，里面是 .tag-pick-btn（24 高、虚线、带候选数徽标）
+     .tag-picker          文档流里的下拉（不是浮层）：radius 8、e2 底、列表 max 196
+   AM 之前是三段式（chips 一行 / 整行宽输入框 / 实线按钮），和 FM 差得最多的是
+   ① 自动标签没单独成段 ② 输入框占满一整行 ③ 选择按钮不是虚线小按钮。
+   ============================================================================ */
+.detail-body .tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 自动标签：独立一行 + 虚线（软件猜的，必须一眼看出来） */
+.detail-body .tag-auto-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  margin-top: 2px;
+}
+.detail-body .tag-chip-auto {
+  background: transparent;
+  border-style: dashed;
+  border-color: rgba(var(--ink-rgb), 0.22);
+  color: var(--text-2);
+  padding: 4px 8px;
+}
+.detail-body .tag-chip-auto:hover {
+  background: var(--e1);
+}
+.detail-body .tag-chip-auto .tag-auto-spark {
+  color: var(--accent);
+  opacity: 0.9;
+  flex: 0 0 auto;
+}
+
+/* 「添加标签…」是 chip 大小的窄框（72px 输入 + ✓），不占整行 */
+.detail-body .tag-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--e1);
+  border: 1px solid rgba(var(--ink-rgb), 0.06);
+  border-radius: 5px;
+  padding: 6px 9px 6px 12px;
+  transition: border-color var(--t-quick) ease, box-shadow var(--t-quick) ease;
+}
+.detail-body .tag-input:focus-within {
+  border-color: var(--accent-glow);
+  box-shadow: 0 0 0 3px var(--accent-glow-soft);
+}
+.detail-body .tag-input .blink-caret-field {
+  flex: 0 0 auto;
+}
+.detail-body .tag-input input {
+  width: 72px;
+  background: none;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  height: auto;
+  color: var(--text-1);
+  font-size: var(--fs-11);
+}
+.detail-body .tag-input-ok {
+  display: grid;
+  place-items: center;
+  padding: 1px;
+  color: var(--text-3);
+  transition: color var(--t-quick) ease;
+}
+.detail-body .tag-input-ok:not(:disabled):hover {
+  color: var(--text-1);
+}
+.detail-body .tag-input-ok:disabled {
+  opacity: 0.4;
+}
+
+/* 「+ 从已有标签选」：虚线小按钮 + 候选数徽标，点开在文档流里展开 */
+.detail-body .tag-pick-wrap {
+  width: 100%;
+  margin-top: 6px;
+}
+.detail-body .tag-pick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: var(--fs-11);
+  color: var(--text-3);
+  border: 1px dashed rgba(var(--ink-rgb), 0.2);
+  border-radius: 4px;
+  transition: color var(--t-quick) ease, border-color var(--t-quick) ease,
+    background var(--t-quick) ease;
+}
+.detail-body .tag-pick-btn:hover,
+.detail-body .tag-pick-btn.open {
+  color: var(--text-2);
+  border-color: rgba(var(--ink-rgb), 0.34);
+  background: var(--e1);
+}
+.detail-body .tag-pick-badge {
+  font-size: var(--fs-10);
+  color: var(--text-3);
+  opacity: 0.75;
+}
+.detail-body .tag-picker {
+  margin-top: 6px;
+  width: 100%;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--ink-rgb), 0.1);
+  background: var(--e2);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
 }

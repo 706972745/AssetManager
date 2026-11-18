@@ -210,6 +210,8 @@ export default function App() {
    */
   const [snapPrompt, setSnapPrompt] = useState<SnapPromptState | null>(null);
   /** 正在编辑的标签/分组（null = 没开编辑卡） */
+  /** 右键菜单点了「重命名」时递给 CollDock 的 id（它自己进就地输入） */
+  const [collRenameId, setCollRenameId] = useState<number | null>(null);
   const [tagEdit, setTagEdit] = useState<
     { kind: "tag" | "group"; name: string; x: number; y: number } | null
   >(null);
@@ -1093,14 +1095,43 @@ export default function App() {
     [collFilter, toast]
   );
 
+  /** 把整个分组导成一份快照（照 FontManager 的「从分组创建快照」）。 */
+  const snapshotFromColl = useCallback(
+    async (row: CollRow) => {
+      try {
+        const ids = await source.collOf(row.id);
+        if (!ids.length) {
+          toast(`「${row.name}」还是空的，先往里加素材`, true);
+          return;
+        }
+        const sid = await source.snapshotCreate(row.name);
+        const r = await source.snapshotAdd(sid, ids);
+        setSnaps(await source.snapshotList());
+        toast(`已从「${row.name}」创建快照（新增 ${r.added} 张）`);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
   const collMenu = useCallback(
     (row: CollRow, x: number, y: number) => {
       setCtx({
         x,
         y,
         items: [
+          /* 顺序照 FontManager `collectionMenu`：改名 → 从分组建快照 → 筛选 → 删除 */
+          { label: "重命名…", action: () => setCollRenameId(row.id) },
+          { kind: "separator" },
           {
-            label: `只看「${row.name}」`,
+            label: `从「${row.name}」创建快照`,
+            icon: "camera",
+            action: () => void snapshotFromColl(row),
+          },
+          {
+            label:
+              collFilter === row.id ? `取消只看「${row.name}」` : `只看「${row.name}」`,
             icon: "funnel",
             action: () => {
               setCollFilter(collFilter === row.id ? null : row.id);
@@ -1110,12 +1141,12 @@ export default function App() {
               setPage("assets");
             },
           },
-          { kind: "heading", label: "双击这一行可以改名" },
-          { kind: "separator" },          { label: "删除分组（不删素材）", icon: "trash", danger: true, action: () => void deleteColl(row) },
+          { kind: "separator" },
+          { label: "删除分组（不删素材）", icon: "trash", danger: true, action: () => void deleteColl(row) },
         ],
       });
     },
-    [collFilter, deleteColl]
+    [collFilter, deleteColl, snapshotFromColl]
   );
 
   /** 把一批素材加进某个分组（返回真正新增的条数，用于 toast） */
@@ -1932,7 +1963,7 @@ export default function App() {
     }
   };
 
-  /* 无边框看图：开一扇"就是那张图"的独立窗口（照果核看图的无边框模式）。
+  /* 无边框贴图：开一扇"就是那张图"的独立窗口（照果核看图的无边框模式）。
      为什么不在主窗里做：截图时主窗的侧栏/顶栏/详情栏都会进画面。
      `items` 整个带过去，方向键在里面直接翻。 */
   const openPeek = useCallback(
@@ -2007,7 +2038,7 @@ export default function App() {
         show([
           { label: n > 1 ? `用默认程序打开（${n} 个）` : "用默认程序打开", icon: "image", action: () => void onOpenDefault(a) },
           {
-            label: "无边框看图（可以拖到任意位置截图）",
+            label: "无边框贴图（可以拖到任意位置截图）",
             icon: "expand",
             shortcut: "B",
             action: () => openPeek(a),
@@ -2203,7 +2234,7 @@ export default function App() {
           action: () => void source.snipStart().catch((e) => toast(String(e), true)),
         },
         {
-          label: "把剪贴板里的图用无边框看图打开",
+          label: "把剪贴板里的图用无边框贴图打开",
           icon: "copy",
           shortcut: "F3",
           action: () => void source.clipPeek().catch((e) => toast(String(e), true)),
@@ -2297,7 +2328,7 @@ export default function App() {
           }
         }
       } else if (e.key.toLowerCase() === "b" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        // B = 无边框看图（Borderless）。对着参考图改稿/截图时最顺手的入口
+        // B = 无边框贴图（Borderless）。对着参考图改稿/截图时最顺手的入口
         if (selected) {
           e.preventDefault();
           openPeek(selected);
@@ -2528,7 +2559,7 @@ export default function App() {
     if (selected) {
       out.push({
         id: "peek",
-        label: "无边框看图（可拖到任意位置截图）",
+        label: "无边框贴图（可拖到任意位置截图）",
         hint: "B",
         icon: "expand",
         keywords: "无边框 看图 截图 borderless peek 参考图",
@@ -2678,7 +2709,20 @@ export default function App() {
               items={snaps}
               creating={snapCreating}
               renamingId={snapRenaming?.id ?? null}
+              activeId={snapFilter}
               onOpen={openSnapshot}
+              onPick={(row) => {
+                /* 单击 = 和点分组一样：只看这一批（再点一次取消）。
+                   打开灵感板挪到双击 —— 单击就跳走太容易误触（owner 2026-11-18）。 */
+                const on = snapFilter === row.id;
+                setSnapFilter(on ? null : row.id);
+                if (!on) {
+                  setDir(null);
+                  setTagFilter(null);
+                  setCollFilter(null);
+                  setPage("assets");
+                }
+              }}
               onMenu={snapshotMenu}
               onStartCreate={() => {
                 if (!snapCreating) setSnapCreating(true);
@@ -2706,8 +2750,12 @@ export default function App() {
                   setRatingFilter(null);
                 }
               }}
+              renameId={collRenameId}
               onCreate={(name) => void createCollInline(name)}
-              onRename={(id, name) => void renameCollInline(id, name)}
+              onRename={(id, name) => {
+                setCollRenameId(null);
+                void renameCollInline(id, name);
+              }}
               onMenu={(row, x, y) => collMenu(row, x, y)}
               hold={!!ctx}
               half={false}
@@ -3489,7 +3537,7 @@ function Lightbox({
           />
         </div>
 
-        {/* T43 边缘导航：光标到左右边缘才浮出来（无边框看图时最需要它） */}
+        {/* T43 边缘导航：光标到左右边缘才浮出来（无边框贴图时最需要它） */}
         <div className="lb-edge l" onClick={(e) => e.stopPropagation()}>
           <button
             className="lb-edge-btn"

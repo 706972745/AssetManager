@@ -488,7 +488,7 @@ export interface Source {
   /** 注册系统级快捷键，返回注册失败的组合 */
   hotkeysSet(list: [string, string][]): Promise<string[]>;
 
-  /* ---------------- 无边框看图窗口（0.9.0） ---------------- */
+  /* ---------------- 无边框贴图窗口（0.9.0） ---------------- */
   /** 开一扇无边框窗口，`ids` 是整个浏览集合，`index` 是当前那张 */
   peekOpen(ids: number[], index: number, longEdge?: number): Promise<void>;
   /** 缩放窗口本身（连窗口一起缩放，锚定中心） */

@@ -98,7 +98,9 @@ export function SnapshotDock({
   items,
   creating,
   renamingId,
+  activeId,
   onOpen,
+  onPick,
   onMenu,
   onStartCreate,
   onCreate,
@@ -112,7 +114,11 @@ export function SnapshotDock({
   creating: boolean;
   /** 正在改名的那条（null = 没有） */
   renamingId: number | null;
+  /** 正在筛选的那份快照（点击行 = 只看它，和点分组同一个效果） */
+  activeId?: number | null;
+  /** 双击才打开灵感板（owner 2026-11-18：单击不该直接跳走） */
   onOpen: (row: SnapshotRow) => void;
+  onPick: (row: SnapshotRow) => void;
   onMenu: (id: number, x: number, y: number) => void;
   onStartCreate: () => void;
   /** 名字为空字符串时表示用户什么都没写（上层应当只退出编辑态） */
@@ -192,9 +198,10 @@ export function SnapshotDock({
             ) : (
               <div
                 key={s.id}
-                className="tree-row snap-row"
-                title={`${s.name}｜${s.count} 张｜点击打开灵感板，右键更多`}
-                onClick={() => onOpen(s)}
+                className={`tree-row snap-row${activeId === s.id ? " sel" : ""}`}
+                title={`${s.name}｜${s.count} 张｜单击只看这份快照，双击打开灵感板，右键更多`}
+                onClick={() => onPick(s)}
+                onDoubleClick={() => onOpen(s)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();

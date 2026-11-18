@@ -618,7 +618,7 @@ export function Settings({
           },
           {
             id: "hk-clip",
-            label: "把剪贴板里的图用无边框看图打开",
+            label: "把剪贴板里的图用无边框贴图打开",
             hint: "最近 10 张会留在历史里，窗内按 ← → 翻",
             kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局",
             node: (

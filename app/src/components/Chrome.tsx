@@ -816,7 +816,7 @@ export function Detail({
   onReveal: (a: Asset) => void;
   /** 「重命名」入口：**不再弹窗**，改成让顶栏文件名进入就地编辑 */
   onRename: (a: Asset) => void;
-  /** 「看图」= **无边框看图窗口**（Peek，窗口就是那张图），不是灯箱 */
+  /** 「看图」= **无边框贴图窗口**（Peek，窗口就是那张图），不是灯箱 */
   onPeek: (a: Asset) => void;
   /** 顶栏文件名是否处于改名状态（由 App 统一管：右键菜单 / 操作区的重命名都走这里） */
   renaming: boolean;
@@ -1347,7 +1347,7 @@ export function Detail({
                 </div>
                 <div className="act-row">
                   <button className="btn" onClick={() => onPeek(asset)}>
-                    无边框看图
+                    无边框贴图
                   </button>
                   <button
                     className="btn btn-danger"
@@ -1446,7 +1446,6 @@ function TagSection({
 
   return (
     <div className="tag-editor">
-      <div className="tag-chips">
       {manual.map((t) => (
         <span
           key={t}
@@ -1473,7 +1472,9 @@ function TagSection({
         </span>
       ))}
 
-      {auto.map((a) => (
+      {auto.length > 0 && (
+        <div className="tag-auto-row">
+        {auto.map((a) => (
         <span
           key={a.tag}
           className="tag-chip tag-chip-auto"
@@ -1488,16 +1489,18 @@ function TagSection({
             {isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag}
           </button>
         </span>
-      ))}
-      </div>
+        ))}
+        </div>
+      )}
 
       {/* 一行输入 + ✓：与 FontManager 同一个手感（回车也提交，Esc 清空收起） */}
-      <div className="tag-add-row">
+      <div className="tag-input">
         <BlinkCaretInput
           value={q}
           onChange={setQ}
           placeholder="添加标签…"
-          inputClassName="tag-add-input"
+          fieldClassName="tag-field"
+          inputClassName="tag-input-field"
           ariaLabel="标签名"
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -1511,7 +1514,7 @@ function TagSection({
           }}
         />
         <button
-          className="tag-add-ok"
+          className="tag-input-ok"
           title="打上这个标签"
           aria-label="打上这个标签"
           disabled={!q.trim()}
@@ -1521,16 +1524,20 @@ function TagSection({
         </button>
       </div>
 
-      {candidates.length > 0 && (
+      {/* 照 FontManager：虚线小按钮 + 候选数徽标，点开后在**文档流里**展开列表
+         （面板本身就是滚动容器，浮层会被裁在底边上，也不用为它算高度）。 */}
+      <div className="tag-pick-wrap">
         <button
-          className={`tag-from-all ${picker ? "open" : ""}`}
+          className={`tag-pick-btn ${picker ? "open" : ""}`}
           aria-expanded={picker}
           onClick={() => setPicker((v) => !v)}
         >
-          <Icon name="plus" size={10} stroke={1.8} />
-          从已有标签选 {candidates.length}
+          <Icon name="plus" size={11} stroke={1.6} />
+          从已有标签选
+          {candidates.length > 0 && (
+            <span className="tag-pick-badge tabular">{candidates.length}</span>
+          )}
         </button>
-      )}
 
       {picker && (
         <div className="tag-picker" role="dialog" aria-label="选标签">
@@ -1583,6 +1590,7 @@ function TagSection({
           </div>
         </div>
       )}
+      </div>
 
       {manual.length === 0 && auto.length === 0 && (
         <p className="detail-note">还没有标签。在上面输入名字回车就能打上，也可以从已有标签里选。</p>

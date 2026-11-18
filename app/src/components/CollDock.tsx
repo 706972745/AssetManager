@@ -41,6 +41,7 @@ export function CollDock({
   onCreate,
   onRename,
   onMenu,
+  renameId,
   hold,
 }: {
   items: CollRow[];
@@ -49,8 +50,13 @@ export function CollDock({
   /** 就地输入建组：回车确定 / Esc 取消 / 空名不建 */
   onCreate: (name: string) => void;
   onRename: (id: number, name: string) => void;
-  /** 右键：交给 App 弹自己的菜单（改名 / 删除） */
+  /** 右键：交给 App 弹自己的菜单（改名 / 从分组建快照 / 只看 / 删除） */
   onMenu: (row: CollRow, x: number, y: number) => void;
+  /**
+   * 让某一行**进入就地改名**（右键菜单「重命名」用）。
+   * 改名状态本来住在组件内部（双击行也走它），外面只要把这个 id 递进来即可。
+   */
+  renameId?: number | null;
   hold?: boolean;
   /** @deprecated 由 dockOpen 自动判定两块是否同开，调用点不用再传 */
   half?: boolean;
@@ -67,6 +73,20 @@ export function CollDock({
 
   const activeDock = useDockHover();
   const dockOpen = useDockOpen();
+
+  /* 右键菜单点了「重命名」→ 外部把 id 递进来，这里进就地输入。
+     面板的 open 条件里已经算上 `renaming !== null`，所以它会自己展开。
+
+     用 `consumedRename` 保证**只消费一次**：`items` 每次刷新都是新数组，
+     光靠 `[renameId, items]` 会让改名提交后（列表刷新）又进一次改名状态。 */
+  const consumedRename = useRef<number | null>(null);
+  useEffect(() => {
+    if (renameId == null || consumedRename.current === renameId) return;
+    const c = items.find((v) => v.id === renameId);
+    if (!c) return;
+    consumedRename.current = renameId;
+    setRenaming({ id: c.id, name: c.name });
+  }, [renameId, items]);
 
   const dockEnter = () => {
     if (leaveTimer.current !== null) {
