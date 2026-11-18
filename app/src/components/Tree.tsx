@@ -49,7 +49,7 @@ function saveOpenPaths(paths: Set<string>) {
  *  FontManager 的字体库是同一个模型：**多个库只开一个**，其余在列表里等着切换。 */
 const ACTIVE_LIB_KEY = "am.lib.active.v1";
 
-function loadActiveLib(): string | null {
+export function loadActiveLib(): string | null {
   try {
     return localStorage.getItem(ACTIVE_LIB_KEY);
   } catch {

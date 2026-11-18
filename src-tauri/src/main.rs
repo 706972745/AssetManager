@@ -302,6 +302,16 @@ fn am_remove_lib(path: String, state: State<AppState>) -> Result<usize, String> 
     lock(&state).remove_lib(&path)
 }
 
+/// 切库：把"当前库"切到这条路径所在的库。
+///
+/// 每个库**自带一套标签体系**（存在库自己的 `.AssetManager/lib.db` 里），
+/// 所以切库之后侧栏要重新拉 tags / groups —— 不切的话 A 库的标签会挂在 B 库上，
+/// 正是 owner 要避免的"数据混在一起"。
+#[tauri::command]
+fn am_set_current_lib(path: String, state: State<AppState>) -> Result<bool, String> {
+    lock(&state).set_current_lib(&path)
+}
+
 #[tauri::command]
 fn am_list(q: AssetQuery, state: State<AppState>) -> Result<Vec<Asset>, String> {
     lock(&state).list(&q)
@@ -4146,7 +4156,8 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let out = snip_native::run(&shot);
+            let theme = UI_THEME.load(std::sync::atomic::Ordering::SeqCst);
+            let out = snip_native::run(&shot, theme);
             match out {
                 Some(d) => {
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -5415,6 +5426,7 @@ fn main() {
             am_lib_count,
             am_builtin_roots,
             am_remove_lib,
+            am_set_current_lib,
             am_children,
             am_list,
             am_total,

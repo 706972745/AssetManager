@@ -65,6 +65,7 @@ export const tauriSource: Source = {
   libCount: () => invoke!<number>("am_lib_count"),
   builtinRoots: () => invoke!<string[]>("am_builtin_roots"),
   removeLib: (path: string) => invoke!<number>("am_remove_lib", { path }),
+  setCurrentLib: (path: string) => invoke!<boolean>("am_set_current_lib", { path }),
   children: (parent) => invoke!<DirNode[]>("am_children", { parent }),
   list: (q: Query) => invoke!<Asset[]>("am_list", { q }),
   total: () => invoke!<number>("am_total"),

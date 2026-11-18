@@ -5,8 +5,9 @@
 //!
 //! # 多库（T28）
 //!
-//! 每个素材库一个 SQLite 文件（`<数据目录>/libs/lib-<id>.db`），
-//! 外加一个注册库（`<数据目录>/index.db`）记住「挂了哪几个库 / 标签体系」。
+//! 每个素材库一个 SQLite 文件，**放在库自己的 `.AssetManager/lib.db`**（0.3.9 起；
+//! 见 `libhome`），外加一个注册库（`<数据目录>/index.db`）只记住「挂了哪几个库」。
+//! 标签 / 分组 / 评分这些跟着库文件走：换机器、挪盘、移除后重新导入都不会丢。
 //! 对界面暴露的 id 是 `lib << 40 | 库内 id`（见 `ids`），所以前端完全无感。
 //!
 //! 跨库的操作（列全部、标签计数、撤销选库）都在这里收口 —— 别让命令层自己拼。
@@ -23,6 +24,7 @@ pub mod ids;
 pub mod imageinfo;
 pub mod imgops;
 pub mod keywatch;
+pub mod libhome;
 pub mod libs_migrate;
 pub mod model;
 pub mod palette;
@@ -68,6 +70,9 @@ pub struct App {
     pub libs: Vec<Lib>,
     pub data_dir: PathBuf,
     pub thumbs: thumb::ThumbStore,
+    /// 当前"打开着"的那个库：侧栏的标签体系按它取（每个库一套标签）。
+    /// 切库时由 `set_current_lib` 改；`None` 时退回第一个库。
+    pub current: Option<i64>,
     /// 快照 → 全局 id 的换算缓存：`快照 id → (updated_at, ids)`。
     /// 列表按快照筛时每翻一页都要这批 id，重算哈希太贵；快照一改（updated_at 变）就作废。
     snap_ids_cache: std::sync::Mutex<std::collections::HashMap<i64, (i64, Vec<i64>)>>,
@@ -92,10 +97,32 @@ impl App {
             libs: Vec::new(),
             data_dir,
             thumbs,
+            current: None,
             snap_ids_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
+        /* 老库文件还在数据目录里飘着 → 搬到各自库根的 `.AssetManager/lib.db`。
+           必须在 reload 之前做：搬完注册行里记的路径才是新位置。 */
+        app.migrate_libs_into_home();
         app.reload_libs();
+        app.seed_tags_into_existing_libs();
+        app.current = app.libs.first().map(|l| l.id);
         Ok(app)
+    }
+
+    /// 注册行 → 库文件的真实位置。
+    ///
+    /// `file` 可能是绝对路径（0.3.9 起是 `<库根>/.AssetManager/lib.db`），
+    /// 也可能是相对数据目录的老路径（0.8.x 的 `libs/lib-<id>.db`）。
+    /// `Path::join` 遇到绝对路径会直接返回它，所以两种情况一句话就能收口。
+    fn lib_path(&self, row: &reg::LibRow) -> PathBuf {
+        let p = Path::new(&row.file);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if row.file.is_empty() {
+            reg::lib_file(&self.data_dir, row.id)
+        } else {
+            self.data_dir.join(&row.file)
+        }
     }
 
     /// 按注册库里的清单把每个库文件打开（坏库留证后跳过，不让一个库拖垮启动）。
@@ -103,16 +130,37 @@ impl App {
         self.libs.clear();
         let rows = reg::libs(&self.reg).unwrap_or_default();
         for row in rows {
-            let rel = if row.file.is_empty() {
-                reg::lib_file(&self.data_dir, row.id)
-            } else {
-                self.data_dir.join(&row.file)
-            };
-            match db::open(&rel) {
+            let path = self.lib_path(&row);
+            match db::open(&path) {
                 Ok(conn) => self.libs.push(Lib { id: row.id, root: row.root, conn }),
-                Err(e) => eprintln!("打开库 {} 失败（已跳过）：{}", rel.display(), e),
+                Err(e) => eprintln!("打开库 {} 失败（已跳过）：{}", path.display(), e),
             }
         }
+        /* current 指着的库被移除了（或第一次启动）→ 退回第一个 */
+        if !self.current.map(|id| self.libs.iter().any(|l| l.id == id)).unwrap_or(false) {
+            self.current = self.libs.first().map(|l| l.id);
+        }
+    }
+
+    /// 换「当前库」。传库根或它下面任意路径都行（内部按前缀归属）。
+    ///
+    /// 返回**是否真的换了**：前端只在换了的时候重拉标签清单 ——
+    /// 同一个库里点开子目录不该把侧栏的标签重新拉一遍（会闪）。
+    pub fn set_current_lib(&mut self, path: &str) -> Result<bool, String> {
+        let id = self
+            .lib_for_path(path)
+            .ok_or_else(|| format!("这个路径不在任何素材库里：{path}"))?;
+        let changed = self.current != Some(id);
+        self.current = Some(id);
+        Ok(changed)
+    }
+
+    /// 当前库（`current` 没设就退第一个）。一个库都没有时返回 None。
+    fn cur_lib(&self) -> Option<&Lib> {
+        self.libs
+            .iter()
+            .find(|l| Some(l.id) == self.current)
+            .or_else(|| self.libs.first())
     }
 
     fn lib(&self, id: i64) -> Result<&Lib, String> {
@@ -172,7 +220,10 @@ impl App {
     /* ------------------------------------------------------------ 库管理 */
 
     /// 登记一个库根（已有就返回原 id），并把连接打开。
-    /// `scan` 与「加文件夹」都会先走这一句 —— 库文件是扫描的落点。
+    ///
+    /// 0.3.9 起库的索引在 `<库根>/.AssetManager/lib.db`（见 `libhome`）：
+    /// · 目录可写 → 用库内那份（跟着库走，换机器/重导都还在）；
+    /// · 目录不可写（只读盘、网络盘、权限不足）→ 退回数据目录，**不让软件打不开**。
     pub fn ensure_lib(&mut self, root: &str) -> Result<i64, String> {
         let root = norm_keep_case(root);
         if let Some(l) = self.libs.iter().find(|l| norm_path(&l.root) == norm_path(&root)) {
@@ -181,34 +232,66 @@ impl App {
         let existing = reg::libs(&self.reg)?
             .into_iter()
             .find(|r| norm_path(&r.root) == norm_path(&root));
-        let id = match existing {
-            Some(row) => {
-                let rel = if row.file.is_empty() {
-                    reg::lib_file(&self.data_dir, row.id)
-                } else {
-                    self.data_dir.join(&row.file)
-                };
-                let conn = db::open(&rel)?;
-                let root_owned = row.root.clone();
-                self.libs.push(Lib { id: row.id, root: row.root, conn });
-                // 注册库里有、内存里没有（比如上次打开失败）→ 记下 file 后重开
-                if row.file.is_empty() {
-                    let rel_s = format!("libs/lib-{}.db", row.id);
-                    reg::add_lib(&self.reg, &root_owned, &rel_s)?;
-                }
-                row.id
-            }
+
+        /* ① id：已登记就用它；没登记但库里留着 lib.json（以前导入过）
+           就复用旧 id —— 快照里存的是"库 id + 库内 id"，换 id 等于全断。 */
+        let id = match &existing {
+            Some(row) => row.id,
             None => {
-                // 先用占位 file 拿到 id，再按 id 生成正式文件名（文件名要稳定，
-                // 不能拿库路径去拼：路径里有中文/空格/超长目录名都会出事）
-                let id = reg::add_lib(&self.reg, &root, "")?;
-                let rel = format!("libs/lib-{}.db", id);
-                reg::add_lib(&self.reg, &root, &rel)?;
-                let conn = db::open(&self.data_dir.join(&rel))?;
-                self.libs.push(Lib { id, root: root.clone(), conn });
-                id
+                let reusable = libhome::read_marker(&root)
+                    .map(|m| m.id)
+                    .filter(|id| *id > 0 && !reg::lib_ids(&self.reg).unwrap_or_default().contains(id));
+                match reusable {
+                    Some(old) => {
+                        reg::add_lib_at(&self.reg, old, &root, "")?;
+                        old
+                    }
+                    None => reg::add_lib(&self.reg, &root, "")?,
+                }
             }
         };
+
+        /* ② 文件位置 */
+        let writable = libhome::probe_writable(&root);
+        let path = if writable {
+            libhome::db_for(&root)
+        } else if let Some(row) = &existing {
+            self.lib_path(row)
+        } else {
+            reg::lib_file(&self.data_dir, id)
+        };
+
+        /* ③ 库里还没有索引、但数据目录里有一份（老库没搬成功）→ 补搬一次 */
+        if writable && !path.exists() {
+            if let Some(row) = &existing {
+                let legacy = self.lib_path(row);
+                if legacy.exists() {
+                    if let Err(e) = copy_db(&legacy, &path) {
+                        eprintln!("把库文件搬进 .AssetManager 失败（继续用老位置）：{e}");
+                    }
+                }
+            }
+        }
+
+        let conn = db::open(&path)?;
+        self.libs.push(Lib { id, root: root.clone(), conn });
+
+        /* ④ 注册行写成绝对路径：相对路径一旦库搬家就指向不存在的文件 */
+        reg::add_lib(&self.reg, &root, &path.to_string_lossy())?;
+        if writable {
+            let _ = libhome::write_marker(&root, id, db::now_ts(), env!("CARGO_PKG_VERSION"));
+        }
+
+        /* ⑤ 老版本的标签体系在注册库里 → 第一次接进这个库时复制一份，
+              之后各自独立（用户可以给不同库不同的标签体系）。 */
+        if existing.is_some() {
+            if let Some(l) = self.libs.last() {
+                seed_tags_from_registry(&self.reg, &l.conn);
+            }
+        } else if let Some(l) = self.libs.last() {
+            /* 新库：标记"种子已处理"，免得以后用户清空标签又被老库的标签灌回来 */
+            mark_tags_seeded(&l.conn);
+        }
         Ok(id)
     }
 
@@ -220,7 +303,12 @@ impl App {
         reg::lib_roots(&self.reg)
     }
 
-    /// 从素材库移除一个库根：清注册行 + 删库文件。**绝不碰磁盘上的素材**。
+    /// 从素材库移除一个库根。
+    ///
+    /// **0.3.9 起只摘注册行，绝不动库里的 `.AssetManager`** ——
+    /// 用户"移除后再导入回来"时数据必须还在（以前是把库文件挪进 `trash-libs/`，
+    /// 重新导入等于建了个空库，标签评分全没，用户以为软件把数据弄丢了）。
+    /// 仍然一个文件都不删：磁盘上的素材从来就不归我们管。
     pub fn remove_lib(&mut self, root: &str) -> Result<usize, String> {
         let Some(row) = reg::libs(&self.reg)?
             .into_iter()
@@ -236,31 +324,109 @@ impl App {
             .map(|l| db::dir_count(&l.conn).unwrap_or(0))
             .unwrap_or(0) as usize;
 
-        // 先摘掉内存里的连接（文件被自己占着删不掉）
+        // 先摘掉内存里的连接（文件被自己占着，后面就算要挪也挪不动）
         if let Some(pos) = self.libs.iter().position(|l| l.id == row.id) {
             self.libs.remove(pos);
         }
-        let rel = if row.file.is_empty() {
-            reg::lib_file(&self.data_dir, row.id)
-        } else {
-            self.data_dir.join(&row.file)
-        };
-        // 库文件不直接删：挪到 `trash-libs/` 留一手（用户误点移除时还能找回评分/标签）
-        let keep = self.data_dir.join("trash-libs");
-        let _ = std::fs::create_dir_all(&keep);
-        for suffix in ["", "-wal", "-shm"] {
-            let src = PathBuf::from(format!("{}{}", rel.to_string_lossy(), suffix));
-            if src.exists() {
-                let name = src
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let dst = keep.join(format!("{}-{}", db::now_ts(), name));
-                let _ = std::fs::rename(&src, dst);
+        if self.current == Some(row.id) {
+            self.current = self.libs.first().map(|l| l.id);
+        }
+
+        let path = self.lib_path(&row);
+        if !libhome::is_inside_home(&path) {
+            /* 老库（元数据还在数据目录里）：按老规矩挪到 `trash-libs/` 留一手 */
+            let keep = self.data_dir.join("trash-libs");
+            let _ = std::fs::create_dir_all(&keep);
+            for suffix in ["", "-wal", "-shm"] {
+                let src = PathBuf::from(format!("{}{}", path.to_string_lossy(), suffix));
+                if src.exists() {
+                    let name = src
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let dst = keep.join(format!("{}-{}", db::now_ts(), name));
+                    let _ = std::fs::rename(&src, dst);
+                }
             }
         }
         reg::remove_lib_row(&self.reg, &row.root)?;
         Ok(n)
+    }
+
+    /// 0.8.x～0.3.8 的标签体系是**全局一份**、住在注册库里。
+    /// 升级到「每库一套」时，要把那份复制进每个已有库 —— 否则库里的
+    /// `asset_tags.tag_id` 会指向一个不存在的标签（界面上就是"标签没了"）。
+    ///
+    /// 每个库只灌一次（`tags_seeded` 盖章），用户之后删空标签也不会被灌回来。
+    fn seed_tags_into_existing_libs(&mut self) {
+        let reg_has_tags = reg::tags_meta(&self.reg).map(|m| !m.is_empty()).unwrap_or(false);
+        for l in &self.libs {
+            if tags_seeded(&l.conn) {
+                continue;
+            }
+            let own: i64 = l
+                .conn
+                .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+                .unwrap_or(0);
+            if own == 0 && reg_has_tags {
+                let _ = copy_tag_rows(&self.reg, &l.conn);
+            }
+            mark_tags_seeded(&l.conn);
+        }
+    }
+
+    /// 把所有还住在数据目录里的老库，搬进各自库根的 `.AssetManager/lib.db`。
+    ///
+    /// 每一步都可失败可跳过：盘没挂上、目录只读、复制出错 —— 都只记一行日志，
+    /// **绝不因此让软件打不开**。搬成功后老文件挪进 `trash-libs/` 留证（不删）。
+    fn migrate_libs_into_home(&mut self) {
+        let rows = match reg::libs(&self.reg) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for row in rows {
+            let src = self.lib_path(&row);
+            if !src.exists() || libhome::is_inside_home(&src) {
+                continue; // 已经在库里了 / 本来就没有文件
+            }
+            if !Path::new(&row.root).is_dir() || !libhome::probe_writable(&row.root) {
+                continue; // 盘没挂上 / 只读：下次启动再试
+            }
+            let dst = libhome::db_for(&row.root);
+            if !dst.exists() {
+                if let Err(e) = copy_db(&src, &dst) {
+                    eprintln!("库 {src:?} 搬进 .AssetManager 失败（先用老位置）：{e}");
+                    continue;
+                }
+                /* 校验：新文件能打开、目录数一致。宁可多读一次，也不要搬出个半截库 */
+                let ok = match (db::open(&dst), db::open_raw(&src)) {
+                    (Ok(a), Ok(b)) => {
+                        db::dir_count(&a).unwrap_or(-1) == db::dir_count(&b).unwrap_or(-2)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    eprintln!("库 {src:?} 复制后校验不通过，保留老位置不动");
+                    let _ = std::fs::remove_file(&dst);
+                    continue;
+                }
+            }
+            let _ = libhome::write_marker(&row.root, row.id, db::now_ts(), env!("CARGO_PKG_VERSION"));
+            let _ = reg::add_lib(&self.reg, &row.root, &dst.to_string_lossy());
+            /* 老文件留证：不删。用户装回旧版本时还能看到数据 */
+            let keep = self.data_dir.join("trash-libs");
+            let _ = std::fs::create_dir_all(&keep);
+            for suffix in ["", "-wal", "-shm"] {
+                let f = PathBuf::from(format!("{}{}", src.to_string_lossy(), suffix));
+                if f.exists() {
+                    let name = f
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let _ = std::fs::rename(&f, keep.join(format!("moved-{}-{}", db::now_ts(), name)));
+                }
+            }
+        }
     }
 
     /* ---------------------------------------------------------------- 扫描 */
@@ -403,21 +569,24 @@ impl App {
 
     pub fn list(&self, q: &model::AssetQuery) -> Result<Vec<model::Asset>, String> {
         let mut q = q.clone();
-        // 标签名 → 注册库里的 id / 规则（拆库后 asset_tags 存的是 id）
-        if let Some(tag) = q.tag.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            if autotag::parse_filter(tag).is_none() {
-                let (ids, rule) = self.tag_lookup(tag)?;
-                q.tag_ids = ids;
-                q.tag_rule = rule;
-            }
-        }
+        /* 标签名 → id 必须**按库**解析（0.3.9 起每个库有自己的 tags 表，
+           同一个名字在不同库里是不同的 id）。这里只留下名字，等下面遍历库时再换算。 */
+        let tag_name: Option<String> = q
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && autotag::parse_filter(s).is_none())
+            .map(|s| s.to_string());
+        /* 注意：`q.tag` 这个**名字**要留着 —— db 层靠它区分
+           「自动标签 / 规则标签 / 手工标签」三条路。只把调用方传进来的
+           id / 规则清掉（那些是注册库时代的全局 id，现在已经没意义了）。 */
+        q.tag_ids = None;
+        q.tag_rule = None;
 
-        // 搜索词里的标签名：标签**名字**在注册库，这里换成 id 再交给库查询（拆库后不能 JOIN）
+        // 搜索词里的标签名，同理按库换算
         let text = q.text.clone().unwrap_or_default();
         let needle = text.trim().trim_start_matches('#').trim().to_string();
-        if !needle.is_empty() {
-            q.search_tag_ids = Some(self.search_tag_ids(&needle)?);
-        }
+        q.search_tag_ids = None;
 
         /* 分组筛选（0.2.x）：成员是**全局 asset id**，按库号拆成各库的库内 id。
            拆完每个库只查自己那一批 —— 跨库分组也能一次查对，不用把三个库全扫一遍。 */
@@ -458,6 +627,13 @@ impl App {
             let l = self.lib(lib_id)?;
             let mut q2 = q.clone();
             q2.dir_id = Some(local);
+            /* 标签 / 搜索词按**这个库**的标签体系换算成 id */
+            let (tids, trule) = lib_tag_lookup(&l.conn, tag_name.as_deref());
+            q2.tag_ids = tids;
+            q2.tag_rule = trule;
+            if !needle.is_empty() {
+                q2.search_tag_ids = Some(lib_tag_ids_matching(&l.conn, &needle));
+            }
             if let Some(m) = &member_ids {
                 q2.ids = Some(m.get(&lib_id).cloned().unwrap_or_default());
             }
@@ -499,6 +675,12 @@ impl App {
         for l in &self.libs {
             let mut q2 = q.clone();
             q2.dir_id = None;
+            let (tids, trule) = lib_tag_lookup(&l.conn, tag_name.as_deref());
+            q2.tag_ids = tids;
+            q2.tag_rule = trule;
+            if !needle.is_empty() {
+                q2.search_tag_ids = Some(lib_tag_ids_matching(&l.conn, &needle));
+            }
             q2.limit = Some(limit);
             q2.cursor = None;
             q2.name_cursor = None;
@@ -548,27 +730,6 @@ impl App {
         all.sort_by(|a, b| cmp_assets(a, b, &sort));
         all.truncate(limit as usize);
         Ok(all)
-    }
-
-    /// 标签名 → (id 列表, 规则 JSON)。找不到就是 (None, None)，让上层给空结果。
-    fn tag_lookup(&self, name: &str) -> Result<(Option<Vec<i64>>, Option<String>), String> {
-        let meta = reg::tags_meta(&self.reg)?;
-        match meta.iter().find(|t| t.name == name) {
-            Some(t) => Ok((Some(vec![t.id]), t.rule.clone())),
-            None => Ok((None, None)),
-        }
-    }
-
-    /// 标签名模糊匹配 → id 列表。注册库里标签是"一屏能看完"的量级，
-    /// 内存里 contains 比来回拼 SQL 更省事，也不用处理 LIKE 转义。
-    fn search_tag_ids(&self, needle: &str) -> Result<Vec<i64>, String> {
-        let n = needle.to_lowercase();
-        let meta = reg::tags_meta(&self.reg)?;
-        Ok(meta
-            .iter()
-            .filter(|t| t.name.to_lowercase().contains(&n))
-            .map(|t| t.id)
-            .collect())
     }
 
     pub fn tree(&self, parent: Option<i64>) -> Result<Vec<model::DirNode>, String> {
@@ -688,25 +849,33 @@ impl App {
 
     /* ---------------------------------------------------------------- 标签 */
 
-    /// 手工标签 + 使用数（跨库汇总）。
+    /// 标签体系落在**当前库**自己的连接上（0.3.9 起每库一套）。
+    /// 一个库都没有时退回注册库：老版本升级的中间态 / 单测里还没有库，
+    /// 这时候至少还能把"以前建的标签"列出来，不会一片空白。
+    fn tag_conn(&self) -> &rusqlite::Connection {
+        self.cur_lib().map(|l| &l.conn).unwrap_or(&self.reg)
+    }
+
+    /// 手工标签 + 使用数（**当前库**）。
     /// 规则标签（T34）的计数现场算 —— 规则是"活"的，没有可数的关联行。
     pub fn tags(&self) -> Result<Vec<model::TagCount>, String> {
-        let meta = reg::tags_meta(&self.reg)?;
-        let mut counts: HashMap<i64, i64> = HashMap::new();
-        for l in &self.libs {
-            for (tid, n) in db::counts_by_tag(&l.conn)? {
-                *counts.entry(tid).or_insert(0) += n;
-            }
-        }
+        let c = self.tag_conn();
+        let meta = reg::tags_meta(c)?;
+        let has_lib = self.cur_lib().is_some();
+        let mut counts: HashMap<i64, i64> = if has_lib {
+            db::counts_by_tag(c)?.into_iter().collect()
+        } else {
+            HashMap::new()
+        };
         let mut out = Vec::new();
         for t in &meta {
-            let mut n = counts.get(&t.id).copied().unwrap_or(0);
+            let mut n = counts.remove(&t.id).unwrap_or(0);
             if let Some(rule) = t.rule.as_deref().and_then(reg::parse_rule) {
-                let mut sum = 0i64;
-                for l in &self.libs {
-                    sum += db::count_rule(&l.conn, &rule)?;
+                if has_lib {
+                    n = db::count_rule(c, &rule)?;
+                } else {
+                    n = 0;
                 }
-                n = sum;
             }
             out.push(model::TagCount {
                 name: t.name.clone(),
@@ -733,42 +902,38 @@ impl App {
         Ok(out)
     }
 
-    /// 自动标签 + 使用数（跨库同名合并）
+    /// 自动标签 + 使用数（当前库；规则推导只认这一份数据）
     pub fn auto_tags(&self) -> Result<Vec<model::TagCount>, String> {
-        let mut merged: Vec<model::TagCount> = Vec::new();
-        for l in &self.libs {
-            for t in db::auto_tag_counts(&l.conn)? {
-                match merged.iter_mut().find(|m| m.name == t.name) {
-                    Some(m) => m.count += t.count,
-                    None => merged.push(t),
-                }
-            }
+        match self.cur_lib() {
+            Some(l) => db::auto_tag_counts(&l.conn),
+            None => Ok(Vec::new()),
         }
-        Ok(merged)
     }
 
     pub fn groups(&self) -> Result<Vec<model::TagGroup>, String> {
-        let meta = reg::tags_meta(&self.reg)?;
-        let mut counts: HashMap<i64, i64> = HashMap::new();
-        for l in &self.libs {
-            for (tid, n) in db::counts_by_tag(&l.conn)? {
-                *counts.entry(tid).or_insert(0) += n;
-            }
-        }
-        let rows = reg::groups(&self.reg, &meta, &counts)?;
+        let c = self.tag_conn();
+        let meta = reg::tags_meta(c)?;
+        let has_lib = self.cur_lib().is_some();
+        let counts: HashMap<i64, i64> = if has_lib {
+            db::counts_by_tag(c)?.into_iter().collect()
+        } else {
+            HashMap::new()
+        };
+        let rows = reg::groups(c, &meta, &counts)?;
         Ok(rows
             .into_iter()
             .map(|g| model::TagGroup { name: g.name, color: g.color, count: g.count, tags: g.tags })
             .collect())
     }
 
-    /// 一批素材各自的标签名（`id` 是全局 id）
+    /// 一批素材各自的标签名（`id` 是全局 id）。
+    /// **按每个 id 所属的库取名字**：不同库可以有同名标签，但 id 是各库自己的。
     pub fn tags_for(&self, ids: &[i64]) -> Result<Vec<(i64, Vec<String>)>, String> {
-        let meta = reg::tags_meta(&self.reg)?;
-        let name_of: HashMap<i64, String> = meta.into_iter().map(|t| (t.id, t.name)).collect();
         let mut out: Vec<(i64, Vec<String>)> = Vec::new();
         for (lib_id, locals) in ids::group_by_lib(ids) {
             let l = self.lib(lib_id)?;
+            let name_of: HashMap<i64, String> =
+                reg::tags_meta(&l.conn)?.into_iter().map(|t| (t.id, t.name)).collect();
             for (local, tids) in db::tag_ids_for_assets(&l.conn, &locals)? {
                 let names: Vec<String> =
                     tids.iter().filter_map(|t| name_of.get(t).cloned()).collect();
@@ -781,20 +946,21 @@ impl App {
 
     pub fn tag_assets(&mut self, ids: &[i64], name: &str) -> Result<i64, String> {
         let name = reg::validate_tag_name(name)?;
-        let tag_id = reg::ensure_tag(&self.reg, &name)?;
         let mut n = 0;
         for (lib_id, locals) in ids::group_by_lib(ids) {
-            let l = self.lib_mut(lib_id)?;
+            let l = self.lib(lib_id)?;
+            // 同名标签在各自库里各建一份（标签体系跟着库走）
+            let tag_id = reg::ensure_tag(&l.conn, &name)?;
             n += db::insert_asset_tags(&l.conn, &locals, tag_id)?;
         }
         Ok(n)
     }
 
     pub fn untag_assets(&mut self, ids: &[i64], name: &str) -> Result<i64, String> {
-        let Some(tag_id) = reg::tag_id_by_name(&self.reg, name)? else { return Ok(0) };
         let mut n = 0;
         for (lib_id, locals) in ids::group_by_lib(ids) {
-            let l = self.lib_mut(lib_id)?;
+            let l = self.lib(lib_id)?;
+            let Some(tag_id) = reg::tag_id_by_name(&l.conn, name)? else { continue };
             n += db::delete_asset_tags(&l.conn, &locals, tag_id)?;
         }
         Ok(n)
@@ -802,15 +968,16 @@ impl App {
 
     /// 详情面板保存：整组替换（按名字给，内部换算成 id）
     pub fn set_asset_tags(&mut self, g: i64, names: &[String]) -> Result<(), String> {
+        let (lib_id, local) = ungid(g);
+        let l = self.lib(lib_id)?;
         let mut ids = Vec::new();
         for n in names {
             let n = reg::validate_tag_name(n)?;
-            ids.push(reg::ensure_tag(&self.reg, &n)?);
+            ids.push(reg::ensure_tag(&l.conn, &n)?);
         }
         ids.sort();
         ids.dedup();
-        let (lib_id, local) = ungid(g);
-        db::set_asset_tags(&self.lib(lib_id)?.conn, local, &ids)?;
+        db::set_asset_tags(&l.conn, local, &ids)?;
         self.gc_tags()
     }
 
@@ -821,94 +988,89 @@ impl App {
     /// 所以插一行就能出现在侧栏里。
     pub fn create_tag(&mut self, name: &str) -> Result<(), String> {
         let n = reg::validate_tag_name(name)?;
-        reg::ensure_tag(&self.reg, &n).map(|_| ())
+        reg::ensure_tag(self.tag_conn(), &n).map(|_| ())
     }
 
     pub fn set_tag_color(&mut self, name: &str, color: Option<&str>) -> Result<(), String> {
-        reg::set_tag_color(&self.reg, name, color)
+        reg::set_tag_color(self.tag_conn(), name, color)
     }
 
     pub fn set_tag_group(&mut self, name: &str, group: Option<&str>) -> Result<(), String> {
-        reg::set_tag_group(&self.reg, name, group)
+        reg::set_tag_group(self.tag_conn(), name, group)
     }
 
     /// 给标签设自动规则（T34）。**标签不存在就先建出来** —— 用户的心智是
     /// 「我建一条规则叫『PS 源文件』」，不是「先去打个标签再来设规则」。
     pub fn set_tag_rule(&mut self, name: &str, rule: Option<&reg::AutoRule>) -> Result<(), String> {
         let n = reg::validate_tag_name(name)?;
-        reg::ensure_tag(&self.reg, &n)?;
-        reg::set_tag_rule(&self.reg, &n, rule)
+        let c = self.tag_conn();
+        reg::ensure_tag(c, &n)?;
+        reg::set_tag_rule(c, &n, rule)
     }
 
     pub fn tag_rule(&self, name: &str) -> Result<Option<reg::AutoRule>, String> {
-        Ok(reg::tags_meta(&self.reg)?
+        Ok(reg::tags_meta(self.tag_conn())?
             .into_iter()
             .find(|t| t.name == name)
             .and_then(|t| t.rule.as_deref().and_then(reg::parse_rule)))
     }
 
-    /// 标签改名；新名已存在时**合并**（跨所有库搬关联）。
+    /// 标签改名（当前库）；新名已存在时**合并**。
     pub fn rename_tag(&mut self, old: &str, new: &str) -> Result<i64, String> {
         let new = reg::validate_tag_name(new)?;
         if old == new {
             return Ok(0);
         }
-        let Some(old_id) = reg::tag_id_by_name(&self.reg, old)? else {
-            return Err(format!("没有这个标签：{old}"));
-        };
-        let merged = match reg::tag_id_by_name(&self.reg, &new)? {
-            None => {
-                self.reg
-                    .execute("UPDATE tags SET name = ?1 WHERE id = ?2", rusqlite::params![new, old_id])
+        let merged = {
+            let c = self.tag_conn();
+            let Some(old_id) = reg::tag_id_by_name(c, old)? else {
+                return Err(format!("没有这个标签：{old}"));
+            };
+            match reg::tag_id_by_name(c, &new)? {
+                None => {
+                    c.execute(
+                        "UPDATE tags SET name = ?1 WHERE id = ?2",
+                        rusqlite::params![new, old_id],
+                    )
                     .map_err(|e| e.to_string())?;
-                0
-            }
-            Some(new_id) => {
-                let mut n = 0;
-                for l in self.libs.iter_mut() {
-                    n += db::move_tag_refs(&l.conn, old_id, new_id)?;
+                    0
                 }
-                self.reg
-                    .execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![old_id])
-                    .map_err(|e| e.to_string())?;
-                // 合并过去的标签如果自己还有规则，把规则也带过去（不为空才覆盖）
-                let _ = self.reg.execute(
-                    "UPDATE tags SET auto_rule = COALESCE(auto_rule, (SELECT auto_rule FROM tags WHERE id = ?1)) WHERE id = ?2",
-                    rusqlite::params![old_id, new_id],
-                );
-                n
+                Some(new_id) => {
+                    let n = db::move_tag_refs(c, old_id, new_id)?;
+                    // 合并过去的标签如果自己还有规则，把规则也带过去（不为空才覆盖）
+                    let _ = c.execute(
+                        "UPDATE tags SET auto_rule = COALESCE(auto_rule, (SELECT auto_rule FROM tags WHERE id = ?1)) WHERE id = ?2",
+                        rusqlite::params![old_id, new_id],
+                    );
+                    c.execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![old_id])
+                        .map_err(|e| e.to_string())?;
+                    n
+                }
             }
         };
         self.gc_tags()?;
         Ok(merged)
     }
 
-    /// 从所有素材上移除某标签（跨库），返回影响条数
+    /// 从库里的素材上移除某标签（当前库），返回影响条数
     pub fn delete_tag(&mut self, name: &str) -> Result<i64, String> {
-        let Some(tag_id) = reg::tag_id_by_name(&self.reg, name)? else { return Ok(0) };
-        let mut n = 0;
-        for l in self.libs.iter_mut() {
-            n += db::delete_tag_refs(&l.conn, tag_id)?;
-        }
-        self.reg
-            .execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![tag_id])
+        let c = self.tag_conn();
+        let Some(tag_id) = reg::tag_id_by_name(c, name)? else { return Ok(0) };
+        let n = db::delete_tag_refs(c, tag_id)?;
+        c.execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![tag_id])
             .map_err(|e| e.to_string())?;
         Ok(n)
     }
 
-    /// 清掉"一个素材都没打"的标签行（跨库判断：任何库里还在用就保留）。
+    /// 清掉"一个素材都没打"的标签行（只看当前库 —— 每个库的标签体系是独立的）。
     /// 什么时候会有：用户把某标签从最后一个素材上摘掉；或者合并后旧标签空了。
     fn gc_tags(&mut self) -> Result<(), String> {
-        let mut used: HashSet<i64> = HashSet::new();
-        for l in &self.libs {
-            for id in db::used_tag_ids(&l.conn)? {
-                used.insert(id);
-            }
-        }
-        let meta = reg::tags_meta(&self.reg)?;
-        for t in meta {
+        let Some(id) = self.cur_lib().map(|l| l.id) else { return Ok(()) };
+        let l = self.lib(id)?;
+        let used: HashSet<i64> = db::used_tag_ids(&l.conn)?.into_iter().collect();
+        for t in reg::tags_meta(&l.conn)? {
             if !used.contains(&t.id) && t.rule.is_none() {
-                self.reg
+                l.conn
                     .execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![t.id])
                     .map_err(|e| e.to_string())?;
             }
@@ -917,16 +1079,16 @@ impl App {
     }
 
     pub fn group_new(&mut self, name: &str) -> Result<(), String> {
-        reg::group_new(&self.reg, name)
+        reg::group_new(self.tag_conn(), name)
     }
     pub fn group_rename(&mut self, old: &str, new: &str) -> Result<(), String> {
-        reg::group_rename(&self.reg, old, new)
+        reg::group_rename(self.tag_conn(), old, new)
     }
     pub fn group_set_color(&mut self, name: &str, color: Option<&str>) -> Result<(), String> {
-        reg::group_set_color(&self.reg, name, color)
+        reg::group_set_color(self.tag_conn(), name, color)
     }
     pub fn group_delete(&mut self, name: &str) -> Result<i64, String> {
-        reg::group_delete(&self.reg, name)
+        reg::group_delete(self.tag_conn(), name)
     }
 
     /// 各色桶的素材数（跨库汇总）
@@ -1013,10 +1175,11 @@ impl App {
 
     /// 用户数据导出（T13）：库根 + 每个素材的"用户层"字段（评分/备注/来源/标签）。
     pub fn export_userdata(&self) -> Result<String, String> {
-        let meta = reg::tags_meta(&self.reg)?;
-        let name_of: HashMap<i64, String> = meta.iter().map(|t| (t.id, t.name.clone())).collect();
         let mut items: Vec<serde_json::Value> = Vec::new();
         for l in &self.libs {
+            /* 标签 id 是**每个库自己**的（0.3.9），名字必须按这个库的表换算 */
+            let name_of: HashMap<i64, String> =
+                reg::tags_meta(&l.conn)?.into_iter().map(|t| (t.id, t.name)).collect();
             let mut tagmap: HashMap<i64, Vec<String>> = HashMap::new();
             for (aid, tids) in db::all_asset_tags(&l.conn)? {
                 let names: Vec<String> =
@@ -1914,6 +2077,124 @@ impl App {
     }
 }
 
+/* ------------------------------------------------------------ 标签：按库解析 */
+
+/// 标签名 → (本库的 tag id 列表, 规则 JSON)。
+///
+/// **库里没有这个标签时必须给 `Some(vec![])`**（= 空结果），不能给 `None` ——
+/// 在 db 层 `None` 表示"根本不过滤"，那样会把整个库的素材都列出来。
+fn lib_tag_lookup(
+    conn: &rusqlite::Connection,
+    name: Option<&str>,
+) -> (Option<Vec<i64>>, Option<String>) {
+    let Some(name) = name else { return (None, None) };
+    match reg::tags_meta(conn) {
+        Ok(meta) => match meta.iter().find(|t| t.name == name) {
+            Some(t) => (Some(vec![t.id]), t.rule.clone()),
+            None => (Some(Vec::new()), None),
+        },
+        Err(_) => (Some(Vec::new()), None),
+    }
+}
+
+/// 搜索词里的标签名模糊匹配 → 本库的 tag id 列表（标签就一屏，内存里 contains 足够）
+fn lib_tag_ids_matching(conn: &rusqlite::Connection, needle: &str) -> Vec<i64> {
+    let n = needle.to_lowercase();
+    reg::tags_meta(conn)
+        .map(|m| {
+            m.iter()
+                .filter(|t| t.name.to_lowercase().contains(&n))
+                .map(|t| t.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/* ---------------------------------------------------------------- 库文件搬运 */
+
+/// 把 SQLite 库**完整**复制一份到 `dst`（含 WAL 里的最新提交）。
+///
+/// 为什么不用 `fs::copy`：库跑在 WAL 模式下，最近的写还在 `-wal` 里，
+/// 单拷 `.db` 会丢最后一批改动（用户看到的就是"刚打的标签没了"）。
+/// `VACUUM INTO` 走 SQLite 自己的读取路径，出来的是一个干净的单文件库。
+fn copy_db(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+    }
+    let _ = std::fs::remove_file(dst); // VACUUM INTO 要求目标不存在
+    let c = db::open_raw(src)?;
+    c.execute("VACUUM INTO ?1", [dst.to_string_lossy().to_string()])
+        .map_err(|e| format!("复制库失败：{e}"))?;
+    Ok(())
+}
+
+/// 老版本的标签体系住在注册库里。第一次把一个**已存在**的库接进来时，
+/// 把那份标签/分组复制进库内（id 原样保留 —— `asset_tags.tag_id` 指着它们）。
+///
+/// 只做一次：复制完就在库的 `meta` 里盖个章。否则用户把标签删空之后，
+/// 下次打开又被老数据灌回来（"我删了它怎么又出现了"）。
+fn seed_tags_from_registry(reg: &rusqlite::Connection, lib: &rusqlite::Connection) {
+    if tags_seeded(lib) {
+        return;
+    }
+    let has_own: i64 = lib
+        .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+        .unwrap_or(0);
+    if has_own == 0 {
+        let _ = copy_tag_rows(reg, lib);
+    }
+    mark_tags_seeded(lib);
+}
+
+fn copy_tag_rows(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), String> {
+    let e = |x: rusqlite::Error| x.to_string();
+    let mut st = from
+        .prepare("SELECT id, name, color, sort, created_at FROM tag_groups")
+        .map_err(e)?;
+    let groups: Vec<(i64, String, Option<String>, i64, i64)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .map_err(e)?
+        .flatten()
+        .collect();
+    for (id, name, color, sort, created) in groups {
+        to.execute(
+            "INSERT OR IGNORE INTO tag_groups (id, name, color, sort, created_at) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![id, name, color, sort, created],
+        )
+        .map_err(e)?;
+    }
+    let mut st = from
+        .prepare("SELECT id, name, created_at, color, group_id, auto_rule FROM tags")
+        .map_err(e)?;
+    let tags: Vec<(i64, String, i64, Option<String>, Option<i64>, Option<String>)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .map_err(e)?
+        .flatten()
+        .collect();
+    for (id, name, created, color, group_id, rule) in tags {
+        to.execute(
+            "INSERT OR IGNORE INTO tags (id, name, created_at, color, group_id, auto_rule)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![id, name, created, color, group_id, rule],
+        )
+        .map_err(e)?;
+    }
+    Ok(())
+}
+
+fn tags_seeded(lib: &rusqlite::Connection) -> bool {
+    lib.query_row("SELECT v FROM meta WHERE k='tags_seeded'", [], |r| r.get::<_, String>(0))
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+fn mark_tags_seeded(lib: &rusqlite::Connection) {
+    let _ = lib.execute(
+        "INSERT INTO meta (k,v) VALUES ('tags_seeded','1') ON CONFLICT(k) DO UPDATE SET v='1'",
+        [],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1993,12 +2274,17 @@ mod tests {
         app.scan(&a.to_string_lossy(), |_| {}).unwrap();
         app.scan(&b.to_string_lossy(), |_| {}).unwrap();
 
-        let files: Vec<_> = std::fs::read_dir(d.join("libs"))
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
-            .collect();
-        assert_eq!(files.len(), 2, "每个库一个 .db 文件（-wal/-shm 不算）");
+        /* 0.3.9：库文件在**各自的库根**下，数据目录里不再有 libs/ */
+        for root in [&a, &b] {
+            let home = crate::libhome::db_for(&root.to_string_lossy());
+            assert!(home.is_file(), "{} 里应该有 lib.db", root.display());
+            assert_eq!(
+                home.parent().map(|p| p.file_name().unwrap().to_string_lossy().to_string()),
+                Some(crate::libhome::DIR.to_string()),
+                "库文件必须放在 .AssetManager 里"
+            );
+        }
+        assert!(!d.join("libs").exists(), "数据目录里不该再有 libs/（库跟着库根走）");
 
         // 全局 id 必须落到正确的库
         let roots = app.roots().unwrap();
@@ -2021,16 +2307,27 @@ mod tests {
         // 磁盘：A 库的文件一个没动（移除库 ≠ 删文件）
         assert!(a.join("x.png").exists() && a.join("sub/y.png").exists());
         assert!(b.join("w.png").exists());
-        // 库文件被挪进 trash-libs 留证，而不是直接删
-        let kept: Vec<_> = std::fs::read_dir(d.join("trash-libs")).unwrap().flatten().collect();
-        assert_eq!(kept.len(), 1, "被移除的库文件要留一手");
+        /* 0.3.9 的关键行为变化：**移除库只摘注册，库里的 .AssetManager 原样留着**。
+           以前是把库文件挪进 trash-libs，用户重新导入时等于建了个空库，
+           标签评分全没（owner 2026-11-19 要求修掉的正是不这件事）。 */
+        let home_a = crate::libhome::dir_for(&a.to_string_lossy());
+        assert!(home_a.join(crate::libhome::DB).is_file(), "移除后库内索引必须还在");
+        assert!(home_a.join("lib.json").is_file(), "库标识也要留着，重新导入才能认回旧 id");
+        assert!(
+            !d.join("trash-libs")
+                .read_dir()
+                .map(|mut r| r.next().is_some())
+                .unwrap_or(false),
+            "库内索引不该被搬去 trash-libs"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 标签体系是全局的：在 A 库打的标签，B 库的素材能按同名标签筛到，颜色也只有一份。
+    /// 标签体系**每库一份**（0.3.9）：在 A 库打的标签不会出现在 B 库的侧栏里，
+    /// 但按标签名筛选仍然能跨库命中（名字是稳定的，id 是各库自己的）。
     #[test]
-    fn tags_are_global_across_libs() {
-        let d = tmp("globaltag");
+    fn tags_follow_each_lib() {
+        let d = tmp("libtag");
         let a = d.join("lib-a");
         let b = d.join("lib-b");
         std::fs::create_dir_all(&a).unwrap();
@@ -2049,44 +2346,208 @@ mod tests {
         let ia = all.iter().find(|a| a.name == "x.png").unwrap().id;
         let ib = all.iter().find(|a| a.name == "w.png").unwrap().id;
 
+        // 两个库各打一次同名标签（内部各建一份，互不影响）
         app.tag_assets(&[ia], "跨库标签").unwrap();
         app.tag_assets(&[ib], "跨库标签").unwrap();
-        app.set_tag_color("跨库标签", Some("teal")).unwrap();
+        app.set_tag_color("跨库标签", Some("teal")).unwrap(); // 落在当前库
 
+        // ① 侧栏只显示**当前库**的标签：A 库 1 条命中
         let tags = app.tags().unwrap();
         assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].count, 2, "两个库的命中数要加在一起");
+        assert_eq!(tags[0].count, 1, "当前库只有一个素材挂了这个标签");
         assert_eq!(tags[0].color.as_deref(), Some("teal"));
 
-        // 按标签筛：跨库都能命中
+        // ② 切到 B 库：同名标签还在，但计数是 B 库自己的，
+        //    颜色是 B 库自己那份（没设过 = None，说明确实是两套数据）
+        let root_b = b.to_string_lossy().to_string();
+        assert!(app.set_current_lib(&root_b).unwrap(), "切库必须报告变化");
+        let tags_b = app.tags().unwrap();
+        assert_eq!(tags_b.len(), 1);
+        assert_eq!(tags_b[0].count, 1);
+        assert_eq!(tags_b[0].color, None, "B 库的标签不该继承 A 库的颜色");
+
+        // ③ 按标签名筛选仍然跨库命中（名字稳定，id 按库换算）
         let q = model::AssetQuery {
             recursive: true,
             tag: Some("跨库标签".into()),
             limit: Some(10),
             ..Default::default()
         };
-        let rows = app.list(&q).unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(app.list(&q).unwrap().len(), 2);
 
-        // 每素材的标签名（id 要换成全局 id）
+        // ④ 每素材的标签名（id 要换成全局 id）
         let per = app.tags_for(&[ia, ib]).unwrap();
         assert_eq!(per.len(), 2);
         assert_eq!(per[0].1, vec!["跨库标签".to_string()]);
 
-        // 改名合并：撞名时搬关联，旧标签消失。
-        // 先让 x.png 只留「另一个」（否则两条关联都已存在，搬过去是 0 行 —— 幂等但测不到搬）
-        app.tag_assets(&[ia], "另一个").unwrap();
-        app.untag_assets(&[ia], "跨库标签").unwrap();
-        let merged = app.rename_tag("另一个", "跨库标签").unwrap();
-        assert_eq!(merged, 1);
-        let tags = app.tags().unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].count, 2);
+        // ⑤ 在 B 库删标签，A 库那条不受影响
+        app.delete_tag("跨库标签").unwrap();
+        assert!(app.tags().unwrap().is_empty(), "B 库删完就空了");
+        assert!(app.set_current_lib(&a.to_string_lossy()).unwrap());
+        assert_eq!(app.tags().unwrap().len(), 1, "A 库的标签不能被 B 库的删除影响");
+        assert_eq!(app.tags_for(&[ia]).unwrap()[0].1, vec!["跨库标签".to_string()]);
 
-        // 删标签：两个库的关联都清掉，标签行也没了
-        let n = app.delete_tag("跨库标签").unwrap();
-        assert_eq!(n, 2);
-        assert!(app.tags().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /* ---------------- 库元数据跟着库走（0.3.9） ----------------
+       这三条是 owner 2026-11-19 提的验收点，任何一条红了都说明「数据会丢」。 */
+
+    /// 扫描完就把索引写进 `<库根>/.AssetManager/lib.db`，而且那个目录**不许进素材列表**。
+    #[test]
+    fn lib_metadata_lives_in_the_library() {
+        let d = tmp("home");
+        let root = d.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"x").unwrap();
+
+        let mut app = App::open(&d).unwrap();
+        app.scan(&root.to_string_lossy(), |_| {}).unwrap();
+
+        let home = crate::libhome::dir_for(&root.to_string_lossy());
+        assert!(home.join(crate::libhome::DB).is_file(), "索引必须在 库根/.AssetManager/lib.db");
+        assert!(home.join("lib.json").is_file(), "库标识要写进去，重新导入才认得出旧 id");
+
+        /* 元数据目录不能被当成素材/子目录扫进来 */
+        let rows = app
+            .list(&model::AssetQuery { recursive: true, limit: Some(50), ..Default::default() })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "只有 a.png，.AssetManager 不该出现在库里");
+        assert!(rows.iter().all(|r| !r.name.ends_with(".db")));
+
+        /* 库根下只允许出现这一个自家目录 */
+        let extra: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with('.') && n != crate::libhome::DIR)
+            .collect();
+        assert!(extra.is_empty(), "库根下多出了别的自家文件：{extra:?}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.8.x～0.3.8 的标签住在注册库里：升级后要**复制进每个库**，
+    /// 否则 `asset_tags.tag_id` 指向不存在的标签 —— 界面上就是"标签全没了"。
+    #[test]
+    fn global_tags_are_seeded_into_the_library() {
+        let d = tmp("seedtag");
+        let root = d.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"x").unwrap();
+
+        /* 先正常用一次，造出一个带标签的库 */
+        let (lib_id, g) = {
+            let mut app = App::open(&d).unwrap();
+            app.scan(&root.to_string_lossy(), |_| {}).unwrap();
+            let g = app.list(&model::AssetQuery { recursive: true, ..Default::default() }).unwrap()[0].id;
+            app.tag_assets(&[g], "老标签").unwrap();
+            (app.libs[0].id, g)
+        };
+
+        /* 手造"老版本状态"：标签搬回注册库，库里的 tags 表清空 + 去掉已灌标记 */
+        {
+            let conn = crate::db::open(&crate::libhome::db_for(&root.to_string_lossy())).unwrap();
+            conn.execute("DELETE FROM tags", []).unwrap();
+            conn.execute("DELETE FROM meta WHERE k='tags_seeded'", []).unwrap();
+            let reg = crate::reg::open(&d.join("index.db")).unwrap();
+            crate::reg::ensure_tag(&reg, "老标签").unwrap();
+        }
+
+        /* 再打开：必须自动灌回库里，标签名和关联行都对得上 */
+        let app = App::open(&d).unwrap();
+        assert_eq!(app.libs[0].id, lib_id);
+        let tags = app.tags().unwrap();
+        assert_eq!(tags.len(), 1, "老标签必须被灌回库内");
+        assert_eq!(tags[0].name, "老标签");
+        assert_eq!(tags[0].count, 1, "关联行还要能对上（tag_id 必须一致）");
+        assert_eq!(app.tags_for(&[g]).unwrap()[0].1, vec!["老标签".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 老版本把库文件放在 `<数据目录>/libs/lib-<id>.db`：
+    /// 升级后要**自动搬进库目录**，而且一条素材都不许丢。
+    #[test]
+    fn legacy_lib_file_is_moved_into_the_library() {
+        let d = tmp("legacyhome");
+        let root = d.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"x").unwrap();
+
+        let lib_id = {
+            let mut app = App::open(&d).unwrap();
+            app.scan(&root.to_string_lossy(), |_| {}).unwrap();
+            let id = app.libs[0].id;
+            /* 先关连接再动文件：SQLite 开着的时候 Windows 不让改名 */
+            drop(app);
+            /* 手造"老版本布局"：库文件搬回数据目录，注册行写相对路径 */
+            let home_db = crate::libhome::db_for(&root.to_string_lossy());
+            let legacy_dir = d.join("libs");
+            std::fs::create_dir_all(&legacy_dir).unwrap();
+            let legacy = legacy_dir.join(format!("lib-{id}.db"));
+            std::fs::rename(&home_db, &legacy).unwrap();
+            let _ = std::fs::remove_dir_all(crate::libhome::dir_for(&root.to_string_lossy()));
+            let reg = crate::reg::open(&d.join("index.db")).unwrap();
+            crate::reg::add_lib(&reg, &root.to_string_lossy(), &format!("libs/lib-{id}.db"))
+                .unwrap();
+            id
+        };
+
+        /* 再打开一次：应当自动搬到 .AssetManager 下，素材还在 */
+        let app = App::open(&d).unwrap();
+        let home_db = crate::libhome::db_for(&root.to_string_lossy());
+        assert!(home_db.is_file(), "老库文件必须被搬进库目录");
+        assert_eq!(app.libs.len(), 1);
+        assert_eq!(app.libs[0].id, lib_id, "搬运不许换 id（快照按全局 id 记）");
+        assert_eq!(app.total().unwrap(), 1, "搬运后素材数不能变");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 移除库 → 重新导入同一个文件夹：标签 / 评分 必须还在（这是以前真丢过数据的路径）。
+    #[test]
+    fn reimport_keeps_tags_and_rating() {
+        let d = tmp("reimport");
+        let root = d.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"x").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        let (lib_id, gid) = {
+            let mut app = App::open(&d).unwrap();
+            app.scan(&root_s, |_| {}).unwrap();
+            let g = app.list(&model::AssetQuery { recursive: true, ..Default::default() }).unwrap()[0].id;
+            app.tag_assets(&[g], "客户终稿").unwrap();
+            app.set_rating(&[g], 5).unwrap();
+            app.set_note(g, "改过的第三版").unwrap();
+            let id = app.libs[0].id;
+            /* 用户点了「从素材库移除」 */
+            app.remove_lib(&root_s).unwrap();
+            assert_eq!(app.libs.len(), 0);
+            (id, g)
+        };
+
+        /* 移除只是摘注册：库里的元数据必须原样留着 */
+        assert!(crate::libhome::db_for(&root_s).is_file());
+
+        /* 重新导入同一个文件夹 */
+        let mut app = App::open(&d).unwrap();
+        app.scan(&root_s, |_| {}).unwrap();
+        assert_eq!(app.libs.len(), 1);
+        assert_eq!(app.libs[0].id, lib_id, "重新导入要认回原来的库 id");
+
+        let a = app.list(&model::AssetQuery { recursive: true, ..Default::default() }).unwrap();
+        assert_eq!(a.len(), 1);
+        let g = gid; // 同一张图，id 由库 id + 库内 id 决定，应当完全一样
+        assert_eq!(a[0].id, g, "重新导入后素材的全局 id 不能变（快照/分组靠它）");
+        assert_eq!(a[0].rating, 5, "评分丢了");
+        assert_eq!(a[0].note, "改过的第三版", "备注丢了");
+        assert_eq!(
+            app.tags_for(&[g]).unwrap(),
+            vec![(g, vec!["客户终稿".to_string()])],
+            "标签丢了"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }

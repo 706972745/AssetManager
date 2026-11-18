@@ -34,6 +34,11 @@ pub fn watch_dirs(dirs: &[PathBuf]) -> Option<DirWatcher> {
     let mut inner = notify::recommended_watcher(move |res: notify::Result<Event>| {
         let Ok(ev) = res else { return };
         for p in ev.paths {
+            /* 库自己的元数据目录（`.AssetManager`）里发生的事**一律不报**：
+               我们自己写索引/缩略图就在那里，报上去会变成"自己触发自己重扫"的死循环。 */
+            if crate::libhome::is_inside_home(&p) {
+                continue;
+            }
             // 事件给的是「被改的那个路径」，我们要的是它所在的目录
             let dir = if p.is_dir() {
                 p

@@ -83,11 +83,27 @@ fn is_reparse(_meta: &std::fs::Metadata) -> bool {
 ///
 /// 判定用**内容特征**而不是只看名字：必须叫 `*.library` **且** 里面有 `metadata.json`。
 /// 只看名字会误伤用户自己起的 `xxx.library` 普通文件夹；看内容才敢跳。
+/// 我们自己的元数据目录（0.3.9 起每个库根下都有一个 `.AssetManager`）。
+///
+/// **必须跳过**：里面是 `lib.db` / `lib.json`，扫进来的话
+/// ① 用户会在素材列表里看到 `lib.db`；② 库写自己的索引会触发监听 → 反复重扫；
+/// ③ 导出/移动时把库的元数据当成素材一起搬走。
+fn is_meta_dir(dir: &Path) -> bool {
+    dir.file_name()
+        .map(|n| crate::libhome::is_home_dir(&n.to_string_lossy()))
+        .unwrap_or(false)
+}
+
 fn is_foreign_library(dir: &Path) -> bool {
     let name = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+    /* 别的素材库（Eagle 那种）或者**另一个 AssetManager 库**：都不许往下扫。
+       我们的库根里一定有 `.AssetManager/lib.db` —— 嵌套库时按这条识别。 */
+    if crate::libhome::has_db(&dir.to_string_lossy()) {
+        return true;
+    }
     if !name.ends_with(".library") {
         return false;
     }
@@ -180,6 +196,10 @@ where
             };
             if meta.is_dir() {
                 if is_reparse(&meta) || depth + 1 > opts.max_depth {
+                    continue;
+                }
+                if is_meta_dir(&path) {
+                    stats.skipped += 1;
                     continue;
                 }
                 if is_foreign_library(&path) {

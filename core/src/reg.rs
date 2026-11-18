@@ -158,6 +158,27 @@ pub fn add_lib(c: &Connection, root: &str, file: &str) -> Res<i64> {
     .map_err(|e| e.to_string())
 }
 
+/// 已经用掉的库 id（重新导入一个老库时，用来判断"旧 id 还能不能复用"）。
+pub fn lib_ids(c: &Connection) -> Res<Vec<i64>> {
+    let mut st = c.prepare("SELECT id FROM libs").map_err(|e| e.to_string())?;
+    let rows = st.query_map([], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// 用**指定 id** 登记库（旧 id 复用）。
+///
+/// 0.3.9 起库里带着 `lib.json`，里面记着当初的 id；换机器 / 移除后重新导入时
+/// 优先复用它，否则快照里那些 `lib<<40 | local` 的全局 id 会全部对不上。
+pub fn add_lib_at(c: &Connection, id: i64, root: &str, file: &str) -> Res<()> {
+    c.execute(
+        "INSERT INTO libs (id, root, added_at, file) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(root) DO UPDATE SET file = excluded.file",
+        params![id, root, db::now_ts(), file],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 pub fn libs(c: &Connection) -> Res<Vec<LibRow>> {
     let mut st = c
         .prepare("SELECT id, root, file FROM libs ORDER BY id")

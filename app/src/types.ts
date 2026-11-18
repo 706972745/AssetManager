@@ -344,8 +344,14 @@ export interface Source {
   libCount(): Promise<number>;
   /** 内置库路径（软件自己的截图目录）：不占 3 个名额、不能移除、永远显示 */
   builtinRoots(): Promise<string[]>;
-  /** 从素材库移除一个库根：只清索引，磁盘文件不动 */
+  /** 从素材库移除一个库根：只摘注册，库里的 `.AssetManager` 一个字节都不动 */
   removeLib(path: string): Promise<number>;
+  /**
+   * 切库：把"当前库"切到这条路径所在的库。
+   * 每个库自带一套标签/分组（存在库自己的 `.AssetManager` 里），
+   * 切完必须重拉 tags / groups，否则会看到上一个库的标签。
+   */
+  setCurrentLib(path: string): Promise<boolean>;
   children(parent: number | null): Promise<DirNode[]>;
   list(q: Query): Promise<Asset[]>;
   total(): Promise<number>;

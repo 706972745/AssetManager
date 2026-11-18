@@ -43,7 +43,7 @@ import { Settings, type SettingsKey } from "./components/Settings";
 import { Shortcuts } from "./components/Shortcuts";
 import { Tools, type ToolTab } from "./components/Tools";
 import { CommandPalette, type Command } from "./components/CommandPalette";
-import { Tree } from "./components/Tree";
+import { Tree, loadActiveLib } from "./components/Tree";
 import { Icon, Toaster, type ToastItem } from "./components/ui";
 import { ContextMenu, type CtxItem, type CtxState } from "./components/ContextMenu";
 import { TagPrompt } from "./components/TagPrompt";
@@ -737,6 +737,42 @@ export default function App() {
     void source.snapshotList().then(setSnaps).catch(() => {});
     void source.collList().then(setColls).catch(() => {});
   }, [refreshKey, tagPrompt, tagEdit, snapPrompt]);
+
+  /* 切库：每个库**自带一套标签/分组**（存在库自己的 `.AssetManager/lib.db`），
+     所以当前库一换，侧栏那三份清单必须重拉 —— 否则会看到上一个库的标签，
+     用户以为"标签串库了"。启动时也用持久化的活动库对齐一次。 */
+  const reloadTagLists = useCallback(() => {
+    void source.tags().then(setTags).catch(() => {});
+    void source.tagGroups().then(setTagGroups).catch(() => {});
+    void source.autoTags().then(setAutoTagCounts).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const p = loadActiveLib();
+    if (!p) return;
+    void source
+      .setCurrentLib(p)
+      .then((changed) => {
+        if (changed) reloadTagLists();
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!dir) return;
+    void source
+      .setCurrentLib(dir.path)
+      .then((changed) => {
+        if (changed) {
+          setTagFilter(null);
+          setCollFilter(null);
+          reloadTagLists();
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dir?.id, dir?.path]);
 
   // 当前页的手工标签（详情面板 + 后面的批量操作都要用）
   useEffect(() => {

@@ -102,6 +102,26 @@ CREATE INDEX IF NOT EXISTS idx_lru_time ON thumb_lru(last_used);
    为什么不再建外键到 tags：跨库外键 SQLite 做不到，硬做就得在删标签时逐库对账 ——
    而删标签本来就要逐库清关联（`App::delete_tag`），那条路径是唯一的入口，写在那里更清楚。
    素材一侧的外键保留：删素材（重扫时的对账）靠 ON DELETE CASCADE 把关联一起带走。 */
+/* 标签体系**每库一份**（0.3.9 起）。
+   以前它住在注册库里、全库共享 —— 于是切到 A 库能看到 B 库的标签，
+   换台机器或重装注册库就等于标签全丢。现在跟着库文件走，
+   `asset_tags.tag_id` 指的就是**本库** `tags.id`（不再是全局 id）。 */
+CREATE TABLE IF NOT EXISTS tag_groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  color TEXT,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tags (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  color TEXT,
+  group_id INTEGER,
+  auto_rule TEXT
+);
+
 CREATE TABLE IF NOT EXISTS asset_tags (
   asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
   tag_id   INTEGER NOT NULL,
@@ -332,6 +352,13 @@ fn migrate(c: &Connection) -> Res<()> {
         if !has_column(c, "tags", "group_id") {
             c.execute("ALTER TABLE tags ADD COLUMN group_id INTEGER", []).map_err(e2s)?;
         }
+        /* 索引必须建在补列**之后**：0.4.x 的 tags 没有 group_id，
+           把这条放进 SCHEMA 会让老库在 `execute_batch(SCHEMA)` 阶段直接报错。 */
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tags_group ON tags(group_id)",
+            [],
+        )
+        .map_err(e2s)?;
     }
 
     if !has_column(c, "dirs", "cnt_all") {

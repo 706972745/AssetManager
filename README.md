@@ -11,10 +11,10 @@
 <br>
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.3.6-blue?style=flat-square)](../../releases)
+[![Version](https://img.shields.io/badge/Version-0.3.9-blue?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
-[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.6)-blue?style=flat-square)](#已知限制)
+[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.9)-blue?style=flat-square)](#已知限制)
 
 <br>
 
@@ -49,7 +49,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| **多素材库** | 最多 3 个库根，自有数据目录与索引；库根可随时加 / 移除，文件不受影响 |
+| **多素材库** | 最多 3 个库根；每库的标签/分组/评分**存在库自己的 `.AssetManager/` 里**，跟着文件夹走 —— 换机、挪盘、移除后重新导入都不丢，也不会串库 |
 | **多格式缩略图** | JPG/PNG/WebP/AVIF/HEIC、PSD/PSB、AI/EPS、SVG/WMF/EMF、各厂 RAW、PDF —— 统一走一条缩略图管线（内嵌预览优先，取不到再用系统缩略图），失败不报错、留占位 |
 | **滚动性能** | 视口外不挂 `<img>`（不挂就不解码）；百万元素靠 keyset 分页，滚多快都不抖 |
 | **标签 / 分组** | 手工标签 + 自动标签（格式、类型、尺寸、色彩等从文件事实推导，只读）；标签分组、颜色、批量打标 |

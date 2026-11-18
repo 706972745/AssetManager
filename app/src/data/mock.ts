@@ -177,6 +177,11 @@ export const mockSource: Source = {
     return 0;
   },
 
+  async setCurrentLib() {
+    /* 浏览器预览只有一个假库，切库是空操作 */
+    return false;
+  },
+
   async children(parent) {
     return tree.nodes.filter((n) => n.parentId === parent);
   },
