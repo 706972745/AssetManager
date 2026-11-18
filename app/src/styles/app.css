@@ -381,10 +381,10 @@
 }
 /* 「截图」段头被选中时和普通目录行一个样子（0.2.2）：
    以前点它只换列表、段头毫无反馈，看着像"点了没反应"（owner 报的原话）。
-   段头本身比目录行高一点点（上下 padding 14/5），所以不做左侧 2px 竖线，
-   只给底和字色——和 `.tree-row.sel` 同一组值。 */
+   段头比目录行高一点，但 0.3.6 起也画满竖线，和快照/目录行完全对齐。 */
 .tree-heading-row.shot-head {
   cursor: default;
+  position: relative;
   transition: background var(--t-quick), color var(--t-quick);
 }
 .tree-heading-row.shot-head:hover {
@@ -394,6 +394,20 @@
 .tree-heading-row.shot-head.sel {
   background: var(--ui-hover);
   color: var(--text-1);
+}
+/* 「截图」段头选中时也画左侧竖线，和快照/目录行同一套反馈（owner 2026-11-18：
+   点截图后没有快照那样的蓝线）。段头比目录行高（padding 14/5），
+   竖线盖满整行高度，视觉才和 `.tree-row.sel::before` 对齐。 */
+.tree-heading-row.shot-head.sel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  border-radius: var(--r-anchor);
+  z-index: 1;
 }
 .tree-heading-row .caret {
   display: grid;
@@ -3012,6 +3026,12 @@
 }
 .tag-row:not(.tc-gray).sel::before {
   background: var(--tc);
+}
+/* 分组行没有 tc-* 配色类（它不像标签有身份色），所以 `--tc` 未定义，
+   上面那条 `var(--tc)` 落空 → 蓝线画不出来（owner 2026-11-18 报「点分组没蓝线」）。
+   分组按侧栏 `.tree-row.sel` 的口径：选中就用 accent 竖线。 */
+.tag-row.coll-row:not(.tc-gray).sel::before {
+  background: var(--accent);
 }
 .tag-group-row {
   font-weight: 500;
