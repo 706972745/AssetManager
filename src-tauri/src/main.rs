@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+mod snip_native;
+
 /// 检查更新 / 下载 / 校验 / 静默安装（照 FontManager 那一套搬过来，
 /// 仓库名与安装形态判据换成本仓的）。
 mod update;
@@ -1645,6 +1647,17 @@ fn not_found() -> Response<Vec<u8>> {
    三种来源（素材库 / 截图 / 剪贴板）在窗口看来完全一样：都是一条 `PeekItem`。 */
 
 const PEEK_LONG_EDGE: f64 = 342.0;
+
+/// 当前 UI 主题（0=未知 1=浅 2=深）。主窗在主题变化时推上来，
+/// 建贴图窗口时注入 boot —— 贴图是独立 webview，读不到主窗那侧的偏好。
+static UI_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 贴图「蓝色边框」的全局开关，**默认关**（owner 2026-11-18 连报两次"关不掉"）。
+///
+/// 为什么必须放后端而不是 localStorage：每个贴图是一个独立 webview，
+/// 前端各自记状态的话，关掉当前这张不影响已经贴着的其他张，新贴的还会按默认值再开 ——
+/// 用户看到的就是"明明关过了，还有蓝边"。放这里 + 事件广播，一次点击对所有贴图生效。
+static PEEK_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
 /// 贴图窗口四周的透明边距（**CSS px**，逻辑单位；前端 `.peek-root` 的 `--peek-glow` 必须同值）。
@@ -2009,6 +2022,11 @@ async fn spawn_peek(
         "items": [item],
         "i": 0,
         "opacity": rec.opacity,
+        "theme": match UI_THEME.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => "light",
+            _ => "dark",
+        },
+        "frame": PEEK_FRAME.load(std::sync::atomic::Ordering::SeqCst),
     });
     let script = format!("window.__AM_PEEK__ = {boot};");
     let b = tauri::WebviewWindowBuilder::new(
@@ -2996,6 +3014,57 @@ fn log_runtime_opt(msg: &str) {
 /* ---------------- 复制 / 另存 ---------------- */
 
 /// 复制**原文件**（CF_HDROP：粘到 PS / 资源管理器是文件，不是位图）
+/// 贴图右键「以原始尺寸存到截图库」：把这张图**原样**复制进
+/// `screenshots`（与 assetmanager.exe 同级，也就是软件自己的截图库），
+/// **不缩放、不重编码**——owner 要的是原始尺寸的原件，重新编码会掉画质。
+/// 重名就加 ` (2)`，和资源管理器一个习惯。
+/// 主窗把「设置 → 外观 → 主题」推过来。贴图窗口建窗时读它，
+/// 这样浅色主题下贴图的右键菜单才是浅色的（owner 2026-11-18 第 6 条）。
+#[tauri::command]
+fn am_ui_theme(theme: String) {
+    let v = if theme == "light" { 1 } else { 2 };
+    UI_THEME.store(v, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 贴图「蓝色边框」开关：写全局 + 广播给**所有**贴图窗口（包括发起调用的这一张）。
+///
+/// 为什么要广播而不是只改自己：每张贴图是独立 webview，各改各的话，
+/// 用户关掉手上这张，屏幕上其他张还亮着蓝边 —— 看到的就是"开关坏了"。
+#[tauri::command]
+fn am_peek_set_frame(app: tauri::AppHandle, on: bool) {
+    PEEK_FRAME.store(on, std::sync::atomic::Ordering::SeqCst);
+    let _ = app.emit("peek:frame", on);
+}
+
+#[tauri::command]
+fn am_peek_save_lib(path: String) -> Result<String, String> {
+    let from = PathBuf::from(&path);
+    if !from.is_file() {
+        return Err("原文件已经不在了".into());
+    }
+    let dir = shot_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录 {}：{e}", dir.display()))?;
+    let stem = from
+        .file_stem()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "图片".into());
+    let ext = from
+        .extension()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "png".into());
+    let mut target = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::copy(&from, &target).map_err(|e| format!("写入截图库失败：{e}"))?;
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("peek save-lib {path} -> {}", target.display()));
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn am_peek_copy_file(paths: Vec<String>) -> Result<(), String> {
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
@@ -3200,11 +3269,324 @@ mod splash {
     const WS_EX_LAYERED: u32 = 0x0008_0000;
     const WS_EX_TOPMOST: u32 = 0x0000_0008;
     const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
-    const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
     const ULW_ALPHA: u32 = 0x0000_0002;
-    const SW_SHOWNOACTIVATE: i32 = 4;
+    const SW_SHOW: i32 = 5;
     const AC_SRC_OVER: u8 = 0x00;
     const AC_SRC_ALPHA: u8 = 0x01;
+
+    /* ---------------- 交互层（0.2.4「C 方案」） ----------------
+
+       背景：WebView2 新建窗口要 ~600ms 才交出第一帧，这段时间谁都没法让它出图
+       （alpha 隐身、disable-gpu、关遮挡计算全试过，无效）。所以**选区这一步不再等网页**：
+       冻结图铺上去之后，鼠标拖框、压暗、边框、角点全部由这块原生 GDI 窗口画完，
+       用户按下 F1 的下一帧就能框选。等网页真的画好了，再把当前选区交给它接手
+       （标注、放大镜、工具栏那些仍然是网页那套，一个功能都没少）。 */
+
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_KEYDOWN: u32 = 0x0100;
+
+    struct Sel {
+        /// 冻结后的整屏，**BGRA**（和 DIB 同格式，重绘时直接 memcpy）
+        base: Vec<u8>,
+        /// 整屏压暗 55% 之后的版本（开机算一次，拖框时只做 memcpy）
+        dim: Vec<u8>,
+        w: i32,
+        h: i32,
+        mem: Hdc,
+        bmp: Hgdiobj,
+        bits: *mut u8,
+        /// 选区（物理像素，窗口客户区坐标）
+        rect: Option<[i32; 4]>,
+        start: (i32, i32),
+        dragging: bool,
+        /// 用户按了 Esc / 右键
+        cancel: bool,
+        /// 用户松手了（选区已定）
+        done: bool,
+    }
+    unsafe impl Send for Sel {}
+
+    static SEL: std::sync::Mutex<Option<Sel>> = std::sync::Mutex::new(None);
+
+    fn lo(v: isize) -> i32 {
+        (v & 0xFFFF) as i16 as i32
+    }
+    fn hi(v: isize) -> i32 {
+        ((v >> 16) & 0xFFFF) as i16 as i32
+    }
+
+    /// 把"起点 + 当前点"整理成 x,y,w,h（支持反向拖）
+    fn norm(a: (i32, i32), b: (i32, i32)) -> [i32; 4] {
+        let x = a.0.min(b.0);
+        let y = a.1.min(b.1);
+        let w = (a.0 - b.0).abs();
+        let h = (a.1 - b.1).abs();
+        [x, y, w, h]
+    }
+
+    impl Sel {
+        /// 重绘：整屏 memcpy（~4ms），选区内的行从原图取、其余从压暗版取。
+        /// 这样拖框时每帧只是搬内存，不会因为"逐像素压暗"掉帧。
+        fn redraw(&mut self) {
+            let n = (self.w as usize) * (self.h as usize) * 4;
+            if n == 0 || self.bits.is_null() {
+                return;
+            }
+            let r = self.rect;
+            match r {
+                Some([rx, ry, rw, rh]) if rw > 0 && rh > 0 => {
+                    let row = self.w as usize * 4;
+                    for y in 0..self.h {
+                        let inside = y >= ry && y < ry + rh;
+                        let src = if inside { &self.base } else { &self.dim };
+                        let off = y as usize * row;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src.as_ptr().add(off),
+                                self.bits.add(off),
+                                row,
+                            );
+                        }
+                        if inside {
+                            let l = rx.max(0) as usize * 4;
+                            let rr = ((rx + rw).min(self.w) as usize) * 4;
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    self.dim.as_ptr().add(off),
+                                    self.bits.add(off),
+                                    l,
+                                );
+                                if rr < row {
+                                    std::ptr::copy_nonoverlapping(
+                                        self.dim.as_ptr().add(off + rr),
+                                        self.bits.add(off + rr),
+                                        row - rr,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.stroke_rect(rx, ry, rw, rh);
+                    self.handles(rx, ry, rw, rh);
+                }
+                _ => unsafe {
+                    std::ptr::copy_nonoverlapping(self.dim.as_ptr(), self.bits, n);
+                },
+            }
+            self.present();
+        }
+
+        /// 整屏压暗 55%（只在建窗时算一次）
+        fn make_dim(base: &[u8]) -> Vec<u8> {
+            let mut v = base.to_vec();
+            for p in v.chunks_exact_mut(4) {
+                p[0] = ((p[0] as u32 * 45) / 100) as u8;
+                p[1] = ((p[1] as u32 * 45) / 100) as u8;
+                p[2] = ((p[2] as u32 * 45) / 100) as u8;
+            }
+            v
+        }
+
+        fn px(&mut self, x: i32, y: i32) -> Option<*mut u8> {
+            if x < 0 || y < 0 || x >= self.w || y >= self.h {
+                return None;
+            }
+            let o = ((y as usize) * (self.w as usize) + x as usize) * 4;
+            Some(unsafe { self.bits.add(o) })
+        }
+
+        /// 1px 蓝色边框（#1B4FE0）
+        fn stroke_rect(&mut self, rx: i32, ry: i32, rw: i32, rh: i32) {
+            let (b, g, r) = (0xE0u8, 0x4Fu8, 0x1Bu8);
+            let put = |s: &mut Self, x: i32, y: i32| {
+                if let Some(p) = s.px(x, y) {
+                    unsafe {
+                        *p = b;
+                        *p.add(1) = g;
+                        *p.add(2) = r;
+                    }
+                }
+            };
+            for x in rx..=rx + rw {
+                put(self, x, ry);
+                put(self, x, ry + rh);
+            }
+            for y in ry..=ry + rh {
+                put(self, rx, y);
+                put(self, rx + rw, y);
+            }
+        }
+
+        /// 四个角的抓取点：白底 + 蓝边（8×8）
+        fn handles(&mut self, rx: i32, ry: i32, rw: i32, rh: i32) {
+            for (cx, cy) in [
+                (rx, ry),
+                (rx + rw, ry),
+                (rx, ry + rh),
+                (rx + rw, ry + rh),
+            ] {
+                for dy in -4..4 {
+                    for dx in -4..4 {
+                        let edge = dx == -4 || dx == 3 || dy == -4 || dy == 3;
+                        let (b, g, r) = if edge { (0xE0, 0x4F, 0x1B) } else { (0xFF, 0xFF, 0xFF) };
+                        if let Some(p) = self.px(cx + dx, cy + dy) {
+                            unsafe {
+                                *p = b as u8;
+                                *p.add(1) = g as u8;
+                                *p.add(2) = r as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        fn present(&mut self) {
+            unsafe {
+                let size = Size { cx: self.w, cy: self.h };
+                let src = Point { x: 0, y: 0 };
+                let blend = BlendFunction {
+                    blend_op: AC_SRC_OVER,
+                    blend_flags: 0,
+                    source_constant_alpha: 255,
+                    alpha_format: AC_SRC_ALPHA,
+                };
+                /* 位置用 UpdateLayeredWindow 的 dst_pos 保持原样：这里传当前窗口位置，
+                   避免每次重绘把窗口挪到 (0,0)。 */
+                let mut r = RectPos::default();
+                GetWindowRect(self_hwnd(), &mut r);
+                let dst = Point { x: r.left, y: r.top };
+                let screen_dc = GetDC(0);
+                UpdateLayeredWindow(
+                    self_hwnd(),
+                    screen_dc,
+                    &dst,
+                    &size,
+                    self.mem,
+                    &src,
+                    0,
+                    &blend,
+                    ULW_ALPHA,
+                );
+                ReleaseDC(0, screen_dc);
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct RectPos {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    extern "system" {
+        fn GetWindowRect(h: Hwnd, r: *mut RectPos) -> i32;
+        fn SetCapture(h: Hwnd) -> Hwnd;
+        fn ReleaseCapture() -> i32;
+        fn SetForegroundWindow(h: Hwnd) -> i32;
+    }
+
+    static CUR_HWND: std::sync::atomic::AtomicIsize =
+        std::sync::atomic::AtomicIsize::new(0);
+
+    fn self_hwnd() -> isize {
+        CUR_HWND.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 重绘一次（自己拿锁，别在持锁时调用会发消息的 API）
+    fn repaint() {
+        let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = g.as_mut() {
+            s.redraw();
+        }
+    }
+
+    /// 注意：**持锁期间绝不能调用 SetCapture / ReleaseCapture**。
+    /// 它们会同步给窗口发 WM_CAPTURECHANGED，又回到这个 wnd_proc 里再拿一次锁 ——
+    /// std 的 Mutex 不可重入，直接死锁（0.2.4 第一次实测就卡在这里：
+    /// 松手后协调线程再也拿不到锁，选区永远交不出去）。
+    unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isize {
+        match msg {
+            WM_LBUTTONDOWN => {
+                {
+                    let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(s) = g.as_mut() {
+                        s.start = (lo(l), hi(l));
+                        s.rect = Some([s.start.0, s.start.1, 0, 0]);
+                        s.dragging = true;
+                        s.done = false;
+                    }
+                }
+                SetCapture(h);
+                repaint();
+                0
+            }
+            WM_MOUSEMOVE => {
+                let dragging = {
+                    let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+                    match g.as_mut() {
+                        Some(s) if s.dragging => {
+                            s.rect = Some(norm(s.start, (lo(l), hi(l))));
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if dragging {
+                    repaint();
+                    0
+                } else {
+                    DefWindowProcW(h, msg, w, l)
+                }
+            }
+            WM_LBUTTONUP => {
+                let was = {
+                    let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+                    match g.as_mut() {
+                        Some(s) if s.dragging => {
+                            s.dragging = false;
+                            s.done = true;
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if was {
+                    ReleaseCapture();
+                    repaint();
+                    0
+                } else {
+                    DefWindowProcW(h, msg, w, l)
+                }
+            }
+            WM_RBUTTONDOWN => {
+                if let Ok(mut g) = SEL.lock() {
+                    if let Some(s) = g.as_mut() {
+                        s.cancel = true;
+                    }
+                }
+                0
+            }
+            WM_KEYDOWN => {
+                if w == 0x1B {
+                    if let Ok(mut g) = SEL.lock() {
+                        if let Some(s) = g.as_mut() {
+                            s.cancel = true;
+                        }
+                    }
+                    return 0;
+                }
+                DefWindowProcW(h, msg, w, l)
+            }
+            _ => DefWindowProcW(h, msg, w, l),
+        }
+    }
 
     #[repr(C)]
     #[derive(Default)]
@@ -3326,7 +3708,7 @@ mod splash {
         ONCE.get_or_init(|| unsafe {
             let wc = WndClassW {
                 style: 0,
-                wnd_proc: Some(DefWindowProcW),
+                wnd_proc: Some(wnd_proc),
                 cls_extra: 0,
                 wnd_extra: 0,
                 hinstance: GetModuleHandleW(std::ptr::null()),
@@ -3348,8 +3730,10 @@ mod splash {
         }
         unsafe {
             register_class();
+            /* 可激活（去掉 WS_EX_NOACTIVATE）：这块窗口现在要接鼠标拖框和 Esc，
+               不激活就拿不到键盘。 */
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 class_name().as_ptr(),
                 std::ptr::null(),
                 WS_POPUP,
@@ -3365,6 +3749,7 @@ mod splash {
             if hwnd == 0 {
                 return Err("建原生底图窗口失败".into());
             }
+            CUR_HWND.store(hwnd, std::sync::atomic::Ordering::SeqCst);
 
             let mut bi = BitmapInfo::default();
             bi.header.bi_size = std::mem::size_of::<BitmapInfoHeader>() as u32;
@@ -3384,52 +3769,76 @@ mod splash {
                 DestroyWindow(hwnd);
                 return Err("建 DIB 失败".into());
             }
-            /* RGBA → BGRA（UpdateLayeredWindow 要的是 0xAARRGGBB，内存序 B,G,R,A） */
-            let src = rgba.as_ptr();
-            let dst = bits as *mut u8;
+            SelectObject(mem_dc, bmp);
+
+            /* RGBA → BGRA（UpdateLayeredWindow 要的是 0xAARRGGBB，内存序 B,G,R,A）。
+               顺便把"整屏压暗版"也备好，拖框时每帧只要 memcpy。 */
+            let mut base = vec![0u8; n * 4];
             for i in 0..n {
                 let o = i * 4;
-                let (r, g, b) = (
-                    *src.add(o),
-                    *src.add(o + 1),
-                    *src.add(o + 2),
-                );
-                *dst.add(o) = b;
-                *dst.add(o + 1) = g;
-                *dst.add(o + 2) = r;
-                *dst.add(o + 3) = 255;
+                base[o] = *rgba.as_ptr().add(o + 2);
+                base[o + 1] = *rgba.as_ptr().add(o + 1);
+                base[o + 2] = *rgba.as_ptr().add(o);
+                base[o + 3] = 255;
             }
-            let old = SelectObject(mem_dc, bmp);
-            let size = Size { cx: w as i32, cy: h as i32 };
-            let dst_pos = Point { x, y };
-            let src_pos = Point { x: 0, y: 0 };
-            let blend = BlendFunction {
-                blend_op: AC_SRC_OVER,
-                blend_flags: 0,
-                source_constant_alpha: 255,
-                alpha_format: AC_SRC_ALPHA,
-            };
-            let ok = UpdateLayeredWindow(
-                hwnd,
-                screen_dc,
-                &dst_pos,
-                &size,
-                mem_dc,
-                &src_pos,
-                0,
-                &blend,
-                ULW_ALPHA,
-            );
-            SelectObject(mem_dc, old);
-            DeleteObject(bmp);
-            DeleteDC(mem_dc);
+            let dim = Sel::make_dim(&base);
+            {
+                let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+                *g = Some(Sel {
+                    base,
+                    dim,
+                    w: w as i32,
+                    h: h as i32,
+                    mem: mem_dc,
+                    bmp,
+                    bits: bits as *mut u8,
+                    rect: None,
+                    start: (0, 0),
+                    dragging: false,
+                    cancel: false,
+                    done: false,
+                });
+                if let Some(s) = g.as_mut() {
+                    s.redraw();
+                }
+            }
             ReleaseDC(0, screen_dc);
-            if ok == 0 {
-                DestroyWindow(hwnd);
-                return Err("UpdateLayeredWindow 失败".into());
-            }
-            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            /* 激活 + 显示：要接键盘（Esc），所以用 SW_SHOW 而不是 SW_SHOWNOACTIVATE */
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
             Ok(hwnd)
+        }
+    }
+
+    /// 用户按了 Esc / 右键
+    pub fn take_cancel() -> bool {
+        let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+        match g.as_mut() {
+            Some(s) if s.cancel => {
+                s.cancel = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 当前选区（物理像素，客户区坐标）
+    pub fn current_rect() -> Option<[i32; 4]> {
+        let g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref().and_then(|s| s.rect)
+    }
+
+    pub fn dragging() -> bool {
+        let g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref().map(|s| s.dragging).unwrap_or(false)
+    }
+
+    /// 把选区交给网页接手之后，原生层停止画选区（网页那套更完整）
+    pub fn freeze() {
+        let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = g.as_mut() {
+            s.dragging = false;
+            s.done = true;
         }
     }
 
@@ -3439,6 +3848,14 @@ mod splash {
         }
         unsafe {
             DestroyWindow(hwnd);
+            let mut g = SEL.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mut s) = g.take() {
+                SelectObject(s.mem, 0);
+                DeleteObject(s.bmp);
+                DeleteDC(s.mem);
+                s.bits = std::ptr::null_mut();
+            }
+            CUR_HWND.store(0, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -3482,6 +3899,16 @@ mod splash {
     }
     pub fn close(_hwnd: isize) {}
     pub fn pump() {}
+    pub fn take_cancel() -> bool {
+        false
+    }
+    pub fn current_rect() -> Option<[i32; 4]> {
+        None
+    }
+    pub fn dragging() -> bool {
+        false
+    }
+    pub fn freeze() {}
 }
 
 /* 0.2.3 起**不再**做「截一张窗口画面来判断它画没画好」的探针。
@@ -3712,6 +4139,50 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
             return Err(e);
         }
     };
+    /* 0.3.0「A 方案」：默认不再走 WebView，整块覆盖层由 `snip_native` 用 GDI 画
+       （冻结图 / 拖框 / 工具栏 / 标注 / 撤销全在里面），交付仍复用 `am_snip_finish`。
+       老路径留在后面，`AM_SNIP_WEBVIEW=1` 可以切回去对照。 */
+    if std::env::var("AM_SNIP_WEBVIEW").map(|v| v == "1").unwrap_or(false) == false {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let out = snip_native::run(&shot);
+            match out {
+                Some(d) => {
+                    use base64::{engine::general_purpose::STANDARD, Engine as _};
+                    let b64 = STANDARD.encode(&d.png);
+                    let place = vec![d.place[0], d.place[1], d.place[2], d.place[3]];
+                    let r = tauri::async_runtime::block_on(am_snip_finish(
+                        app2.clone(),
+                        b64,
+                        d.action.clone(),
+                        Some("native".to_string()),
+                        Some(place),
+                    ));
+                    if let Err(e) = r {
+                        if let Some(dir) = LOG_DIR.get() {
+                            log_runtime(dir, &format!("snip native deliver FAIL {e}"));
+                        }
+                    }
+                }
+                None => {
+                    if let Some(dir) = LOG_DIR.get() {
+                        log_runtime(dir, "snip native cancel");
+                    }
+                }
+            }
+            show_peeks(&app2, &hidden);
+            std::thread::spawn(keywatch::uninstall);
+            if let Some(dir) = LOG_DIR.get() {
+                log_runtime(
+                    dir,
+                    &format!("snip native total={}ms", t0.elapsed().as_millis()),
+                );
+            }
+        });
+        return Ok(());
+    }
+
     /* **先铺原生底图**（GDI 直接 blit，零延迟）：用户按下 F1 的下一帧就能看到
        冻住的桌面。WebView 覆盖层随后叠上来画压暗 / 选区 / 工具栏，
        工具栏就绪后（`am_snip_ready`）再把这一层撤掉。
@@ -3829,12 +4300,98 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
     if !vis_now {
         let _ = win.show();
     }
-    let _ = win.set_focus();
+    /* **不要抢焦点**：这一刻前台是那块原生层（它要接鼠标拖框和 Esc）。
+       焦点在原生层 → 用户立刻能框选；网页画好了由协调线程再交还焦点。 */
     if let Some(d) = LOG_DIR.get() {
         log_runtime(
             d,
             &format!("snip t window-shown={}ms", t_all.elapsed().as_millis()),
         );
+    }
+
+    /* 协调线程（0.2.4「C 方案」）：
+       此刻屏幕上/前台都是那块原生层，用户已经能拖框了。这里只做两件事：
+         ① 用户按 Esc / 右键 → 整场取消（不用等网页）；
+         ② 网页该画好了（实测 F1+1050ms）且手没在拖 → 把当前选区推给网页，
+            再把网页提到最前、撤掉原生层。之后标注、工具栏、放大镜全归网页，
+            功能和以前一模一样。 */
+    {
+        let app2 = app.clone();
+        let win2 = win.clone();
+        let gen = SNIP_GEN.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let t0 = SNIP_T0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .map(|t| t)
+                .unwrap_or_else(std::time::Instant::now);
+            let reveal = std::env::var("AM_SNIP_REVEAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1050);
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("snip coord start gen={gen} reveal={reveal}"));
+            }
+            let mut ticks = 0u32;
+            loop {
+                ticks += 1;
+                if ticks % 20 == 0 {
+                    if let Some(d) = LOG_DIR.get() {
+                        log_runtime(
+                            d,
+                            &format!(
+                                "snip coord tick {}ms dragging={} rect={:?}",
+                                t0.elapsed().as_millis(),
+                                splash::dragging(),
+                                splash::current_rect()
+                            ),
+                        );
+                    }
+                }
+                if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+                if splash::take_cancel() {
+                    if let Some(d) = LOG_DIR.get() {
+                        log_runtime(d, "snip native cancel（原生层 Esc/右键）");
+                    }
+                    snip_abort(&app2);
+                    return;
+                }
+                /* 兜底：如果因为丢鼠标捕获等原因一直显示"还在拖"，最多再等 3 秒就强行交接，
+                   否则整场会卡死（0.2.4 实测过一次）。 */
+                let overdue = t0.elapsed() >= Duration::from_millis(reveal + 3000);
+                if t0.elapsed() >= Duration::from_millis(reveal)
+                    && (!splash::dragging() || overdue)
+                {
+                    if let Some(r) = splash::current_rect() {
+                        if r[2] >= 6 && r[3] >= 6 {
+                            let payload = serde_json::json!({
+                                "x": r[0], "y": r[1], "w": r[2], "h": r[3]
+                            });
+                            let _ = app2.emit_to("snip", "snip:sel", payload);
+                            /* 给网页一帧把选区画上去，再接手 */
+                            std::thread::sleep(Duration::from_millis(45));
+                        }
+                    }
+                    if SNIP_GEN.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
+                    let _ = win2.set_always_on_top(true);
+                    let _ = win2.set_focus();
+                    splash::freeze();
+                    splash_close();
+                    if let Some(d) = LOG_DIR.get() {
+                        log_runtime(
+                            d,
+                            &format!("snip t handoff={}ms", t0.elapsed().as_millis()),
+                        );
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
     }
     Ok(())
 }
@@ -4322,75 +4879,25 @@ static SNIP_T0: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex:
 
 #[tauri::command]
 async fn am_snip_ready(app: AppHandle) -> Result<(), String> {
-    let gen = SNIP_GEN.load(Ordering::SeqCst);
-    let t0 = std::time::Instant::now();
+    /* 0.2.4 起这里**不再负责揭幕**：揭幕由 `snip_begin` 里那条协调线程统一管
+       （它还要兼顾"用户正在拖框就别揭"、"Esc 要能取消"）。这条命令留着是因为
+       前端首帧就绪时仍会调一次，用来在日志里对时间。 */
+    let _ = app;
     if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, "snip ready（前端首帧就绪）");
-    }
-    if let Some(w) = app.get_webview_window("snip") {
-        let win = w.clone();
-        std::thread::spawn(move || {
-            /* 0.2.3（owner 2026-11-18 第三次报「截图开始还是黑屏」）—— 这次是量出来的。
-
-               高频抓屏 + 日志对时（本机 2560×1440，release 构建）：
-                 按下 F1                   0ms
-                 底图铺上（冻结桌面）       ~130ms   ← 用户这一帧就看到图了
-                 覆盖窗 show                ~390ms
-                 前端 JS 就绪（thumb 解完） ~560ms
-                 **覆盖窗交出第一帧         ~1030ms**  ← 中间 470ms 是"窗口自己还没画"
-                 底图撤掉（旧逻辑）         ~700ms   ← 于是露出那 470ms 的黑
-
-               两个结论（都试过才敢写）：
-               1. 这 470ms **不是** JS 慢，是新建的 WebView2 窗口分配合成面（GPU/DComp）
-                  的固有开销。试过 alpha=1 隐身提前显示 —— 没用，WebView2 的合成内容
-                  不吃 layered alpha，窗口一 show 就是不透明的黑。
-               2. 所以只能"盖住等"：底图在上面压着，等它该画好了再揭。
-                  揭的时间点用实测值（`AM_SNIP_REVEAL_MS`，默认 1050ms，可覆盖），
-                  盖着的这段时间屏幕上一直是那张冻结的图，不是黑。 */
-            let reveal_ms = std::env::var("AM_SNIP_REVEAL_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1050);
-            let deadline = SNIP_T0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .map(|t| t + Duration::from_millis(reveal_ms));
-            if let Some(dl) = deadline {
-                let now = std::time::Instant::now();
-                if dl > now {
-                    std::thread::sleep(dl - now);
-                }
-            }
-            if SNIP_GEN.load(Ordering::SeqCst) != gen {
-                return;
-            }
-            let _ = win.set_always_on_top(true);
-            let _ = win.set_focus();
-            splash_close();
-            if let Some(d) = LOG_DIR.get() {
-                let total = SNIP_T0
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .map(|t| t.elapsed().as_millis())
-                    .unwrap_or(0);
-                log_runtime(
-                    d,
-                    &format!(
-                        "snip t reveal={}ms (from F1: {total}ms, since-ready: {}ms)",
-                        reveal_ms,
-                        t0.elapsed().as_millis()
-                    ),
-                );
-            }
-        });
+        log_runtime(d, "snip ready（前端首帧就绪，等协调线程交接）");
     }
     Ok(())
 }
 
 #[tauri::command]
 async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
-    /* 取消也算一次会话结束：正在淡入的那条线程必须立刻停手，
-       不然它会把底图重新撤一遍、把已经关掉的窗口再设一次 alpha */
+    snip_abort(&app);
+    Ok(())
+}
+
+/// 整场取消（命令和原生层的 Esc/右键共用一份逻辑）。
+fn snip_abort(app: &AppHandle) {
+    /* 取消也算一次会话结束：协调线程必须立刻停手 */
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
     /* 会话结束：卸掉「真人按键」监视钩子（扔后台，不挡取消） */
     std::thread::spawn(keywatch::uninstall);
@@ -4423,7 +4930,6 @@ async fn am_snip_cancel(app: AppHandle) -> Result<(), String> {
             let _ = m.set_focus();
         }
     });
-    Ok(())
 }
 
 /// 开一次截图。**没有 mode**：截图界面永远是同一个，交付（复制 / 保存 / 贴图）
@@ -4965,8 +5471,11 @@ fn main() {
             am_peek_close,
             am_peek_top,
             am_peek_opacity,
+            am_peek_set_frame,
             am_peek_track,
             am_peek_copy_file,
+            am_peek_save_lib,
+            am_ui_theme,
             am_clip_text,
             am_clip_peek,
             am_clip_history,

@@ -1,3 +1,12 @@
+/**
+ * 应用根组件 —— 全局状态的**唯一**持有者 + 界面拼装。
+ *
+ * 只做三件事：持状态（prefs / 选中 / 筛选 / 弹层开关）、写副作用（IPC 调用、事件订阅、快捷键）、
+ * 把 props 发给下面各组件。**具体界面不在这里写**：顶栏与详情在 `Chrome`，主视图在 `Views`。
+ *
+ * 坑：订阅类 effect 只挂载一次，闭包里拿到的是首次渲染的旧值，所以关键状态都另存一份 ref
+ * （`prefsRef` / `toastRef`）。改状态前先看有没有对应 ref，别再直接用 state。
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
 import { loadHotkeys } from "./lib/hotkeys";
@@ -356,6 +365,19 @@ export default function App() {
      · data-theme="light" → 浅色；不设 / "dark" → 深色（tokens.css 的 :root 就是深色）
      · data-motion="reduced" → 全站时长令牌压到 1ms，惯性滚动也一起关（momentumScroll 读的就是这个属性）
      首次挂载不加过渡，否则启动瞬间能看到一次「从默认深色淡到浅色」。 */
+  /* 系统深浅：prefers-color-scheme。只有 theme==="system" 时才用它，
+     但监听一直挂着 —— 用户从"固定深色"切回"跟随系统"时能立刻对上，不用重启。 */
+  const [sysDark, setSysDark] = useState(
+    () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true
+  );
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!mq) return;
+    const on = (e: MediaQueryListEvent) => setSysDark(e.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
   const themeMounted = useRef(false);
   useEffect(() => {
     const el = document.documentElement;
@@ -370,9 +392,15 @@ export default function App() {
     const q = new URLSearchParams(location.search);
     const forcedTheme = q.get("theme");
     const forcedMotion = q.get("motion");
-    el.dataset.theme = forcedTheme === "light" || forcedTheme === "dark" ? forcedTheme : prefs.theme;
+    /* theme 现在有三种：system / dark / light。data-theme 只认 light（tokens.css 的
+       :root 就是深色），所以 system 必须先按系统偏好解析成具体值，不能直接塞进去。 */
+    const resolved =
+      prefs.theme === "system" ? (sysDark ? "dark" : "light") : prefs.theme;
+    el.dataset.theme = forcedTheme === "light" || forcedTheme === "dark" ? forcedTheme : resolved;
     el.dataset.motion = forcedMotion === "reduced" ? "reduced" : prefs.motion;
-  }, [prefs.theme, prefs.motion]);
+    /* 贴图窗口是独立 webview，要用这个值决定它右键菜单的深浅 */
+    void source.setUiTheme(resolved).catch(() => {});
+  }, [prefs.theme, prefs.motion, sysDark]);
 
   /* 后台预热全库缩略图：启动 6 秒后开始（避开首屏那一波请求）。
      为什么要它：预取只做「下一屏」，第一次打开很久没看的目录仍然要现做图；
@@ -2034,7 +2062,7 @@ export default function App() {
     }
   };
 
-  /* 无边框贴图：开一扇"就是那张图"的独立窗口（照果核看图的无边框模式）。
+  /* 贴图：开一扇"就是那张图"的独立窗口（照果核看图的无边框模式）。
      为什么不在主窗里做：截图时主窗的侧栏/顶栏/详情栏都会进画面。
      `items` 整个带过去，方向键在里面直接翻。 */
   const openPeek = useCallback(
@@ -2109,7 +2137,7 @@ export default function App() {
         show([
           { label: n > 1 ? `用默认程序打开（${n} 个）` : "用默认程序打开", icon: "image", action: () => void onOpenDefault(a) },
           {
-            label: "无边框贴图（可以拖到任意位置截图）",
+            label: "贴图（可以拖到任意位置）",
             icon: "expand",
             shortcut: "B",
             action: () => openPeek(a),
@@ -2305,7 +2333,7 @@ export default function App() {
           action: () => void source.snipStart().catch((e) => toast(String(e), true)),
         },
         {
-          label: "把剪贴板里的图用无边框贴图打开",
+          label: "把剪贴板里的图用贴图打开",
           icon: "copy",
           shortcut: "F3",
           action: () => void source.clipPeek().catch((e) => toast(String(e), true)),
@@ -2399,7 +2427,7 @@ export default function App() {
           }
         }
       } else if (e.key.toLowerCase() === "b" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        // B = 无边框贴图（Borderless）。对着参考图改稿/截图时最顺手的入口
+        // B = 贴图（Borderless）。对着参考图改稿/截图时最顺手的入口
         if (selected) {
           e.preventDefault();
           openPeek(selected);
@@ -2630,7 +2658,7 @@ export default function App() {
     if (selected) {
       out.push({
         id: "peek",
-        label: "无边框贴图（可拖到任意位置截图）",
+        label: "贴图（可拖到任意位置）",
         hint: "B",
         icon: "expand",
         keywords: "无边框 看图 截图 borderless peek 参考图",
@@ -2742,17 +2770,6 @@ export default function App() {
         onSettings={() => setSettingsOpen(true)}
         onUndo={onUndo}
         busy={busy}
-        where={
-          /* 标题栏如实写"我在看什么"（0.2.2）：侧栏点标签/分组/快照 = 换了视图，
-             不是加了条件，所以位置写在这里，而不是在列表上方挂筛选条。 */
-          tagFilter
-            ? `标签：${isAutoTag(tagFilter) ? autoTagLabel(tagFilter) : tagFilter}`
-            : collFilter !== null
-              ? `分组：${colls.find((c) => c.id === collFilter)?.name ?? "分组"}`
-              : snapFilter !== null
-                ? `快照：${snaps.find((s) => s.id === snapFilter)?.name ?? "快照"}`
-                : dir?.name
-        }
       />
 
       {/* 布局骨架照 FontManager：标题栏通栏 → 侧栏通栏 → 右侧「顶栏 + 内容」两行。
@@ -3592,7 +3609,7 @@ function Lightbox({
           />
         </div>
 
-        {/* T43 边缘导航：光标到左右边缘才浮出来（无边框贴图时最需要它） */}
+        {/* T43 边缘导航：光标到左右边缘才浮出来（贴图时最需要它） */}
         <div className="lb-edge l" onClick={(e) => e.stopPropagation()}>
           <button
             className="lb-edge-btn"

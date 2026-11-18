@@ -269,11 +269,12 @@ export function Settings({
           {
             id: "theme",
             label: "主题",
-            hint: "深色是出厂设定（与 FontManager 同一套纸墨配色）；浅色适合亮环境",
-            kw: "主题 深色 浅色 暗色 亮色 theme dark light",
+            hint: "默认「系统」：系统切到浅色，软件跟着变浅；也可以固定成浅色或深色",
+            kw: "主题 系统 跟随系统 深色 浅色 暗色 亮色 自动 theme system dark light auto",
             node: seg(draft.theme, [
-              { v: "dark", label: "深色" },
               { v: "light", label: "浅色" },
+              { v: "dark", label: "深色" },
+              { v: "system", label: "系统" },
             ], (v) => patch({ theme: v as Prefs["theme"] })),
           },
           {
@@ -637,7 +638,7 @@ export function Settings({
           },
           {
             id: "hk-clip",
-            label: "把剪贴板里的图用无边框贴图打开",
+            label: "把剪贴板里的图用贴图打开",
             hint: "最近 10 张会留在历史里，窗内按 ← → 翻",
             kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局",
             node: (

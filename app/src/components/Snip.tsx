@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Eraser, Highlighter, Pencil, Pin, Redo2, Save, Type, Undo2, X } from "lucide-react";
-import { source } from "../data/source";
+import { onAppEvent, source } from "../data/source";
 
 /**
  * 截图覆盖层（F1）—— **按 Snipaste 2.11.3 逐项复刻**，但交付方式不同：
@@ -231,6 +231,18 @@ export function Snip() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boot?.w, scale]);
+
+  /* 原生层把已经框好的选区交过来（0.2.4「C 方案」）：
+     用户在原生层上就已经拉完框了，网页接手时不能让他重新框一次 —— 直接把这块
+     区域设成选区。原生层报的是**物理像素**，这里换成 CSS 像素（canvas/标注用物理像素，
+     由现有的 rectRef × scale 逻辑处理，不用这里额外换算）。 */
+  useEffect(() => {
+    return onAppEvent<{ x: number; y: number; w: number; h: number }>("snip:sel", (r) => {
+      const k = scale > 0 ? scale : 1;
+      if (!r || !(r.w > 0) || !(r.h > 0)) return;
+      setRect({ x: r.x / k, y: r.y / k, w: r.w / k, h: r.h / k });
+    });
+  }, [scale]);
 
   const readyOnce = useRef(false);
   const callReady = useCallback(() => {

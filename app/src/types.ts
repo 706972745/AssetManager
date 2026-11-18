@@ -438,17 +438,23 @@ export interface Source {
   /** 看一眼目录里有什么（判断用户是不是把素材目录当成数据文件夹了） */
   probeDir(dir: string): Promise<DirProbe>;
 
-  /* ---------------- 无边框贴图 / 截图 / 剪贴板（0.10.0） ---------------- */
+  /* ---------------- 贴图 / 截图 / 剪贴板（0.10.0） ---------------- */
   /** 复制原文件（CF_HDROP） */
   peekCopyFile(paths: string[]): Promise<void>;
   /** 贴图不透明度（Ctrl+滚轮），写进存档 */
   peekOpacity(v: number): Promise<void>;
   /** 贴图换图后把存档指向新文件 */
   peekTrack(path: string, gid: number): Promise<void>;
+  /** 「蓝色边框」全局开关：后端存状态并广播 `peek:frame` 给所有贴图窗口 */
+  peekSetFrame(on: boolean): Promise<void>;
   /** 文本进剪贴板（复制显示尺寸这种） */
   clipText(text: string): Promise<void>;
   /** 另存为，返回最终路径（取消 = null） */
   saveAs(src: string, suggest?: string): Promise<string | null>;
+  /** 贴图右键「以原始尺寸存到截图库」：原样复制进 screenshots，返回落地路径 */
+  peekSaveLib(path: string): Promise<string>;
+  /** 把当前主题告诉后端：贴图窗口建窗时要用它决定右键菜单的深浅 */
+  setUiTheme(theme: "light" | "dark"): Promise<void>;
   /** F3：剪贴板图片贴到屏幕（进历史，最多 10 张） */
   clipPeek(): Promise<void>;
   /** 剪贴板历史：`[路径, 宽, 高]`，最新在前 */
@@ -488,7 +494,7 @@ export interface Source {
   /** 注册系统级快捷键，返回注册失败的组合 */
   hotkeysSet(list: [string, string][]): Promise<string[]>;
 
-  /* ---------------- 无边框贴图窗口（0.9.0） ---------------- */
+  /* ---------------- 贴图窗口（0.9.0） ---------------- */
   /** 开一扇无边框窗口，`ids` 是整个浏览集合，`index` 是当前那张 */
   peekOpen(ids: number[], index: number, longEdge?: number): Promise<void>;
   /** 缩放窗口本身（连窗口一起缩放，锚定中心） */
@@ -643,7 +649,8 @@ export interface Prefs {
   /** 缓存上限（MB） */
   cacheLimitMB: number;
   /** 主题：默认深色（与 FontManager 出厂一致），浅色可选 */
-  theme: "dark" | "light";
+  /** "system" = 跟随系统（默认）；其余为强制深浅 */
+  theme: "system" | "dark" | "light";
   /** 动效：system = 跟随系统；reduced = 减少动态效果（全站时长压到 1ms） */
   motion: "system" | "reduced";
   /**
@@ -674,7 +681,7 @@ export const DEFAULT_PREFS: Prefs = {
   showTileName: true,
   autoTags: true,
   cacheLimitMB: 2048,
-  theme: "dark",
+  theme: "system",
   motion: "system",
   warmThumbs: true,
   updateCheck: true,
@@ -735,7 +742,7 @@ export function loadPrefs(): Prefs {
         typeof p.cacheLimitMB === "number" && p.cacheLimitMB > 0
           ? p.cacheLimitMB
           : DEFAULT_PREFS.cacheLimitMB,
-      theme: p.theme === "light" ? "light" : "dark",
+      theme: p.theme === "light" || p.theme === "dark" ? p.theme : "system",
       motion: p.motion === "reduced" ? "reduced" : "system",
       warmThumbs: p.warmThumbs !== false,
       updateCheck: p.updateCheck !== false,

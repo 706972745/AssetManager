@@ -1,3 +1,10 @@
+/**
+ * 窗口外壳与详情 —— 标题栏、顶栏（搜索 / 筛选 / 排序）、右侧详情面板。
+ *
+ * 文件内按 `---- 标题栏 ----`、`---- 顶栏 ----`、`---- 详情 ----` 三条横幅分节，
+ * 新东西必须落进对应分节，不要在文件末尾追加。
+ * 本文件不持全局状态（状态在 `App.tsx`），文件操作一律走 `source.xxx`，不直接 invoke。
+ */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
@@ -36,26 +43,23 @@ export function TitleBar({
   onSettings,
   onUndo,
   busy,
-  where,
 }: {
   onRescan: () => void;
   onAddFolder: () => void;
   onSettings: () => void;
   onUndo: () => void;
   busy: boolean;
-  /** 当前所在目录（T44 的轻量版：标题带上位置，切到别的软件再切回来不用想"我在哪个库"） */
-  where?: string;
 }) {
+  /* 标题栏只写应用名。以前这里还跟一段「— 快照：xxx / 标签：xxx」表示"我在看什么"
+     （T44 的轻量版），owner 2026-11-18 明确不要：侧栏本来就高亮着当前项，
+     标题栏再写一遍只是噪音，而且长名字会把标题挤走。 */
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-brand" data-tauri-drag-region>
         <span className="brand-mark">
           <BrandMark />
         </span>
-        <span className="titlebar-title">
-          AssetManager
-          {where && <span className="titlebar-where">{where}</span>}
-        </span>
+        <span className="titlebar-title">AssetManager</span>
       </div>
       {/* 结构与 FontManager 逐层一致（TitleBar.tsx）：
          `.titlebar-controls`（gap 1px）里装三样 —— 动作组 `.titlebar-actions`、
@@ -818,7 +822,7 @@ export function Detail({
   onReveal: (a: Asset) => void;
   /** 「重命名」入口：**不再弹窗**，改成让顶栏文件名进入就地编辑 */
   onRename: (a: Asset) => void;
-  /** 「看图」= **无边框贴图窗口**（Peek，窗口就是那张图），不是灯箱 */
+  /** 「看图」= **贴图窗口**（Peek，窗口就是那张图），不是灯箱 */
   onPeek: (a: Asset) => void;
   /** 顶栏文件名是否处于改名状态（由 App 统一管：右键菜单 / 操作区的重命名都走这里） */
   renaming: boolean;
@@ -1349,7 +1353,7 @@ export function Detail({
                 </div>
                 <div className="act-row">
                   <button className="btn" onClick={() => onPeek(asset)}>
-                    无边框贴图
+                    贴图
                   </button>
                   <button
                     className="btn btn-danger"

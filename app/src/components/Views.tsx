@@ -1,3 +1,9 @@
+/**
+ * 主视图 —— 网格 / 瀑布流两种排布的渲染与交互（含 `Tile`）。
+ *
+ * 只负责"怎么摆、怎么点"：排布计算在 `lib/layout.ts`，滚动与滚动惯性在 `lib/momentumScroll.ts`，
+ * 数据由 `App` 传下来。缩略图走 `thumb://` 协议，加载失败记在 `THUMB_FAILED` 里避免重试风暴。
+ */
 import { memo, useCallback, useLayoutEffect, useEffect, useMemo, useRef, useState } from "react";
 import {
   badge,

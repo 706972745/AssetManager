@@ -12,7 +12,7 @@ import { installMomentumScroll } from "./lib/momentumScroll";
 import { installScrollHot } from "./lib/scrollHot";
 import { installPerfProbe } from "./lib/perf";
 
-/* 同一个前端包跑三种窗口：主窗（App）、无边框贴图（Peek）、截图覆盖层（Snip）。
+/* 同一个前端包跑三种窗口：主窗（App）、贴图（Peek）、截图覆盖层（Snip）。
    用**初始化脚本注入的全局变量**区分（Rust 侧 `initialization_script` 写 __AM_PEEK__）：
    URL 里带 `#/peek` 或 `?peek=1` 都会让新窗口导航失败（WebviewUrl::App 把整串当路径）。 */
 const isPeek = !!(window as unknown as { __AM_PEEK__?: unknown }).__AM_PEEK__;
@@ -22,7 +22,7 @@ const isBoard = !!(window as unknown as { __AM_BOARD__?: unknown }).__AM_BOARD__
 /* 惯性滚动（照 FontManager）：Windows 上的 WebView2 滚轮没有惯性，松手就停。
    这里统一接管成「继续滑行 + 指数减速」。自带边界（到底交还原生、输入框 /
    Ctrl 滚轮 / 横向滚动一律放行、减动效时关闭）。 */
-/* 无边框贴图窗口**不装惯性滚动**：它没有可滚动的内容，
+/* 贴图窗口**不装惯性滚动**：它没有可滚动的内容，
    而惯性滚动会把一次滚轮拆成十几帧合成事件 —— 我们的"滚轮缩放窗口"会被放大十几倍。 */
 if (!isPeek && !isSnip && !isBoard) installMomentumScroll();
 

@@ -71,17 +71,26 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
       }
     };
     const close = () => onClose();
+    /* 页面滚动就关菜单（菜单是 fixed 定位，页面一滚它就悬空了）。
+       但**菜单自己内部的滚动不能关** —— 贴图窗口很小，菜单项多到超出窗口高度，
+       用户只能靠滚轮往下翻；以前这里一律 close，表现就是"菜单显示不全又滚不动"
+       （owner 2026-11-18 报的）。 */
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof Node && ref.current?.contains(t)) return;
+      close();
+    };
     window.addEventListener("mousedown", outside, true);
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("resize", close);
     window.addEventListener("blur", close);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       window.removeEventListener("mousedown", outside, true);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("blur", close);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [onClose]);
 

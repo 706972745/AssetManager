@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { source } from "../data/source";
+import { onAppEvent, source } from "../data/source";
+import { loadPrefs } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 
 /**
- * 无边框贴图窗口（UI 里叫「无边框贴图」，也就是 owner 说的「贴图」——同一件事）。
+ * 贴图窗口（UI 里叫「贴图」，也就是 owner 说的「贴图」——同一件事）。
  *
  * 形态照果核看图的「无边框模式」：**窗口就是那张图** —— 没有标题栏、没有边框、没有工具条，
  * 尺寸由图片比例决定（后端算，长边默认 342 DIP）。但它比果核多一层用法：
@@ -34,17 +35,46 @@ interface PeekBoot {
   items?: PeekItem[];
   i?: number;
   opacity?: number;
+  theme?: "light" | "dark";
+  /** 「蓝色边框」的全局状态（后端持有，建窗时注入；默认关） */
+  frame?: boolean;
 }
 
 const ZOOM_STEP = 1.09; // 和果核看图同一个步长（实测每格 ×1.09）
 const OPACITY_STEP = 0.08;
 
-function bootData(): { items: PeekItem[]; i: number; opacity: number } {
+function bootData(): {
+  items: PeekItem[];
+  i: number;
+  opacity: number;
+  theme: "light" | "dark";
+  frame: boolean;
+} {
   const b = (window as unknown as { __AM_PEEK__?: PeekBoot }).__AM_PEEK__ ?? {};
   const items = (b.items ?? []).filter((x) => !!x?.src);
   const i = Math.max(0, Math.min(Number(b.i ?? 0) || 0, Math.max(0, items.length - 1)));
   const op = typeof b.opacity === "number" ? b.opacity : 1;
-  return { items, i, opacity: Math.min(1, Math.max(0.15, op)) };
+  /* 主题以后端注入的为准（主窗推过去的），没有才退回本地偏好 ——
+     贴图是独立 webview，"设置里的主题"在主窗那侧的 localStorage 里，不保证同分区。 */
+  const pref = loadPrefs().theme;
+  const theme: "light" | "dark" =
+    b.theme === "light" || b.theme === "dark"
+      ? b.theme
+      : pref === "light"
+        ? "light"
+        : pref === "dark"
+          ? "dark"
+          : (window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true)
+            ? "dark"
+            : "light";
+  return {
+    items,
+    i,
+    opacity: Math.min(1, Math.max(0.15, op)),
+    theme,
+    /* 蓝色边框：后端是唯一事实来源，默认关 */
+    frame: b.frame === true,
+  };
 }
 
 /** 16px 线性图标（只用一个，不值得为它引依赖） */
@@ -61,16 +91,36 @@ export function Peek() {
   const [rot, setRot] = useState(0);
   const [flip, setFlip] = useState({ h: false, v: false });
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  /* 蓝色边框（owner 2026-11-18）：截图贴到屏幕上时，图和桌面颜色接近就看不出边界。
-     右键可开关，**默认开**，并且记在 localStorage —— 所有贴图窗口共用这一个偏好，
-     不用每贴一张设一次。 */
-  const [frame, setFrame] = useState(() => localStorage.getItem("am.peek.frame") !== "0");
+  /* 贴图窗没有主窗那套 toast，用一条自己会消失的提示（存库/存库失败都要有反馈） */
+  const [flashMsg, setFlashMsg] = useState("");
+  const flash = useCallback((m: string) => {
+    setFlashMsg(m);
+    window.setTimeout(() => setFlashMsg(""), 2200);
+  }, []);
+  /* 蓝色边框：**全局开关**，状态在后端（`PEEK_FRAME`），不是每个窗口各记一份。
+     为什么改（owner 2026-11-18 连报两次"关不掉"）：贴图是多窗口，前端各存 localStorage 时，
+     关掉手上这张不影响已经贴着的其他张，新贴的还按默认值开 —— 看上去就是开关没生效。
+     现在默认**关**（大多数人不需要那圈线），切换时调命令，后端广播给所有贴图窗口。 */
+  const [frame, setFrame] = useState(() => boot.frame === true);
   const toggleFrame = useCallback(() => {
     setFrame((v) => {
-      localStorage.setItem("am.peek.frame", v ? "0" : "1");
-      return !v;
+      const next = !v;
+      void source.peekSetFrame(next);
+      flash(next ? "蓝色边框：开" : "蓝色边框：关");
+      return next;
     });
-  }, []);
+    /* 兜底：所有窗口（含本窗）都会收到 `peek:frame`，正常路径由事件驱动更新；
+       这里先本地改一次是为了手感跟手，事件回来时值相同，不会闪。 */
+  }, [flash]);
+
+  /* 其他贴图窗口切了这个开关 → 本窗跟着变（全局偏好的唯一同步方式） */
+  useEffect(
+    () =>
+      onAppEvent("peek:frame", (v) => {
+        setFrame(v === true);
+      }),
+    []
+  );
 
   const root = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -95,6 +145,13 @@ export function Peek() {
     const t = setTimeout(markReady, 400);
     return () => clearTimeout(t);
   }, [markReady]);
+
+  /* 主题：贴图是独立 webview，不会自动继承主窗的 data-theme。
+     以前这里没人设，于是浅色主题下贴图的右键菜单仍是深色（owner 2026-11-18 报的第 6 条）。
+     开窗时读一次 prefs 就够 —— 用户在设置里换主题后新开的贴图会跟上。 */
+  useEffect(() => {
+    document.documentElement.dataset.theme = boot.theme === "light" ? "light" : "dark";
+  }, [boot.theme]);
 
   useEffect(() => {
     document.body.classList.add("peek-body");
@@ -290,7 +347,18 @@ export function Peek() {
       },
     },
     {
-      label: "保存到…",
+      label: "以原始尺寸存到截图库",
+      icon: "save",
+      action: () => {
+        if (!cur) return;
+        void source
+          .peekSaveLib(cur.path)
+          .then(() => flash("已存到截图库（screenshots）"))
+          .catch((e: unknown) => flash(String((e as Error)?.message ?? e)));
+      },
+    },
+    {
+      label: "另存到…",
       icon: "reveal",
       shortcut: "Ctrl+S",
       action: () => cur && void source.saveAs(cur.path).catch(() => {}),
@@ -344,7 +412,7 @@ export function Peek() {
       },
     },
     { kind: "separator" },
-    { label: "关闭这扇无边框贴图", icon: "close", shortcut: "Esc", danger: true, action: close },
+    { label: "关闭这个贴图", icon: "close", shortcut: "Esc", danger: true, action: close },
   ];
 
   const px = cur?.src ?? "";
@@ -389,6 +457,8 @@ export function Peek() {
       )}
 
       {err && <div className="peek-err">{err}</div>}
+
+      {flashMsg && <div className="peek-flash">{flashMsg}</div>}
 
       {menu && (
         <ContextMenu

@@ -29,11 +29,11 @@ const LEFT: Group[] = [
     title: "浏览与预览",
     rows: [
       { keys: ["Space"], label: "打开大图预览" },
-      { keys: ["B"], label: "无边框贴图", hint: "当前选中那张；只剩图像，可拖到任意位置" },
+      { keys: ["B"], label: "贴图", hint: "当前选中那张；只剩图像，可拖到任意位置" },
       { keys: ["←", "→"], label: "上一张 / 下一张", hint: "大图里翻页，网格里换选中" },
       { keys: ["滚轮"], label: "大图缩放（1×–8×）" },
       { keys: ["双击"], label: "大图缩放复位 1:1" },
-      { keys: ["Esc"], label: "关大图 / 关无边框贴图 / 关浮层" },
+      { keys: ["Esc"], label: "关大图 / 关贴图 / 关浮层" },
       { keys: ["双击标题"], label: "就地重命名", hint: "单击复制文件名；不再弹窗" },
     ],
   },

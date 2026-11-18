@@ -4222,10 +4222,10 @@ body.peek-body #root {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  /* 棋盘格垫层：透明 PNG 不至于在深色屏幕上"看不见边界"。
-     只有透明像素才透出来，正常的图完全看不出来。 */
-  background-color: transparent;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  /* 这里**不再**自己画 1px 发丝线（owner 2026-11-18 报「关掉蓝色边框后还有一圈」）。
+     以前为了"白图贴在白底网页上不至于消失"加了一条 inset 白线，但它不受开关控制 ——
+     用户关掉蓝边后看到的就是这条线，自然会认为开关没生效。
+     现在规则只有一条：**要轮廓就开「蓝色边框」，那是唯一一条边**；关掉就什么都没有。 */
   -webkit-user-drag: none;
   transform-origin: center center;
   transition: transform var(--t-quick, 120ms) ease-out;
@@ -4240,6 +4240,24 @@ body.peek-body #root {
   background: #17171a;
   padding: 12px;
   text-align: center;
+}
+
+/* 贴图窗自己的提示条（存库成功/失败）：它没有主窗那套 toast，
+   但"存了没存上"必须有反馈，否则用户只能去文件管理器里猜。 */
+.peek-flash {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 5px;
+  background: rgba(20, 20, 22, 0.88);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 40;
 }
 
 /* 蓝色边框（右键「✓ 蓝色边框」可关，默认开）。
@@ -6494,17 +6512,6 @@ body.board-body #root {
 }
 
 /* 标题栏里"当前目录"那一小截 */
-.titlebar-where {
-  margin-left: 8px;
-  color: var(--text-3);
-  font-weight: 400;
-}
-.titlebar-where::before {
-  content: "—";
-  margin-right: 8px;
-  opacity: 0.6;
-}
-
 /* ============================================================================
    详情面板「标签」区 —— 逐值照 FontManager（owner 2026-11-18：
    「这个标签这里也和 fontmanager 软件中的详情面板的标签不一样，要一样的」）
@@ -6858,4 +6865,39 @@ html[data-motion="reduced"] .set-update-spin {
   .set-update-spin {
     animation: none;
   }
+}
+
+/* 贴图窗口里的右键菜单。
+   贴图窗只有图那么大（常见 300~700px 高），而菜单有十几项 —— 单列根本放不下，
+   以前的表现就是"显示不全，滚也滚不动"（owner 2026-11-18）。
+   这里改成**两列**：16 项压到 8 行，常见尺寸下整份菜单一屏看完；
+   真遇到特别小的窗口还有 max-height + overflow 兜底（滚动不会再关菜单，见 ContextMenu）。 */
+.peek-body .ctx-menu {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 2px;
+  min-width: min(392px, calc(100vw - 8px));
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  padding: 4px;
+  overscroll-behavior: contain;
+}
+.peek-body .ctx-item {
+  height: 27px;
+  padding: 0 6px;
+  font-size: 12px;
+  gap: 5px;
+}
+/* 分隔条 / 分组标题横跨两列 */
+.peek-body .ctx-sep,
+.peek-body .ctx-heading {
+  grid-column: 1 / -1;
+}
+.peek-body .ctx-sep {
+  margin: 2px 2px;
+}
+/* 两列时快捷键提示太挤，收窄字号 */
+.peek-body .ctx-kbd {
+  font-size: 10.5px;
+  margin-left: 4px;
 }

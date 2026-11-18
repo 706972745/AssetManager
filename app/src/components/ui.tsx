@@ -1,3 +1,9 @@
+/**
+ * 通用控件与图标 —— `Icon` / `BrandMark` / `Toaster` / `Menu` / `BlinkCaretInput` 等。
+ *
+ * 无状态、不碰 IPC、不读 prefs；需要业务数据的一律由调用方传 props。
+ * 新增控件放这里的前提是"至少两处会用"，只服务一个组件的写在那个组件文件里。
+ */
 import {
   useCallback,
   useEffect,
@@ -184,7 +190,7 @@ const ICONS: Record<string, Glyph> = {
   tag: ({ size, stroke, className }) => <Tag size={size} strokeWidth={stroke} className={className} />,
   info: ({ size, stroke, className }) => <Info size={size} strokeWidth={stroke} className={className} />,
   play: ({ size, stroke, className }) => <Eye size={size} strokeWidth={stroke} className={className} />,
-  /* 无边框贴图（照果核看图）：四角向外的箭头 */
+  /* 贴图（照果核看图）：四角向外的箭头 */
   expand: ({ size, stroke, className }) => (
     <Expand size={size} strokeWidth={stroke} className={className} />
   ),

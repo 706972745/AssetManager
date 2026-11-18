@@ -405,12 +405,17 @@ export const mockSource: Source = {
   async peekCopyFile() {},
   async peekOpacity() {},
   async peekTrack() {},
+  async peekSetFrame() {},
   async clipText(text: string) {
     await navigator.clipboard?.writeText(text);
   },
   async saveAs() {
     return null;
   },
+  async peekSaveLib() {
+    throw new Error("浏览器预览下不能写截图库，请用桌面版");
+  },
+  async setUiTheme() {},
   async clipPeek() {
     throw new Error("浏览器预览模式没有剪贴板贴图");
   },
