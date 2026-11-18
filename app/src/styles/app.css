@@ -2752,9 +2752,13 @@
   transition: height 110ms ease;
 }
 .tag-dock.open {
-  /* 分组面板（.coll-dock）必须用**同一个值**：两边高度不同的话，从标签移到分组时
-     面板高度一变，指针会被甩出去 */
-  height: min(300px, 42vh);
+  /* **高度跟着内容走**（owner 2026-11-18：「ui 排布方式不对」—— 内容只有三四行时
+     也硬撑 300px，底下留一大片空白，看着就像"面板没画完"）。
+     上限仍是 min(300px,42vh)，超出了由 `.tag-dock-scroll` 自己滚。
+     分组面板（.coll-dock）与标签面板用同一组值：两边高度不同的话，
+     从标签移到分组时面板高度一变，指针会被甩出去。 */
+  height: auto;
+  max-height: min(300px, 42vh);
   /* 展开时这条边界再深一档：它此刻是「内容区 / 面板」的分界 */
   border-top-color: rgba(var(--ink-rgb), 0.12);
 }
@@ -2762,7 +2766,8 @@
    两个都 min(300px,42vh) 就是 600px，目录树被压到接近零、底栏被挤出可视区 */
 .tag-dock.open.half,
 .coll-dock.open.half {
-  height: min(220px, 30vh);
+  height: auto;
+  max-height: min(220px, 30vh);
 }
 
 .tag-dock-head {
