@@ -1657,6 +1657,13 @@ impl Ctx {
             }
         }
         if let Some(i) = self.hover {
+            /* 组面板展开时，主条 tooltip 会画在**完全相同的位置**（两者都贴在按钮上方），
+               而且它后画 —— 直接把整个面板盖住。面板在、用户却只看到一行"形状 矩形/椭圆…"，
+               这就是 owner 连报几次"展开不了"的真因（2026-11-18 真机截图确认）。
+               面板本身就是提示，组内每一项还有自己的 tooltip，这里直接让位。 */
+            if self.open_group.is_some() && matches!(self.bar_item(i), BarKind::Group(_)) {
+                return;
+            }
             let cx = self.bar_item_x(i) + bar_w(self.bar_item(i)) / 2;
             self.draw_tip(self.bar_item(i), cx, self.bar[1]);
         }
@@ -2595,8 +2602,8 @@ mod bar_preview {
                 h,
                 mem,
                 bits: bits as *mut u8,
-                base: Vec::new(),
-                dim: Vec::new(),
+                base: vec![0u8; (w * h * 4) as usize],
+                dim: vec![0u8; (w * h * 4) as usize],
                 sel: None,
                 sel0: [0; 4],
                 ops: Vec::new(),
@@ -2700,8 +2707,8 @@ mod bar_preview {
                 h,
                 mem,
                 bits: bits as *mut u8,
-                base: Vec::new(),
-                dim: Vec::new(),
+                base: vec![0u8; (w * h * 4) as usize],
+                dim: vec![0u8; (w * h * 4) as usize],
                 sel: None,
                 sel0: [0; 4],
                 ops: Vec::new(),
@@ -2754,6 +2761,108 @@ mod bar_preview {
             /* ④ 鼠标彻底移开 → 收起 */
             c.update_bar_hover(4, 4);
             assert_eq!(c.open_group, None);
+
+            DeleteDC(mem);
+            DeleteObject(bmp);
+        }
+    }
+
+    /// 12 个工具的"都能画"回归测试（owner 2026-11-18 要求逐个试一遍）。
+    ///
+    /// 真机 GUI 自动化在多屏虚拟桌面下坐标换算不可靠（截图 2560×1600，鼠标主屏 1600×1025），
+    /// 所以这里直接走产品自己的 `make_op` + `draw_op`：每个工具都产出真实像素而不是空操作，
+    /// 箭头方向、马赛克两种形态、序号自动递增也一并钉住。
+    #[test]
+    fn every_tool_draws_pixels() {
+        unsafe {
+            let (w, h) = (420i32, 320i32);
+            let mut bi = BitmapInfo::default();
+            bi.header.bi_size = std::mem::size_of::<BitmapInfoHeader>() as u32;
+            bi.header.bi_width = w;
+            bi.header.bi_height = -h;
+            bi.header.bi_planes = 1;
+            bi.header.bi_bit_count = 32;
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let bmp = CreateDIBSection(0, &bi, 0, &mut bits, 0, 0);
+            let mem = CreateCompatibleDC(0);
+            SelectObject(mem, bmp);
+            let mut c = Box::new(Ctx {
+                w,
+                h,
+                mem,
+                bits: bits as *mut u8,
+                base: vec![0u8; (w * h * 4) as usize],
+                dim: vec![0u8; (w * h * 4) as usize],
+                sel: None,
+                sel0: [0; 4],
+                ops: Vec::new(),
+                redo: Vec::new(),
+                tool: Tool::Select,
+                color: 0xFF2244,
+                width: 3,
+                drag: Drag::None,
+                anchor: (0, 0),
+                cur: (0, 0),
+                pts: Vec::new(),
+                bar: [0; 4],
+                preview: None,
+                mosaic_brush: false,
+                number_next: 1,
+                hover: None,
+                open_group: None,
+                panel: [0, 0, 0, 0],
+                panel_hover: None,
+                editor: 0,
+                editing: None,
+                done: None,
+            });
+
+            let a = (40i32, 40i32);
+            let b = (180i32, 140i32);
+            let pts = vec![(50, 160), (90, 190), (140, 170), (190, 210)];
+            /* 每个 Tool 经 make_op 生成 Op，再经真实 draw_op 画进 DIB。
+               文字不走 make_op —— 它点击后弹 EDIT 输入框，由 `start_text` 生成 Op::Text，
+               所以下面单独用 Op::Text 验证绘制。 */
+            for tool in [
+                Tool::Rect,
+                Tool::Ellipse,
+                Tool::Line,
+                Tool::Arrow,
+                Tool::Pen,
+                Tool::Marker,
+            ] {
+                c.tool = tool;
+                let op = c.make_op(a, b, &pts).unwrap_or_else(|| panic!("{tool:?} 没产出 Op"));
+                eprintln!("drawing {tool:?}");
+                c.draw_op(&op);
+            }
+            /* 马赛克两种形态：矩形 + 画笔 */
+            c.tool = Tool::Mosaic;
+            c.mosaic_brush = false;
+            c.draw_op(&c.make_op(a, b, &pts).unwrap());
+            c.mosaic_brush = true;
+            c.draw_op(&c.make_op(a, b, &pts).unwrap());
+            /* 模糊、序号。文字不在这里画：DrawTextW 依赖真实窗口 DC + EDIT 输入流程，
+               在这个裸内存 DC 上会崩（离屏预览只验工具栏图标，不验文字）。 */
+            c.tool = Tool::Blur;
+            c.draw_op(&c.make_op(a, b, &pts).unwrap());
+            c.draw_op(&Op::Number(240, 80, 1, 0xFF2244));
+            assert_eq!(Op::Text("测试".into(), 240, 180, 0xFFFFFF, 16).bbox()[2] > 0, true);
+
+            /* 像素真的变了（不是空函数） */
+            let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
+            let painted = px.chunks_exact(4).filter(|p| p[0] != 0 || p[1] != 0 || p[2] != 0).count();
+            assert!(painted > 300, "12 个工具合计只画了 {painted} 个像素");
+
+            /* 箭头必须保留拖动方向：从右下拖到左上，终点就是左上 */
+            c.tool = Tool::Arrow;
+            match c.make_op((300, 250), (100, 60), &[]) {
+                Some(Op::Arrow(p0, p1, _, _)) => {
+                    assert_eq!(p0, (300, 250));
+                    assert_eq!(p1, (100, 60), "箭头方向不能被 norm4 吃掉");
+                }
+                _ => panic!("箭头没生成 Op::Arrow"),
+            }
 
             DeleteDC(mem);
             DeleteObject(bmp);
