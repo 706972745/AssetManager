@@ -71,6 +71,8 @@ pub struct ThumbOut {
     pub upscaled: bool,
 }
 
+/// 一个缩略图缓存目录（每库一份；整库搬走时缓存一起走）
+#[derive(Clone)]
 pub struct ThumbStore {
     pub root: PathBuf,
 }

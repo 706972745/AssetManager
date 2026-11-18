@@ -43,6 +43,8 @@ Thumbs.db
 /标签系统方案.md
 /UI待定问题清单.md
 /docs/AssetManager-*.md
+# UI 设计稿是实现参考稿，不是交付文档，不进公库
+/docs/*设计稿*.html
 # 历史版本截图留在本地（发布用的那张固定叫 docs/screenshot.png）
 /docs/shots-*.png
 

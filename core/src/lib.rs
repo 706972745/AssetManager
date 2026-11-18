@@ -62,6 +62,10 @@ pub struct Lib {
     pub id: i64,
     pub root: String,
     pub conn: rusqlite::Connection,
+    /// 这个库自己的缩略图缓存（`<库根>/.AssetManager/thumbs`）。
+    /// 库目录不可写时退回数据目录 —— 那种情况下"缓存跟着走"这件事只能放弃，
+    /// 但软件必须照常能用。
+    pub thumbs: thumb::ThumbStore,
 }
 
 pub struct App {
@@ -105,6 +109,8 @@ impl App {
         app.migrate_libs_into_home();
         app.reload_libs();
         app.seed_tags_into_existing_libs();
+        app.migrate_thumbs_into_libs();
+        app.migrate_snapshots_into_libs();
         app.current = app.libs.first().map(|l| l.id);
         Ok(app)
     }
@@ -114,6 +120,17 @@ impl App {
     /// `file` 可能是绝对路径（0.3.9 起是 `<库根>/.AssetManager/lib.db`），
     /// 也可能是相对数据目录的老路径（0.8.x 的 `libs/lib-<id>.db`）。
     /// `Path::join` 遇到绝对路径会直接返回它，所以两种情况一句话就能收口。
+    /// 这个库该用哪个缩略图目录：库内 `.AssetManager/thumbs` 能写就用它，
+    /// 否则退回数据目录（只读盘 / 网络盘 / 权限不足）。
+    fn thumb_root_for(&self, root: &str) -> PathBuf {
+        let home = libhome::thumbs_for(root);
+        if std::fs::create_dir_all(&home).is_ok() {
+            home
+        } else {
+            self.data_dir.join("cache").join("thumbs")
+        }
+    }
+
     fn lib_path(&self, row: &reg::LibRow) -> PathBuf {
         let p = Path::new(&row.file);
         if p.is_absolute() {
@@ -132,7 +149,10 @@ impl App {
         for row in rows {
             let path = self.lib_path(&row);
             match db::open(&path) {
-                Ok(conn) => self.libs.push(Lib { id: row.id, root: row.root, conn }),
+                Ok(conn) => {
+                    let thumbs = thumb::ThumbStore::new(self.thumb_root_for(&row.root));
+                    self.libs.push(Lib { id: row.id, root: row.root, conn, thumbs });
+                }
                 Err(e) => eprintln!("打开库 {} 失败（已跳过）：{}", path.display(), e),
             }
         }
@@ -189,8 +209,9 @@ impl App {
     /// 这里顺手把 `thumb_key / 状态 / 尺寸回填` 写进它**自己那个库**。
     pub fn ensure_thumb(&mut self, g: i64, px: u32) -> Result<Option<thumb::ThumbOut>, String> {
         let (lib_id, local) = ungid(g);
-        let store = thumb::ThumbStore::new(self.thumbs.root.clone());
         let l = self.lib_mut(lib_id)?;
+        // 缓存是**这个库自己的**（0.3.10）：整库搬走时缩略图一起走
+        let store = l.thumbs.clone();
         thumb::ensure_for_asset(&l.conn, &store, local, px)
     }
 
@@ -274,7 +295,8 @@ impl App {
         }
 
         let conn = db::open(&path)?;
-        self.libs.push(Lib { id, root: root.clone(), conn });
+        let thumbs = thumb::ThumbStore::new(self.thumb_root_for(&root));
+        self.libs.push(Lib { id, root: root.clone(), conn, thumbs });
 
         /* ④ 注册行写成绝对路径：相对路径一旦库搬家就指向不存在的文件 */
         reg::add_lib(&self.reg, &root, &path.to_string_lossy())?;
@@ -351,6 +373,70 @@ impl App {
         }
         reg::remove_lib_row(&self.reg, &row.root)?;
         Ok(n)
+    }
+
+    /// 老版本的缩略图缓存统一放在 `<数据目录>/cache/thumbs`。
+    /// 0.3.10 起每个库有自己的 `.AssetManager/thumbs`，这里按各库的 `thumb_lru`
+    /// （"这个库用过哪些 key"）把文件分发过去。
+    ///
+    /// 同一个 key 可能被两个库同时引用（内容相同）—— 第一个库**搬**，后面的**复制**，
+    /// 否则第二个库会找不到文件、白重建一次。
+    fn migrate_thumbs_into_libs(&mut self) {
+        let legacy_root = self.data_dir.join("cache").join("thumbs");
+        if !legacy_root.is_dir() {
+            return;
+        }
+        let legacy = thumb::ThumbStore::new(legacy_root.clone());
+        /* 先快照出「每个库要哪些 key」，避免边遍历 self.libs 边借用 self */
+        let plan: Vec<(i64, PathBuf, Vec<String>)> = self
+            .libs
+            .iter()
+            .map(|l| {
+                let keys: Vec<String> = db::thumb_lru_rows(&l.conn)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, _, _)| k)
+                    .collect();
+                (l.id, l.thumbs.root.clone(), keys)
+            })
+            .collect();
+        let homes: Vec<(i64, PathBuf)> = plan.iter().map(|(id, r, _)| (*id, r.clone())).collect();
+
+        for (id, root, keys) in plan {
+            if root == legacy_root || keys.is_empty() {
+                continue; // 退回数据目录的库：本来就是同一个池子
+            }
+            let store = thumb::ThumbStore::new(root);
+            for key in keys {
+                let dst = store.file_for(&key);
+                if dst.is_file() {
+                    continue;
+                }
+                if let Some(p) = dst.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                /* 老池子里有就搬；已经被别的库搬走了，就从那个库复制一份 */
+                let mut src = legacy.file_for(&key);
+                if !src.is_file() {
+                    let alt = src.with_extension("jpg");
+                    if alt.is_file() {
+                        src = alt;
+                    } else if let Some((_, other)) = homes
+                        .iter()
+                        .find(|(oid, oroot)| *oid != id && *oroot != legacy_root && {
+                            thumb::ThumbStore::new(oroot.clone()).file_for(&key).is_file()
+                        })
+                    {
+                        src = thumb::ThumbStore::new(other.clone()).file_for(&key);
+                    } else {
+                        continue;
+                    }
+                }
+                if std::fs::rename(&src, &dst).is_err() {
+                    let _ = std::fs::copy(&src, &dst);
+                }
+            }
+        }
     }
 
     /// 0.8.x～0.3.8 的标签体系是**全局一份**、住在注册库里。
@@ -1154,8 +1240,10 @@ impl App {
             if cur <= target {
                 break;
             }
-            let _ = std::fs::remove_file(self.thumbs.file_for(&e.key));
-            let _ = std::fs::remove_file(self.thumbs.file_for(&e.key).with_extension("jpg"));
+            if let Ok(l) = self.lib(e.lib) {
+                let _ = std::fs::remove_file(l.thumbs.file_for(&e.key));
+                let _ = std::fs::remove_file(l.thumbs.file_for(&e.key).with_extension("jpg"));
+            }
             if let Ok(l) = self.lib_mut(e.lib) {
                 let _ = l
                     .conn
@@ -1262,10 +1350,10 @@ impl App {
     /// 几百 KB、1–3ms，比重新解原图（几十到几百 ms）快两个数量级。
     /// 没有缓存的跳过 —— 等它第一次被看见时 `ensure` 会顺带算好。
     pub fn fill_palette(&mut self, limit: i64) -> Result<(i64, i64), String> {
-        let store = thumb::ThumbStore::new(self.thumbs.root.clone());
         let mut done = 0i64;
         let mut left = 0i64;
         for l in self.libs.iter_mut() {
+            let store = l.thumbs.clone();
             let rows = db::assets_without_palette_paths(&l.conn, limit)?;
             left += rows.len() as i64;
             for (id, path) in rows {
@@ -1625,10 +1713,6 @@ pub struct SnapshotResolve {
 }
 
 impl App {
-    pub fn snapshot_list(&self) -> Result<Vec<reg::SnapshotRow>, String> {
-        reg::snapshots(&self.reg)
-    }
-
     /// 灵感板摆位（0.1.18）：`board` = `tag:<标签>` / `snap:<快照 id>`。
     /// 只是视图记忆 —— 读不到就按瀑布流重排，不报错。
     pub fn board_layout(&self, board: &str) -> Result<Vec<(i64, f64, f64, f64, f64)>, String> {
@@ -1706,34 +1790,71 @@ impl App {
         reg::coll_of(&self.reg, gid)
     }
 
-    pub fn snapshot_get(&self, id: i64) -> Result<Option<reg::SnapshotRow>, String> {
-        reg::snapshot(&self.reg, id)
+    /// 快照 id → (库, 库内 id)。对外一律用**全局 id**（库号 + 库内 id）。
+    fn snap_split(&self, snap: i64) -> Result<(&Lib, i64), String> {
+        let (lib_id, local) = ungid(snap);
+        let l = self.lib(lib_id)?;
+        Ok((l, local))
     }
 
+    /// 快照清单（**所有库汇总**）。id 换成全局 id，名称冲突不合并 ——
+    /// 两个库可以各自有一份「交付稿」，它们是两个东西。
+    pub fn snapshot_list(&self) -> Result<Vec<reg::SnapshotRow>, String> {
+        let mut out = Vec::new();
+        for l in &self.libs {
+            for mut r in reg::snapshots(&l.conn)? {
+                r.id = gid(l.id, r.id);
+                out.push(r);
+            }
+        }
+        /* 与单库内部同一口径：新建的在前 */
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        Ok(out)
+    }
+
+    pub fn snapshot_get(&self, id: i64) -> Result<Option<reg::SnapshotRow>, String> {
+        let (l, local) = self.snap_split(id)?;
+        Ok(reg::snapshot(&l.conn, local)?.map(|mut r| {
+            r.id = id;
+            r
+        }))
+    }
+
+    /// 新建快照：落在**当前库**（侧栏在哪个库，快照就属于哪个库）
     pub fn snapshot_create(&mut self, name: &str) -> Result<i64, String> {
-        reg::snapshot_create(&self.reg, name)
+        let id = self.cur_lib().map(|l| l.id).ok_or("还没有素材库")?;
+        let l = self.lib(id)?;
+        Ok(gid(id, reg::snapshot_create(&l.conn, name)?))
     }
 
     pub fn snapshot_rename(&mut self, id: i64, name: &str) -> Result<(), String> {
-        reg::snapshot_rename(&self.reg, id, name)
+        let (l, local) = self.snap_split(id)?;
+        reg::snapshot_rename(&l.conn, local, name)
     }
 
     pub fn snapshot_delete(&mut self, id: i64) -> Result<(), String> {
-        reg::snapshot_delete(&self.reg, id)
+        let (l, local) = self.snap_split(id)?;
+        reg::snapshot_delete(&l.conn, local)?;
+        self.snap_ids_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        Ok(())
     }
 
     pub fn snapshot_items(&self, id: i64) -> Result<Vec<snapshot::SnapItem>, String> {
-        reg::snapshot_items(&self.reg, id)
+        let (l, local) = self.snap_split(id)?;
+        reg::snapshot_items(&l.conn, local)
     }
 
-    /// 快照 → 当前各库里那批素材的**全局 id**（主列表按快照筛选用）。
+    /// 快照 → 库里那批素材的**全局 id**（主列表按快照筛选用）。
     ///
     /// 换算走 `match_by_hash`（哈希命中优先，没有哈希的同体积候选现算），
     /// 结果按快照的 `updated_at` 缓存：同一个快照翻页只算一次，
     /// 快照被改了（加入/删除/对账）`updated_at` 自变，缓存自然作废。
     pub fn snapshot_gids(&self, snap: i64) -> Result<Vec<i64>, String> {
-        let row =
-            reg::snapshot(&self.reg, snap)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let (l, local) = self.snap_split(snap)?;
+        let row = reg::snapshot(&l.conn, local)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
         {
             let g = self.snap_ids_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((ts, ids)) = g.get(&snap) {
@@ -1743,7 +1864,7 @@ impl App {
             }
         }
         let mut out: Vec<i64> = Vec::new();
-        for it in reg::snapshot_items(&self.reg, snap)? {
+        for it in reg::snapshot_items(&l.conn, local)? {
             let Some(hash) = snapshot::unhex(&it.hash) else { continue };
             if let Some((g, _, _)) = self.match_by_hash(&hash, it.size)? {
                 out.push(g);
@@ -1763,6 +1884,7 @@ impl App {
     /// - `union`（默认）：并集，按哈希去重；
     /// - `diff`：差集，第一份减去其余各份。
     ///
+    /// 新快照落在**第一个快照所在的库**（用户是从那个库里点的合并）。
     /// 返回 `(新快照 id, 条数, 其中新写入的行数)`。重名自动加 ` (2)`，不静默覆盖。
     pub fn snapshot_combine(
         &mut self,
@@ -1773,23 +1895,26 @@ impl App {
         if ids.is_empty() {
             return Err("先选一份快照".into());
         }
+        let (home_lib, _) = self.snap_split(ids[0])?;
+        let home_id = home_lib.id;
+
         let mut merged: Vec<snapshot::SnapItem> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         if mode == "diff" {
             let mut drop: std::collections::HashSet<String> = std::collections::HashSet::new();
             for &other in &ids[1..] {
-                for it in reg::snapshot_items(&self.reg, other)? {
+                for it in self.snapshot_items(other)? {
                     drop.insert(it.hash);
                 }
             }
-            for it in reg::snapshot_items(&self.reg, ids[0])? {
+            for it in self.snapshot_items(ids[0])? {
                 if !drop.contains(&it.hash) && seen.insert(it.hash.clone()) {
                     merged.push(it);
                 }
             }
         } else {
             for &id in ids {
-                for it in reg::snapshot_items(&self.reg, id)? {
+                for it in self.snapshot_items(id)? {
                     if seen.insert(it.hash.clone()) {
                         merged.push(it);
                     }
@@ -1797,7 +1922,7 @@ impl App {
             }
         }
         let total = merged.len();
-        /* 重名不覆盖：与导入同一口径，追加 ` (2)`、` (3)`… */
+        /* 重名不覆盖：与导入同一口径，追加 ` (2)`、` (3)`…（只在目标库内判重） */
         let base = name.trim();
         let base = if base.is_empty() {
             if mode == "diff" {
@@ -1813,18 +1938,20 @@ impl App {
         while self
             .snapshot_list()?
             .iter()
-            .any(|s| s.name.eq_ignore_ascii_case(&final_name))
+            .any(|s| lib_of(s.id) == home_id && s.name.eq_ignore_ascii_case(&final_name))
         {
             final_name = format!("{base} ({n})");
             n += 1;
         }
-        let new_id = reg::snapshot_create(&self.reg, &final_name)?;
-        let added = reg::snapshot_insert_items(&self.reg, new_id, &merged)?;
-        Ok((new_id, total, added))
+        let l = self.lib(home_id)?;
+        let local = reg::snapshot_create(&l.conn, &final_name)?;
+        let added = reg::snapshot_insert_items(&l.conn, local, &merged)?;
+        Ok((gid(home_id, local), total, added))
     }
 
     pub fn snapshot_remove(&mut self, id: i64, hashes: &[String]) -> Result<usize, String> {
-        let n = reg::snapshot_remove_items(&self.reg, id, hashes)?;
+        let (l, local) = self.snap_split(id)?;
+        let n = reg::snapshot_remove_items(&l.conn, local, hashes)?;
         self.snap_ids_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1835,7 +1962,10 @@ impl App {
     /// 把一批素材加进快照。**身份是文件内容哈希**：算过的直接用，没算过的现算并写回
     /// `assets.hash_x`（顺手，下次查重也省事）。
     pub fn snapshot_add_assets(&mut self, snap: i64, ids: &[i64]) -> Result<SnapshotAdd, String> {
-        reg::snapshot(&self.reg, snap)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let (home, home_local) = self.snap_split(snap)?;
+        let home_id = home.id;
+        reg::snapshot(&home.conn, home_local)?
+            .ok_or_else(|| "这个快照已经不在了".to_string())?;
         let mut items: Vec<snapshot::SnapItem> = Vec::with_capacity(ids.len());
         let mut failed: Vec<String> = Vec::new();
 
@@ -1878,7 +2008,8 @@ impl App {
         }
 
         let total = items.len();
-        let added = reg::snapshot_insert_items(&self.reg, snap, &items)?;
+        let l = self.lib(home_id)?;
+        let added = reg::snapshot_insert_items(&l.conn, home_local, &items)?;
         /* updated_at 只到秒：同一秒内连加两次时缓存会认成"没变"，所以显式作废 */
         self.snap_ids_cache
             .lock()
@@ -1888,11 +2019,14 @@ impl App {
     }
 
     /// 把某个标签下的**全部**素材加进快照。不移动任何文件，语义等价于"给这批图打书签"。
+    /// 只取**快照所属那个库**的素材 —— 快照是库内资产，不该被别的库的素材灌进来。
     pub fn snapshot_add_tag(&mut self, snap: i64, tag: &str) -> Result<SnapshotAdd, String> {
         let tag = tag.trim().to_string();
         if tag.is_empty() {
             return Err("没有指定标签".into());
         }
+        let (home, _) = self.snap_split(snap)?;
+        let home_id = home.id;
         let mut ids: Vec<i64> = Vec::new();
         let mut cursor: Option<(i64, i64)> = None;
         loop {
@@ -1908,7 +2042,9 @@ impl App {
                 break;
             }
             for r in &rows {
-                ids.push(r.id);
+                if lib_of(r.id) == home_id {
+                    ids.push(r.id);
+                }
             }
             match rows.last() {
                 Some(last) => cursor = Some((last.mtime, last.id)),
@@ -1921,13 +2057,14 @@ impl App {
         self.snapshot_add_assets(snap, &ids)
     }
 
-    /// 对账：把快照里的每一条**按内容哈希**在当前所有库里找回来。
+    /// 对账：把快照里的每一条**按内容哈希**在库里找回来。
     ///
     /// 三条路，按代价从低到高：① 哈希命中（走索引，一条 SQL）；② 同体积候选逐个现算哈希
     /// （改名 / 新入库的行 `hash_x` 还是 NULL，只能这样）；③ 都不中 = 记为找不到。
     /// 找到之后**顺手把条目里的路径/名字更新成现在这份**（显示用，不动身份）。
     pub fn snapshot_resolve(&self, snap: i64) -> Result<SnapshotResolve, String> {
-        let stored = reg::snapshot_items(&self.reg, snap)?;
+        let (l, local) = self.snap_split(snap)?;
+        let stored = reg::snapshot_items(&l.conn, local)?;
         let mut items = Vec::with_capacity(stored.len());
         let mut found = 0usize;
 
@@ -1951,8 +2088,8 @@ impl App {
                     found += 1;
                     // 位置变了就更新（改名 / 换库 / 换目录都走这条），失败不影响对账
                     let _ = reg::snapshot_touch_item(
-                        &self.reg,
-                        snap,
+                        &l.conn,
+                        local,
                         &it.hash,
                         &a.name,
                         &a.path,
@@ -1989,6 +2126,9 @@ impl App {
     }
 
     /// 按内容哈希在**所有库**里找一张图。命中返回 `(全局 id, 素材, 库根)`。
+    ///
+    /// 快照按库拆开之后仍然是"全局找"：素材被移到另一个库时，
+    /// 快照里那条还能靠内容认回来（这正是哈希身份的意义）。
     fn match_by_hash(
         &self,
         hash: &[u8],
@@ -2004,8 +2144,8 @@ impl App {
                 }
             }
         }
-        // ② 刚改名 / 刚入库的行没有哈希：按体积捞候选，真读字节算一遍再比。
-        //    体积相同的文件很少（照片几乎不会），候选只取 50 个，代价可控。
+        // ② 刚改名 / 刚入库的行没有哈希：按体积捞候选，真读字节算一遍再比。体积相同的文件很少，
+        //    候选只取 50 个，代价可控。
         if size <= 0 {
             return Ok(None);
         }
@@ -2039,20 +2179,24 @@ impl App {
 
     /// 导出用：把快照记成一份可读的清单（**只有哈希和元数据，不含任何图片字节**）
     pub fn snapshot_export(&self, id: i64) -> Result<snapshot::SnapFile, String> {
-        let row = reg::snapshot(&self.reg, id)?.ok_or_else(|| "这个快照已经不在了".to_string())?;
-        let items = reg::snapshot_items(&self.reg, id)?;
+        let (l, local) = self.snap_split(id)?;
+        let row = reg::snapshot(&l.conn, local)?
+            .ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let items = reg::snapshot_items(&l.conn, local)?;
         Ok(snapshot::SnapFile::new(&row.name, items))
     }
 
-    /// 导入：重名自动加 ` (2)`，**一条都不丢**（解析不了的那条会被跳过并计入跳过量）
+    /// 导入：落在**当前库**；重名自动加 ` (2)`，**一条都不丢**
+    /// （解析不了的那条会被跳过并计入跳过量）
     pub fn snapshot_import(&mut self, text: &str) -> Result<(i64, String, usize, usize), String> {
         let file = snapshot::SnapFile::parse(text)?;
+        let home = self.cur_lib().map(|l| l.id).ok_or("还没有素材库")?;
         let mut name = file.name.trim().to_string();
         let mut n = 2;
         while self
             .snapshot_list()?
             .iter()
-            .any(|s| s.name.eq_ignore_ascii_case(&name))
+            .any(|s| lib_of(s.id) == home && s.name.eq_ignore_ascii_case(&name))
         {
             name = format!("{} ({n})", file.name.trim());
             n += 1;
@@ -2060,7 +2204,6 @@ impl App {
                 return Err("同名快照太多了".into());
             }
         }
-        let id = reg::snapshot_create(&self.reg, &name)?;
         let mut clean: Vec<snapshot::SnapItem> = Vec::new();
         let total = file.items.len();
         for mut it in file.items {
@@ -2072,8 +2215,78 @@ impl App {
             clean.push(it);
         }
         let skipped = total - clean.len();
-        let added = reg::snapshot_insert_items(&self.reg, id, &clean)?;
-        Ok((id, name, added, skipped))
+        let l = self.lib(home)?;
+        let local = reg::snapshot_create(&l.conn, &name)?;
+        let added = reg::snapshot_insert_items(&l.conn, local, &clean)?;
+        Ok((gid(home, local), name, added, skipped))
+    }
+
+    /// 老版本：快照住在注册库、跨库存在。升级时按条目**归属的库**拆成每库一份。
+    ///
+    /// 归属判断：条目里记着 `lib`（当时的库根路径）→ 认这个库；路径对不上
+    /// （库搬过/改名）就用内容哈希在现有库里找；再找不到就留在第一个库
+    /// （宁可挂错位置，也不能把用户记下的书签丢掉）。
+    fn migrate_snapshots_into_libs(&mut self) {
+        let done: Option<String> = self
+            .reg
+            .query_row("SELECT v FROM meta WHERE k='snapshots_split'", [], |r| r.get(0))
+            .ok();
+        if done.as_deref() == Some("1") {
+            return;
+        }
+        if self.libs.is_empty() {
+            return;
+        }
+        let rows = reg::snapshots(&self.reg).unwrap_or_default();
+        for row in rows {
+            let items = reg::snapshot_items(&self.reg, row.id).unwrap_or_default();
+            /* 按库分桶 */
+            let mut buckets: std::collections::BTreeMap<i64, Vec<snapshot::SnapItem>> =
+                std::collections::BTreeMap::new();
+            for it in items {
+                let lib_id = self
+                    .lib_for_path(&it.lib)
+                    .or_else(|| {
+                        snapshot::unhex(&it.hash).and_then(|h| {
+                            self.libs.iter().find_map(|l| {
+                                db::ids_by_hash(&l.conn, &h)
+                                    .ok()
+                                    .filter(|v| !v.is_empty())
+                                    .map(|_| l.id)
+                            })
+                        })
+                    })
+                    .unwrap_or(self.libs[0].id);
+                buckets.entry(lib_id).or_default().push(it);
+            }
+            /* 空快照（建了还没往里加图）：条目分不出库，落到第一个库，
+               不能因为"没有条目"就把它弄丢 */
+            if buckets.is_empty() {
+                buckets.insert(self.libs[0].id, Vec::new());
+            }
+            let mut landed: Vec<i64> = Vec::new();
+            for (lib_id, items) in buckets {
+                let Ok(l) = self.lib(lib_id) else { continue };
+                /* 同名已存在就合并进去（拆库后可能出现两个同名快照） */
+                let local = match reg::snapshot_create(&l.conn, &row.name) {
+                    Ok(id) => id,
+                    Err(_) => continue,
+                };
+                let _ = reg::snapshot_insert_items(&l.conn, local, &items);
+                landed.push(gid(lib_id, local));
+            }
+            /* 看板摆位（`snap:<旧 id>`）只在"整份都落到一个库"时能搬过去 */
+            if landed.len() == 1 {
+                let _ = self.reg.execute(
+                    "UPDATE board_items SET board = ?1 WHERE board = ?2",
+                    rusqlite::params![format!("snap:{}", landed[0]), format!("snap:{}", row.id)],
+                );
+            }
+        }
+        let _ = self.reg.execute(
+            "INSERT INTO meta (k,v) VALUES ('snapshots_split','1') ON CONFLICT(k) DO UPDATE SET v='1'",
+            [],
+        );
     }
 }
 
@@ -2390,6 +2603,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// 缩略图缓存每库一份（0.3.10）：生成在 `<库根>/.AssetManager/thumbs`，
+    /// 老版本散在数据目录里的缓存按 `thumb_lru` 自动搬回来。
+    #[test]
+    fn thumbs_follow_the_library() {
+        let d = tmp("thumbhome");
+        let lib = d.join("lib");
+        img_at(&lib.join("a.png"), 40, 40, [10, 120, 200]);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let g = app
+            .list(&model::AssetQuery { limit: Some(10), ..Default::default() })
+            .unwrap()[0]
+            .id;
+        let out = app.ensure_thumb(g, 256).unwrap().expect("应当生成缩略图");
+        let in_lib = app.libs[0].thumbs.file_for(&out.key);
+        assert!(in_lib.is_file(), "缩略图必须落在库自己的目录里：{}", in_lib.display());
+        assert!(
+            crate::libhome::is_inside_home(&in_lib),
+            "缩略图必须在 .AssetManager 里，不能散在库的其他地方"
+        );
+
+        /* 手造"老版本状态"：文件搬回数据目录的公共缓存 */
+        let legacy_root = d.join("data").join("cache").join("thumbs");
+        let legacy = thumb::ThumbStore::new(legacy_root.clone());
+        let old_path = legacy.file_for(&out.key);
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        std::fs::rename(&in_lib, &old_path).unwrap();
+        drop(app);
+
+        /* 再打开：应当按 thumb_lru 搬回库内 */
+        let app = App::open(d.join("data")).unwrap();
+        let back = app.libs[0].thumbs.file_for(&out.key);
+        assert!(back.is_file(), "老缓存要搬回库内：{}", back.display());
+        assert!(!old_path.is_file(), "搬完老位置不该再留一份（白占空间）");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /* ---------------- 库元数据跟着库走（0.3.9） ----------------
        这三条是 owner 2026-11-19 提的验收点，任何一条红了都说明「数据会丢」。 */
 
@@ -2681,11 +2933,16 @@ mod tests {
         assert_eq!((r.found, r.missing), (1, 0), "改名之后必须还认得出（靠内容，不靠文件名）");
         assert_eq!(r.items[0].name, "改了名字.png", "条目里记的位置要跟着更新");
 
-        // ② 换库：同一张图放到另一个库根，旧库整个移除
+        // ② 把图**挪**到另一个库（A 里那份删掉）：靠内容仍要认得出来，
+        //    并把条目里的位置更新成现在这份。
+        //    注意（0.3.10 起）：快照跟着库走 —— 把库整个移除后它那份快照也跟着
+        //    "下架"（数据在库目录里，重新导入就回来），所以这里用
+        //    "同库删文件 + 另一库放进来"来模拟真正的搬迁。
         let lib_b = d.join("lib-b");
         std::fs::create_dir_all(&lib_b).unwrap();
         std::fs::copy(&renamed, lib_b.join("全新的名字.png")).unwrap();
-        app.remove_lib(&lib_a.to_string_lossy()).unwrap();
+        std::fs::remove_file(&renamed).unwrap();
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
         app.scan(&lib_b.to_string_lossy(), |_| {}).unwrap();
         let r = app.snapshot_resolve(snap).unwrap();
         assert_eq!((r.found, r.missing), (1, 0), "换到另一个素材库之后必须还找得到");
@@ -2839,6 +3096,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// 快照按库拆（0.3.10）：清单只列本库的；移除库 = 快照跟着下架，
+    /// 重新导入这个库 = 快照原样回来（数据在 `.AssetManager/lib.db` 里）。
+    #[test]
+    fn snapshots_follow_the_library() {
+        let d = tmp("snap-lib");
+        let lib_a = d.join("lib-a");
+        let lib_b = d.join("lib-b");
+        png_at(&lib_a.join("a.png"), 10, 10, 10);
+        png_at(&lib_b.join("b.png"), 20, 20, 20);
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&lib_b.to_string_lossy(), |_| {}).unwrap();
+
+        /* 两个库各建一个**同名**快照：拆库之后它们是两份独立的东西 */
+        for root in [&lib_a, &lib_b] {
+            app.set_current_lib(&root.to_string_lossy()).unwrap();
+            let snap = app.snapshot_create("交付稿").unwrap();
+            assert_eq!(lib_of(snap), app.lib_for_path(&root.to_string_lossy()).unwrap());
+            let ids: Vec<i64> = app
+                .list(&model::AssetQuery { limit: Some(50), ..Default::default() })
+                .unwrap()
+                .iter()
+                .filter(|a| lib_of(a.id) == lib_of(snap))
+                .map(|a| a.id)
+                .collect();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(app.snapshot_add_assets(snap, &ids).unwrap().added, 1);
+        }
+        assert_eq!(app.snapshot_list().unwrap().len(), 2, "两个库各一份同名快照");
+
+        /* 移除 A：它的快照跟着下架（B 那条还在） */
+        let snap_a = app
+            .snapshot_list()
+            .unwrap()
+            .into_iter()
+            .find(|s| lib_of(s.id) == app.lib_for_path(&lib_a.to_string_lossy()).unwrap())
+            .unwrap()
+            .id;
+        app.remove_lib(&lib_a.to_string_lossy()).unwrap();
+        assert_eq!(app.snapshot_list().unwrap().len(), 1, "移除库后只剩 B 的快照");
+        assert!(app.snapshot_get(snap_a).is_err() || app.snapshot_get(snap_a).unwrap().is_none());
+
+        /* 重新导入 A：快照回来，条目也还在 */
+        app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        let back = app.snapshot_list().unwrap();
+        assert_eq!(back.len(), 2, "重新导入后两份快照都在");
+        let again = back.iter().find(|s| s.count == 1).unwrap();
+        assert_eq!(app.snapshot_items(again.id).unwrap().len(), 1, "快照条目不能丢");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// 合并 / 差集：结果落到**新快照**，原件一条不动。
     #[test]
     fn snapshot_combine_union_and_diff() {
@@ -2866,7 +3176,7 @@ mod tests {
         // 并集：3 条（b 只算一次）
         let (u, total, added) = app.snapshot_combine(&[a, b], "A∪B", "union").unwrap();
         assert_eq!((total, added), (3, 3));
-        assert_eq!(reg::snapshot(&app.reg, u).unwrap().unwrap().name, "A∪B");
+        assert_eq!(app.snapshot_get(u).unwrap().unwrap().name, "A∪B");
 
         // 差集：A − B 应当正好是「A 有、B 没有」的那一张
         let names_of = |app: &App, id: i64| -> std::collections::BTreeSet<String> {

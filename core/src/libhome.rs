@@ -53,6 +53,15 @@ pub fn db_for(root: &str) -> PathBuf {
     dir_for(root).join(DB)
 }
 
+/// `<库根>/.AssetManager/thumbs` —— 这个库自己的缩略图缓存。
+///
+/// 为什么缓存也要跟着库走：库拷到另一台机器/换个盘符，缩略图 key 是按
+/// 「创建时间 + 大小 + 路径」算的，重扫也会变 —— 缓存留原地等于全部重建。
+/// 跟着库走之后，整库搬走再打开，图还是秒出。
+pub fn thumbs_for(root: &str) -> PathBuf {
+    dir_for(root).join("thumbs")
+}
+
 fn marker_for(root: &str) -> PathBuf {
     dir_for(root).join(MARKER)
 }

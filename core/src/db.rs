@@ -122,6 +122,29 @@ CREATE TABLE IF NOT EXISTS tags (
   auto_rule TEXT
 );
 
+/* 快照（0.3.10 起每库一份）：一批图片的书签，条目身份是**内容哈希**。
+   以前住在注册库、"跨库存在"；现在跟着库走 —— 整库搬走/移除再导入，
+   灵感板还在。跨库的旧快照在升级时按条目归属拆到各库（见 `App::migrate_snapshots`）。 */
+CREATE TABLE IF NOT EXISTS snapshots (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS snapshot_items (
+  snapshot_id INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  w INTEGER,
+  h INTEGER,
+  path TEXT NOT NULL DEFAULT '',
+  lib TEXT NOT NULL DEFAULT '',
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (snapshot_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_items_hash ON snapshot_items(hash);
+
 CREATE TABLE IF NOT EXISTS asset_tags (
   asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
   tag_id   INTEGER NOT NULL,
