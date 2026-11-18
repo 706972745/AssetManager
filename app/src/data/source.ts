@@ -30,6 +30,7 @@ import type {
   TagCount,
   TagGroup,
   TrashEntry,
+  UpdateInfo,
   WarmProgress,
 } from "../types";
 import { mockSource } from "./mock";
@@ -225,6 +226,17 @@ export const tauriSource: Source = {
   resizeSave: (path, maxEdge, format) =>
     invoke!<ResizeOut | null>("am_resize_save", { path, maxEdge, format }),
   exif: (path) => invoke!<ExifInfo | null>("am_exif", { path }),
+
+  /* ---------------- 检查更新（0.1.35） ----------------
+     参数名按 Rust 侧的 snake_case 写 camelCase：Tauri 2 会把 JS 的 `assetId`
+     自动映射到 `asset_id`，写错成 `assetID` / `id` 只会在运行时**静默**报缺参数。 */
+  updateCheck: (force = false) => invoke!<UpdateInfo>("am_update_check", { force }),
+  updateDownload: (url, name, sha256, assetId) =>
+    invoke!<string>("am_update_download", { url, name, sha256, assetId }),
+  /* version 是 Option<String>：不传版本号时要显式给 null，不能给 undefined
+     （undefined 在 IPC 序列化里会被整条丢掉，Rust 侧会拿到"缺参数"而不是 None） */
+  updateInstall: (path, sha256, version) =>
+    invoke!<void>("am_update_install", { path, sha256, version: version ?? null }),
 };
 
 export const source: Source = invoke ? tauriSource : mockSource;

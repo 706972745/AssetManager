@@ -4,7 +4,7 @@ import { onAppEvent } from "../data/source";
 import { Icon } from "./ui";
 
 /**
- * 设置 → 素材库（照 FontManager 的「字体库文件夹」那一块）。
+ * 设置 → 素材库（照 FontManager 的「字体库文件夹」重排，0.1.35）。
  *
  * ## 为什么这一页必须有
  *
@@ -17,11 +17,18 @@ import { Icon } from "./ui";
  * 所以：**设置里必须能直接管素材库**（加/看/移除），而不是只能去侧栏点那个不起眼的 +。
  * 侧栏的 + 与这里的「添加文件夹…」走同一条路（App 的 onAddFolder），行为必须一致。
  *
- * ## 三条交互约定（与 FontManager 一致）
+ * ## 与 FontManager 的差异（有意为之）
+ *
+ * FontManager 的字体库是「一次只有一个是当前库」，所以它有「当前 / 切换」两种行状态。
+ * AssetManager **没有"当前素材库"这个概念** —— 所有库同时在树里、可以跨库筛标签，
+ * 所以这里只搬视觉（行、完整路径、图标、打开、移除、虚线添加按钮），不搬切换语义。
+ * 另外 FM 的 ⓘ 是悬停才出的说明，这里换成常驻说明行（本项目的规范要求状态常驻）。
+ *
+ * ## 三条交互约定
  *
  * 1. 每行显示**完整路径**（用户要能确认自己加的是哪个盘哪个文件夹），行尾可打开/移除。
  * 2. `×` 只清索引，**磁盘文件一个不动**（真删文件走主界面的回收站流程）。
- * 3. 到 3 个上限就**禁用按钮并说明原因**，不做「点了再弹一句抱歉」。
+ * 3. 到 3 个上限就**禁用按钮并在 title 里说明原因**，不做「点了再弹一句抱歉」。
  */
 export function LibraryCard({
   source,
@@ -78,22 +85,35 @@ export function LibraryCard({
   useEffect(() => onAppEvent("scan://done", () => reload()), [reload]);
 
   const max = 3;
-  /* 只数用户自己的库：内置截图库一直存在，算进去等于只剩 2 个位置 */
-  const count = roots?.filter((r) => !isBuiltin(r.path)).length ?? 0;
+  const all = roots ?? [];
+  /* 内置库单独一段、排在最上面：它不是用户加的，混在"3 个名额"里会让人以为
+     自己只剩 2 个位置（实际它不占名额）。 */
+  const builtinRows = all.filter((r) => isBuiltin(r.path));
+  const userRows = all.filter((r) => !isBuiltin(r.path));
+  const count = userRows.length;
   const full = count >= max;
+
+  const addTitle = !source.desktop
+    ? "浏览器预览下不能添加素材库"
+    : full
+      ? `最多 ${max} 个素材库，先移除一个`
+      : "选一个文件夹加入素材库（只建索引，不动里面的文件）";
 
   return (
     <div className="lib-card">
       <div className="lib-head">
         {/* 不再重复写一遍「素材库」：页面标题已经是它了，标题叠标题只会让人以为有两块 */}
         <span className="lib-sub">
-          {count}/{max} 个　·　只建索引，不移动、不复制原文件
+          {count}/{max} 个 · 只建索引，不移动、不复制原文件
         </span>
         <span className="grow" />
+        {/* 虚线按钮 = 「这里还能放东西」（照 FM 的 .settings-add-folder 数值）。
+            禁用时**不**加 pointer-events:none：那样 title 的说明就永远看不到了，
+            而"为什么不能点"恰恰要靠 title 说。 */}
         <button
-          className="set-btn set-btn-accent"
+          className="lib-add"
           disabled={busy || full || !source.desktop}
-          title={full ? `最多 ${max} 个素材库，先移除一个` : "选一个文件夹加入素材库"}
+          title={addTitle}
           onClick={async () => {
             setBusy(true);
             try {
@@ -114,54 +134,90 @@ export function LibraryCard({
 
       {!roots ? (
         <div className="lib-note">正在读取…</div>
-      ) : roots.length === 0 ? (
-        <div className="lib-empty">
-          <Icon name="folder" size={20} stroke={1.4} />
-          <div className="lib-empty-title">还没有素材库</div>
-          <div className="lib-empty-hint">
-            点右上角「添加文件夹…」选一个放素材的目录。软件只读它、建索引，
-            不会动里面的文件。
-          </div>
-        </div>
       ) : (
-        <div className="lib-list">
-          {roots.map((r) => (
-            <div className="lib-row" key={r.id} title={r.path}>
-              <Icon name="folder" size={14} stroke={1.5} className="lib-row-icon" />
-              <span className="lib-path mono">{r.path}</span>
-              <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
-              {isBuiltin(r.path) && (
-                <span className="lib-builtin on" title="软件自己的截图目录：不占名额，不能移除">
-                  内置
-                </span>
-              )}
-              <button
-                className="dr-act"
-                title="在资源管理器中打开"
-                onClick={() => void source.reveal(r.path).catch((e) => onToast(String(e), true))}
-              >
-                <Icon name="reveal" size={12} stroke={1.5} />
-              </button>
-              {/* 内置库不给 ×：删了索引，截图就"凭空消失"了 */}
-              <button
-                className="dr-act"
-                title={isBuiltin(r.path) ? "内置库不能移除" : "从素材库移除（不删文件）"}
-                disabled={isBuiltin(r.path)}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await onRemoveLib(r.path);
-                    reload();
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                <Icon name="close" size={11} stroke={1.8} />
-              </button>
+        <>
+          {builtinRows.length > 0 && (
+            <div className="lib-list">
+              {builtinRows.map((r) => (
+                <div
+                  className="lib-row is-builtin"
+                  key={r.id}
+                  title="内置库不能移除：删了索引，截图就凭空消失了（文件还在磁盘上）"
+                >
+                  <Icon name="folder" size={14} stroke={1.5} className="lib-row-icon" />
+                  <span className="lib-path mono" title={r.path}>
+                    {r.path}
+                  </span>
+                  <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
+                  <span className="lib-tag" title="软件自己的截图目录：不占名额，不可移除">
+                    内置
+                  </span>
+                  <button
+                    className="lib-act lib-open"
+                    title="在资源管理器中打开"
+                    onClick={() => void source.reveal(r.path).catch((e) => onToast(String(e), true))}
+                  >
+                    <Icon name="reveal" size={12} stroke={1.5} />
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+
+          {userRows.length > 0 && (
+            <div className="lib-list">
+              {userRows.map((r) => (
+                <div className="lib-row" key={r.id} title={r.path}>
+                  <Icon name="folder" size={14} stroke={1.5} className="lib-row-icon" />
+                  <span className="lib-path mono" title={r.path}>
+                    {r.path}
+                  </span>
+                  <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
+                  <button
+                    className="lib-act lib-open"
+                    title="在资源管理器中打开"
+                    onClick={() => void source.reveal(r.path).catch((e) => onToast(String(e), true))}
+                  >
+                    <Icon name="reveal" size={12} stroke={1.5} />
+                  </button>
+                  <button
+                    className="lib-act is-danger"
+                    title="从素材库移除（磁盘文件不动）"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        /* App 那条会先弹一次确认（说明"文件一个都不会动"），
+                           移除成功后由它弹「已从素材库移除」—— 这里不再重复弹，
+                           否则一次点击出两条一样的提示。 */
+                        await onRemoveLib(r.path);
+                        reload();
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    <Icon name="close" size={11} stroke={1.8} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {count === 0 && (
+            <div className="lib-empty">
+              <Icon name="folder" size={20} stroke={1.4} />
+              {/* 措辞必须区分「一个库都没有」和「只有内置库」：全新安装时上面那条
+                  内置截图库是存在的，写「还没有素材库」会让用户觉得界面在胡说。
+                  `count` 仍然只数用户的库（内置库不占 3 个名额，这条判定不能动）。 */}
+              <div className="lib-empty-title">还没有添加自己的素材库</div>
+              <div className="lib-empty-hint">
+                点右上角「添加文件夹…」选一个放素材的目录。软件只读它、建索引，
+                不会动里面的文件。上面的内置截图库是软件自己的，不算在你的 3 个名额里。
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       <div className="lib-foot">

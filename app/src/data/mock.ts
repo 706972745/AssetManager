@@ -575,4 +575,31 @@ export const mockSource: Source = {
   async exif() {
     return null;
   },
+
+  /* 浏览器预览里的「检查更新」：永远返回"已是最新"，不弹任何红字 ——
+     预览页没有安装包可装，装成"有新版"只会让人去点一个必然失败的按钮。 */
+  async updateCheck() {
+    return {
+      current: "0.1.35",
+      latest: "0.1.35",
+      hasUpdate: false,
+      url: "https://github.com/706972745/AssetManager/releases",
+      notes: "",
+      publishedAt: "",
+      source: "github",
+      setupUrl: "",
+      setupName: "",
+      sha256: "",
+      setupAssetId: 0,
+      canAutoInstall: false,
+      installKind: "portable",
+      autoInstallBlocked: "portable",
+    };
+  },
+  async updateDownload() {
+    throw new Error("浏览器预览下不能下载安装包，请用桌面版");
+  },
+  async updateInstall() {
+    throw new Error("浏览器预览下不能安装更新，请用桌面版");
+  },
 };

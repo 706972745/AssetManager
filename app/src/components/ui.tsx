@@ -16,8 +16,10 @@ import {
   Columns2,
   Copy,
   Database,
+  Download,
   Eye,
   Expand,
+  ExternalLink,
   FileText,
   FileUp,
   Film,
@@ -160,6 +162,17 @@ const ICONS: Record<string, Glyph> = {
   ),
   keyboard: ({ size, stroke, className }) => (
     <Keyboard size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 更新（0.1.35）：检查 / 下载 / 打开发布页。三枚都直接取 lucide 同款，
+     与上面那条「图标一律照抄 FontManager」的纪律一致 —— 不手搓 path。 */
+  refresh: ({ size, stroke, className }) => (
+    <RefreshCw size={size} strokeWidth={stroke} className={className} />
+  ),
+  download: ({ size, stroke, className }) => (
+    <Download size={size} strokeWidth={stroke} className={className} />
+  ),
+  link: ({ size, stroke, className }) => (
+    <ExternalLink size={size} strokeWidth={stroke} className={className} />
   ),
 };
 

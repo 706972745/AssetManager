@@ -6661,3 +6661,183 @@ body.board-body #root {
     display: none;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   0.1.35 · 设置 → 更新 + 素材库行重排
+   ──────────────────────────────────────────────────────────────────────────
+   这一整段都是**追加**：上面的 .set-* / .lib-* 一条没改（那些是别的页面在用的）。
+   数值照抄 FontManager 的 .settings-add-folder / .settings-library-*，
+   但令牌名按本项目的来：--error → --danger、--text-secondary → --text-2、
+   --text-tertiary → --text-3、--fs-13 → --fs-13。浅色主题靠 tokens 自动适配，
+   所以这里**一个裸十六进制都不写**。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ---- 导航行的小圆点：启动时静默查到了新版才出现 ----
+   `.set-nav-label` 是 flex:1，所以圆点自然落到行尾（右边距对齐），
+   左边距交给父级的 gap，这里不再叠 margin。 */
+.set-nav-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  /* 一圈很淡的光晕：深色下纯 6px 的蓝点在 248px 宽的侧栏里几乎看不见 */
+  box-shadow: 0 0 0 3px var(--accent-glow-soft);
+}
+
+/* ---- 素材库：虚线「添加文件夹…」（照 FM .settings-add-folder 的数值）---- */
+.lib-add {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--text-2);
+  border: 1px dashed rgba(var(--ink-rgb), 0.12);
+  transition:
+    color var(--t-quick) ease,
+    background var(--t-quick) ease,
+    border-color var(--t-quick) ease;
+}
+.lib-add:hover {
+  color: var(--text-1);
+  background: var(--e1);
+  border-color: var(--accent-glow);
+}
+/* 注意：这里**不写** pointer-events: none（FM 写了）。禁用态的 title 要能弹出来
+   说明"为什么加不了"（满 3 个 / 预览模式），pointer-events: none 会把 tooltip 一起关掉。 */
+.lib-add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 内置库那一行：淡强调底 + 强调边框，一眼区分"这行不是你加的" */
+.lib-row.is-builtin {
+  background: var(--accent-a);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--text-1);
+}
+/* `.lib-row:hover` 与 `.lib-row.is-builtin` 同为 (0,2,0) 且后者在后面 —— 不补这条，
+   内置行 hover 永远没有反馈，看起来像块死砖。它确实不可点，但"悬停有反应"
+   和"可点"是两件事：至少要让人知道自己指着的是这一行。 */
+.lib-row.is-builtin:hover {
+  background: color-mix(in srgb, var(--accent) 12%, var(--e1));
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+/* 内置徽标：pill，11px，强调字 + 35% 边框（照 FM .settings-library-current） */
+.lib-tag {
+  flex: none;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-11);
+  line-height: 16px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* 行尾的图标按钮（打开 / 移除） */
+.lib-row .lib-act {
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  border-radius: var(--r-4);
+  color: var(--text-3);
+  transition:
+    color var(--t-quick) ease,
+    background var(--t-quick) ease;
+}
+.lib-row .lib-act:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--e2);
+}
+/* 「打开」是常规动作（强调色）；「移除」才是危险动作（危险色） */
+.lib-row .lib-open:hover:not(:disabled) {
+  color: var(--accent);
+}
+.lib-row .lib-act.is-danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.lib-row .lib-act:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ---- 设置 → 更新 ---- */
+.set-update {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.set-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* .btn 本身没有 display/对齐，带图标就会和文字错位一行 */
+.set-update-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.set-update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.set-update-bar {
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--e1);
+  overflow: hidden;
+}
+.set-update-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width var(--t-state) ease;
+}
+/* 状态行（已是最新 / 发现新版本 / 装不了的原因）：常驻，不靠悬停 */
+.set-update-line {
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  color: var(--text-2);
+}
+/* 发布说明：纯文本按原换行展示。max-height 是必须的 —— 有的版本说明几百行，
+   不限高会把整页顶出屏幕，用户反而找不到按钮。 */
+.set-notes {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+  line-height: 1.7;
+  color: var(--text-2);
+  background: var(--e1);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+@keyframes set-update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.set-update-spin {
+  animation: set-update-spin 900ms linear infinite;
+}
+/* 减少动效：转圈是"正在忙"的唯一线索，停掉动画但保留图标，
+   同时那行「检查中…」的文字仍然在说同一件事（状态不只靠动画表达）。 */
+html[data-motion="reduced"] .set-update-spin {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .set-update-spin {
+    animation: none;
+  }
+}

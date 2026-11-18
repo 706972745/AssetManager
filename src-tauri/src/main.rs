@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+/// 检查更新 / 下载 / 校验 / 静默安装（照 FontManager 那一套搬过来，
+/// 仓库名与安装形态判据换成本仓的）。
+mod update;
+
 struct AppState(Mutex<App>);
 
 /// 日志目录（默认数据目录）。setup 里设一次，panic hook 与退出回调都从这儿取。
@@ -206,6 +210,45 @@ fn am_set_source(state: State<AppState>, id: i64, url: String) -> Result<(), Str
 #[tauri::command]
 fn am_open_url(url: String) -> Result<(), String> {
     fsops::open_url(&url)
+}
+
+/* ---------------- 检查更新（用户 2026-11-18：「自动更新的页面和功能也加上，
+   和 fontmanager 一样」）----------------
+   三个命令的边界写在 `update.rs` 顶部：检查只读、下载必须过哈希、安装只给
+   按用户安装的 NSIS 版。这里只做「把阻塞活扔到线程池」这一件事 ——
+   下载几 MB 跑在主线程上会把界面冻住。 */
+
+#[tauri::command]
+async fn am_update_check(force: bool) -> Result<update::UpdateInfo, String> {
+    update::check(force).await
+}
+
+#[tauri::command]
+async fn am_update_download(
+    app: AppHandle,
+    url: String,
+    name: String,
+    sha256: String,
+    asset_id: u64,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update::download_setup(&app, &url, &name, &sha256, asset_id)
+    })
+    .await
+    .map_err(|e| format!("下载任务异常：{e}"))?
+}
+
+#[tauri::command]
+fn am_update_install(
+    app: AppHandle,
+    path: String,
+    sha256: String,
+    version: Option<String>,
+) -> Result<(), String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        update::install_setup(&app, &path, &sha256, version.as_deref().unwrap_or(""))
+    }))
+    .unwrap_or_else(|_| Err("安装出错（已拦下，软件继续运行）".into()))
 }
 
 #[tauri::command]
@@ -4803,6 +4846,9 @@ fn main() {
             am_set_note,
             am_set_source,
             am_open_url,
+            am_update_check,
+            am_update_download,
+            am_update_install,
             am_lib_count,
             am_builtin_roots,
             am_remove_lib,

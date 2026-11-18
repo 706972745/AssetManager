@@ -615,6 +615,19 @@ export interface Source {
   trashRestore(ids: string[]): Promise<number>;
   trashPurge(ids: string[]): Promise<number>;
   trashEmpty(): Promise<number>;
+
+  /* ---------------- 检查更新（0.1.35） ----------------
+     三条边界与后端 update.rs 顶部一致：检查只读、下载必须过哈希、安装只给
+     「按用户安装」的 NSIS 版。前端只负责把用户点的那一下串起来。 */
+  /** 查最新版本。`force` = 用户手点的，跳过后端 10 分钟进程内缓存 */
+  updateCheck(force?: boolean): Promise<UpdateInfo>;
+  /**
+   * 下载安装包到本地缓存目录，返回落盘路径；sha256 对不上后端会删掉并抛错。
+   * `assetId` 是 GitHub Asset 的数字 id（直链限流时的兜底通道）。
+   */
+  updateDownload(url: string, name: string, sha256: string, assetId: number): Promise<string>;
+  /** 校验 + 静默安装并重启；`version` 只用于回显"正在装的是哪一版" */
+  updateInstall(path: string, sha256: string, version?: string): Promise<void>;
 }
 
 /** 用户偏好：所有改动即时生效（与 FontManager 同一纪律，没有「保存」按钮），落在 localStorage */
@@ -638,6 +651,21 @@ export interface Prefs {
    * 开了之后第一次浏览任何目录都不用等出图；代价是空闲时占一点 CPU 和磁盘。
    */
   warmThumbs: boolean;
+  /**
+   * 自动检查更新（0.1.35，照 FontManager）。
+   *
+   * 关掉之后**连版本号都不查**：不发任何网络请求。开着时只在启动后静默问一次，
+   * 有新版本才在「关于」页与顶栏提示，绝不擅自下载。
+   */
+  updateCheck: boolean;
+  /** 用户点过「跳过这个版本」的版本号（空串 = 没跳过任何版本） */
+  updateSkipped: string;
+  /**
+   * 上次**检查**更新的时间戳（毫秒，0 = 从没查过）。
+   * 24 小时闸门靠它判「到点了没有」：GitHub 匿名接口 60 次/小时/IP，
+   * 多开几个实例 + 反复点「立即检查」很容易被限流。
+   */
+  updateLastCheck: number;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -649,7 +677,47 @@ export const DEFAULT_PREFS: Prefs = {
   theme: "dark",
   motion: "system",
   warmThumbs: true,
+  updateCheck: true,
+  updateSkipped: "",
+  updateLastCheck: 0,
 };
+
+/* ---------------- 检查更新（0.1.35） ---------------- */
+
+/** 检查更新的结果（后端 `am_update_check`，字段名是 camelCase） */
+export interface UpdateInfo {
+  /** 当前运行的版本 */
+  current: string;
+  /** 远端最新版本 */
+  latest: string;
+  hasUpdate: boolean;
+  /** 发布页地址 */
+  url: string;
+  /** 发布说明（已截断到 4000 字符） */
+  notes: string;
+  publishedAt: string;
+  /** github = Releases API；raw / cdn = 只能读到版本号的兜底源 */
+  source: string;
+  setupUrl: string;
+  setupName: string;
+  sha256: string;
+  setupAssetId: number;
+  /** 能不能一键静默安装（直链 + 校验值齐全 + 当前是按用户安装） */
+  canAutoInstall: boolean;
+  /** user / system / portable */
+  installKind: string;
+  /** 装不了时是哪一条没过：system / portable / no-asset / no-digest（空 = 没阻塞） */
+  autoInstallBlocked: string;
+}
+
+/** 安装包下载进度（`update:progress` 事件） */
+export interface UpdateProgress {
+  phase: "download" | "verify" | "ready" | "error";
+  received: number;
+  total: number;
+  percent: number;
+  error?: string | null;
+}
 
 const PREFS_KEY = "am.prefs.v1";
 
@@ -670,6 +738,14 @@ export function loadPrefs(): Prefs {
       theme: p.theme === "light" ? "light" : "dark",
       motion: p.motion === "reduced" ? "reduced" : "system",
       warmThumbs: p.warmThumbs !== false,
+      updateCheck: p.updateCheck !== false,
+      updateSkipped: typeof p.updateSkipped === "string" ? p.updateSkipped : "",
+      /* 脏值（字符串 / NaN / 负数 / undefined）一律当「没查过」：
+         宁可多查一次，也不要因为一个坏值把提醒永久关掉（与 updateGate 同一口径） */
+      updateLastCheck:
+        typeof p.updateLastCheck === "number" && Number.isFinite(p.updateLastCheck) && p.updateLastCheck >= 0
+          ? p.updateLastCheck
+          : 0,
     };
   } catch {
     return { ...DEFAULT_PREFS };

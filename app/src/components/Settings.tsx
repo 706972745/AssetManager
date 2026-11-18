@@ -5,6 +5,7 @@ import { fmtSize, type Prefs, type Source, type WarmProgress } from "../types";
 import { Icon } from "./ui";
 import { DataFolderCard } from "./DataFolderCard";
 import { LibraryCard } from "./LibraryCard";
+import { UpdateSection } from "./UpdateSection";
 import { onAppEvent } from "../data/source";
 
 /**
@@ -15,7 +16,14 @@ import { onAppEvent } from "../data/source";
  * 交互纪律：所有控件都真的改东西。没有「记录快捷键」「重置全部」这类没实现的空壳按钮。
  */
 
-export type SettingsKey = "general" | "libs" | "appearance" | "cache" | "shortcuts" | "about";
+export type SettingsKey =
+  | "general"
+  | "libs"
+  | "appearance"
+  | "cache"
+  | "shortcuts"
+  | "update"
+  | "about";
 
 const NAV: { key: SettingsKey; label: string; icon: string }[] = [
   { key: "general", label: "常用", icon: "sliders" },
@@ -23,6 +31,10 @@ const NAV: { key: SettingsKey; label: string; icon: string }[] = [
   { key: "appearance", label: "外观", icon: "image" },
   { key: "cache", label: "缓存与索引", icon: "database" },
   { key: "shortcuts", label: "快捷键", icon: "keyboard" },
+  /* 「更新」放在「快捷键」和「关于」之间（FontManager 也是这个次序）：
+     它是"软件自己的事"，和外观/缓存这些"我的偏好"不是一类，
+     但也没到「关于」那种纯信息页的地步。 */
+  { key: "update", label: "更新", icon: "refresh" },
   { key: "about", label: "关于", icon: "info" },
 ];
 
@@ -54,6 +66,7 @@ export function Settings({
   onAddFolder,
   onAddPath,
   onRemoveLib,
+  updateAvailable,
 }: {
   open: boolean;
   /** 首次打开定位到哪一页（`?settings=cache` 用；不传就是「常用」） */
@@ -71,6 +84,12 @@ export function Settings({
   onAddPath: (path: string) => Promise<void>;
   /** 从素材库移除一个库根（只清索引） */
   onRemoveLib: (path: string) => Promise<void>;
+  /**
+   * 启动时静默检查到的可更新版本号（null = 没有/还没查）。
+   * 只在左侧「更新」那一行点一个小圆点 —— 设置面板关着的时候不占任何屏幕面积，
+   * 用户主动打开设置才看得到「有这么一页该去点」，不做自动弹窗。
+   */
+  updateAvailable?: string | null;
 }) {
   const [draft, setDraft] = useState<Prefs>(prefs);
   const [section, setSection] = useState<SettingsKey>(initialSection ?? "general");
@@ -640,6 +659,39 @@ export function Settings({
         ],
       },
       {
+        /* 更新（0.1.35）：一开关 + 一整块（UpdateSection 自带按钮 / 进度条 / 状态行）。
+           开关放在这一页而不是「常用」，是因为用户找更新一定先点「更新」这一页；
+           关掉它连版本号都不查（不是"查了不提醒"），这一点必须写在 hint 里。 */
+        key: "update",
+        title: "更新",
+        rows: [
+          {
+            id: "update-auto",
+            label: "自动检查更新",
+            hint: "每天最多查一次。查到新版本只提醒，不会自己下载、更不会自己装；关掉之后连版本号都不查（一个请求都不发）。",
+            kw: "更新 update 版本 version 升级 自动 检查 提醒",
+            node: (
+              <button
+                className={`switch ${draft.updateCheck ? "on" : ""}`}
+                role="switch"
+                aria-checked={draft.updateCheck}
+                aria-label="自动检查更新"
+                onClick={() => patch({ updateCheck: !draft.updateCheck })}
+              >
+                <span className="switch-knob" />
+              </button>
+            ),
+          },
+          {
+            id: "update-run",
+            label: "检查与安装",
+            block: true,
+            kw: "更新 update 版本 version 升级 检查 下载 安装 安装包 跳过 发布",
+            node: <UpdateSection prefs={draft} onPrefs={patch} onToast={onToast} />,
+          },
+        ],
+      },
+      {
         key: "about",
         title: "关于",
         rows: [
@@ -662,6 +714,51 @@ export function Settings({
             hint: "界面里的缩略图只用于显示；重命名 / 删除 / 拖出，作用对象永远是磁盘上的原文件。",
             kw: "铁律 原文件 缩略图",
             node: <span className="set-value">缩略图只是显示层</span>,
+          },
+          /* 下面三行是 0.1.35 补的：以前"关于"只有三行文字，用户想反馈问题
+             还得自己去搜仓库地址 —— 那就等于没有反馈渠道。 */
+          {
+            id: "home",
+            label: "项目主页",
+            hint: "github.com/706972745/AssetManager",
+            kw: "主页 项目 仓库 github 源码 homepage repo",
+            node: (
+              <button
+                className="btn btn-tiny"
+                onClick={() =>
+                  void source
+                    .openUrl("https://github.com/706972745/AssetManager")
+                    .catch((e) => onToast(String(e), true))
+                }
+              >
+                打开
+              </button>
+            ),
+          },
+          {
+            id: "issues",
+            label: "问题反馈",
+            hint: "遇到 bug、想加功能，都往 issue 里写；带上截图和版本号最好定位。",
+            kw: "反馈 issue 问题 bug 建议 需求 报错",
+            node: (
+              <button
+                className="btn btn-tiny"
+                onClick={() =>
+                  void source
+                    .openUrl("https://github.com/706972745/AssetManager/issues")
+                    .catch((e) => onToast(String(e), true))
+                }
+              >
+                打开
+              </button>
+            ),
+          },
+          {
+            id: "license",
+            label: "许可证",
+            hint: "开源许可，源码在项目主页",
+            kw: "许可 协议 license gpl 开源 版权",
+            node: <span className="set-value">GPL-3.0</span>,
           },
         ],
       },
@@ -725,6 +822,16 @@ export function Settings({
                   <Icon name={n.icon} size={14} stroke={1.5} />
                 </span>
                 <span className="set-nav-label">{n.label}</span>
+                {/* 有小圆点 = 启动时静默查到了新版（0.1.35）。role="img" 是为了让
+                    aria-label 真被读屏念出来 —— 光秃秃的 <span> 里的 aria-label 会被忽略。 */}
+                {n.key === "update" && updateAvailable ? (
+                  <span
+                    className="set-nav-dot"
+                    role="img"
+                    aria-label={`有新版本 ${updateAvailable}`}
+                    title={`有新版本 ${updateAvailable}`}
+                  />
+                ) : null}
               </button>
             ))}
           </div>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
 import { loadHotkeys } from "./lib/hotkeys";
+import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
   fmtNum,
   fmtSize,
@@ -137,6 +138,13 @@ function snapPromptProps(p: SnapPromptState, snaps: SnapshotRow[]) {
 export default function App() {
   /* 偏好先读出来：默认档位/视图在首屏就要用上，不能等设置面板打开过一次 */
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
+  /* prefs 的最新值镜像：启动检查更新的 effect 只挂载一次，闭包里拿到的 prefs
+     永远是首帧那份 —— 用户在设置里关掉「自动检查」之后，那个 6 小时一次的
+     tick 还会按旧值继续打接口。走 ref 读最新的。 */
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  /** 启动时静默查到的可更新版本号（null = 没有新版 / 没查）；只用于设置里的一个小圆点 */
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(prefs.view);
   const [sizeIndex, setSizeIndex] = useState(prefs.size);
   /* `?settings=cache|appearance|…` 直接打开设置并定位到某一页。
@@ -321,6 +329,27 @@ export default function App() {
     setPrefs(p);
     setSizeIndex(p.size);
     setView(p.view);
+    /* 「跳过这一版」之后左侧那个小圆点必须跟着灭：否则更新页写着"这一版你选择了跳过"，
+       导航却还亮着点，两处自相矛盾。用函数式 setState 是为了不给 applyPrefs 加依赖
+       —— 它被设置面板、若干按钮调用，依赖一变动会引起一大片重渲染。 */
+    setUpdateAvailable((prev) => (prev && p.updateSkipped === prev ? null : prev));
+  }, []);
+
+  /**
+   * 只做浅合并的偏好写回（0.1.35 修）：启动检查更新成功后要记 `updateLastCheck`，
+   * 但那一刻手里的 prefs 是 tick 开始时的**快照** —— 用它整份覆盖写回，
+   * 会把用户在这几百毫秒里改的（比如刚关掉预热、刚切了主题）一起吞掉。
+   * 所以这里按字段合并，只动调用方点名的那几个键。
+   *
+   * 有意**不**跟着改 `sizeIndex` / `view`：那是"默认档位"，刷新一个时间戳不该顺带
+   * 把当前视图拽回默认值（prefs.size/view 没变，套回去纯属副作用）。
+   */
+  const patchPrefs = useCallback((patch: Partial<Prefs>) => {
+    setPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      savePrefs(next);
+      return next;
+    });
   }, []);
 
   /* 主题与动效落到 <html> 上（与 FontManager 同一套开关位置）：
@@ -357,6 +386,44 @@ export default function App() {
     }, 6000);
     return () => window.clearTimeout(t);
   }, [prefs.warmThumbs, prefs.size]);
+
+  /* 启动时静默问一次「有没有新版本」（0.1.35，照 FontManager）。
+     三条纪律：
+       · `updateCheck` 关着就**一次请求都不发**（不是"查了不提醒"）；
+       · 24 小时闸门（dueForUpdateCheck）：GitHub 匿名接口 60 次/小时/IP，多开实例会被限流；
+       · 常驻期间每 6 小时醒一次看"到点了没有"—— 只在启动查一次的话，开着软件好几天的
+         用户就再也不会被提醒（「每天一次」变成了「每次启动一次」）。
+     查到新版**只记下版本号 + 提示一次**，绝不自动下载、绝不自动安装。 */
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      const p = prefsRef.current;
+      if (!source.desktop || !p.updateCheck) return;
+      if (!dueForUpdateCheck(p.updateLastCheck)) return;
+      void source
+        .updateCheck(false)
+        .then((info) => {
+          if (!alive) return;
+          /* 只在**成功**时记账，且只写这一个键（见 patchPrefs 的注释）。
+             失败不写时间戳：断网时下一个 6 小时 tick 会重试；恢复联网后第一次
+             成功才记，保证 24h 闸门算的是"上次真正查到结果"而不是"上次尝试"。 */
+          patchPrefs({ updateLastCheck: Date.now() });
+          if (info.hasUpdate && info.latest !== p.updateSkipped) {
+            setUpdateAvailable(info.latest);
+            toast(`发现新版本 ${info.latest}`, false, "设置 → 更新 里可以下载安装");
+          }
+        })
+        .catch(() => {
+          /* 静默：启动时的网络失败不值得占一块红条（用户在离线/公司网里很常见） */
+        });
+    };
+    tick();
+    const timer = window.setInterval(tick, UPDATE_RECHECK_TICK_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [patchPrefs, toast]);
 
   // 搜索防抖：打字时不打数据库
   useEffect(() => {
@@ -1717,7 +1784,9 @@ export default function App() {
     if (ok !== "ok") return;
     try {
       const n = await source.removeLib(path);
-      toast("已从素材库移除", false, `清掉 ${fmtNum(n)} 个目录索引`);
+      /* 用户最容易误解的一步：以为"移除素材库"会删文件。提示里必须写清磁盘没动
+         （0.1.35 起把这句话从确认框挪到结果提示里，两种时刻都看得见）。 */
+      toast("已从素材库移除", false, `磁盘文件没动 · 清掉 ${fmtNum(n)} 个目录索引`);
       setDir(null);
       setSelected(null);
       setSelectedIds(new Set());
@@ -3252,6 +3321,7 @@ export default function App() {
         onAddFolder={onAddFolder}
         onAddPath={(p) => onAddPath(p)}
         onRemoveLib={onRemoveLib}
+        updateAvailable={updateAvailable}
       />
 
       {dlg.node}
