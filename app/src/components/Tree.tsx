@@ -70,8 +70,8 @@ interface Props {
   selected: number | null;
   onSelect: (n: DirNode) => void;
   onDropTo: (target: DirNode) => void;
-  /** 拖动一个文件夹行（源文件级拖动）：由 App 交给系统拖放，松手在别的目录上就是移动 */
-  onDragDir: (path: string) => void;
+  /** 拖动一个文件夹行（源文件级）：由 App 接管为应用内拖拽，出窗才交系统 */
+  onDragDir: (path: string, x: number, y: number) => void;
   /** 出错/成功要说话（新建文件夹这类"真的动了磁盘"的动作不能静默） */
   onToast: (msg: string, err?: boolean, detail?: string) => void;
   onOpenLibrary: () => void;
@@ -162,7 +162,7 @@ export function Tree({
       dirFiredTimer.current = window.setTimeout(() => {
         dirFired.current = false;
       }, 400);
-      onDragDir(p.path);
+      onDragDir(p.path, e.clientX, e.clientY);
     };
     const up = () => {
       dirPress.current = null;

@@ -804,7 +804,7 @@ export function Detail({
   onOpenDefault,
   onCopyFile,
   onDelete,
-  onDragOut,
+  onBeginDrag,
   onToast,
   onClose,
   tags,
@@ -830,7 +830,7 @@ export function Detail({
   thumbSrc: (a: Asset, px: number) => string;
   /** 当前界面档位对应的缩略图像素（详情里如实写，不能一律写 512） */
   thumbPx: number;
-  onDragOut: (a: Asset) => void;
+  onBeginDrag: (a: Asset, x: number, y: number) => void;
   onReveal: (a: Asset) => void;
   /** 「重命名」入口：**不再弹窗**，改成让顶栏文件名进入就地编辑 */
   onRename: (a: Asset) => void;
@@ -947,7 +947,7 @@ export function Detail({
       if (!p || !a || e.buttons !== 1) return;
       if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 6) return;
       press.current = null;
-      onDragOut(a);
+      onBeginDrag(a, e.clientX, e.clientY);
     };
     const up = () => {
       press.current = null;
@@ -960,7 +960,7 @@ export function Detail({
       window.removeEventListener("mouseup", up);
       window.removeEventListener("blur", up);
     };
-  }, [onDragOut]);
+  }, [onBeginDrag]);
 
   /* 左侧边缘拖动改宽度：抓在 10px 的握把上（hover 才显形），双击复位到 348 */
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {

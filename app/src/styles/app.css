@@ -6961,8 +6961,6 @@ html[data-motion="reduced"] .set-update-spin {
   top: 0;
   z-index: 9000;
   pointer-events: none;
-  opacity: 0;
-  transition: opacity 90ms ease;
   will-change: transform;
   border-radius: 8px;
   overflow: hidden;
@@ -7021,4 +7019,13 @@ html[data-motion="reduced"] .set-update-spin {
   box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--accent-a);
   color: var(--text-1);
+}
+
+/* 拖动中：光标变抓取形，文字不许被选中（拖过网格时否则会拖出一片蓝色选区） */
+body.am-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+body.am-dragging * {
+  cursor: grabbing !important;
 }

@@ -789,14 +789,6 @@ fn am_watch(app: AppHandle, dirs: Vec<String>, watch_state: State<WatchState>) -
 
 /* ---------------- 拖出窗口（T01）：CF_HDROP，出的是原文件 ---------------- */
 
-/// 拖拽期间"光标位置轮询"的开关。
-///
-/// 为什么要它：`DoDragDrop` 一开就是模态消息循环，鼠标**整个**归 Windows 管，
-/// WebView 一个 `mousemove` 都收不到。于是「鼠标移到哪个面板就展开哪个」
-/// 和「实时高亮落点」这两件事在纯前端根本做不到 —— 只能由这里 30Hz 把
-/// 光标位置报回去，前端拿它做 `elementFromPoint`（owner 2026-11-19）。
-static DRAG_POLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// 光标位置 → 窗口内 CSS 像素。拆成两半：
 ///
 /// - `client_origin_scale` 在主线程算一次（客户区屏幕原点 + DPI 缩放）——
@@ -912,24 +904,6 @@ fn am_drag_out(
             let app2 = app.clone();
             let win2 = win.clone();
 
-            /* 拖拽期间 30Hz 报坐标（见 `DRAG_POLL` 的注释）。
-               注意顺序：必须先起线程再进 `start_drag` —— 它一进去就阻塞在这里，
-               之后再想启动线程就没机会了。 */
-            DRAG_POLL.store(true, Ordering::SeqCst);
-            {
-                let app3 = app2.clone();
-                let origin = client_origin_scale(&win2);
-                std::thread::spawn(move || {
-                    while DRAG_POLL.load(Ordering::SeqCst) {
-                        if let (Some(p), Some(o)) = (cursor_pos(), origin) {
-                            let (x, y) = to_css(o, p);
-                            let _ = app3.emit("am://drag-move", serde_json::json!({ "x": x, "y": y }));
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(30));
-                    }
-                });
-            }
-
             let r = drag::start_drag(
                 &win,
                 drag::DragItem::Files(files),
@@ -955,7 +929,6 @@ fn am_drag_out(
                 },
                 drag::Options { mode: drag::DragMode::Copy, ..Default::default() },
             );
-            DRAG_POLL.store(false, Ordering::SeqCst);
             if let Err(e) = r {
                 eprintln!("拖拽启动失败：{e}");
             }

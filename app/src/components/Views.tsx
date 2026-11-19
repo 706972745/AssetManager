@@ -43,8 +43,8 @@ interface Props {
   /** 框选结果（T11） */
   onPickMany: (ids: number[], additive: boolean) => void;
   onOpen: (a: Asset) => void;
-  /** 按住图往外拖 → 交给 Rust 起 OLE 拖拽（出口是磁盘原文件） */
-  onDragOut: (a: Asset) => void;
+  /** 按住图拖动超过 6px → 开始一次**应用内拖拽**（浮层、落点、出窗交系统都在 App 里） */
+  onBeginDrag: (a: Asset, x: number, y: number) => void;
   onNearBottom: () => void;
   thumbSrc: (a: Asset, px: number) => string;
   /** 预取可视区上下各一屏的缩略图（滚动停下后触发，不阻塞渲染） */
@@ -61,7 +61,7 @@ export function AssetView({
   onPick,
   onPickMany,
   onOpen,
-  onDragOut,
+  onBeginDrag,
   onNearBottom,
   thumbSrc,
   onPrefetch,
@@ -145,7 +145,7 @@ export function AssetView({
         fired.current = false;
       }, 400);
       hideHint(); // 无条件清一次：hintAsset 是 state，在这个不重订阅的 effect 里会读到旧值
-      onDragOut(p.a);
+      onBeginDrag(p.a, e.clientX, e.clientY);
     };
     const up = () => {
       press.current = null;
@@ -177,7 +177,7 @@ export function AssetView({
       if (firedTimer.current) window.clearTimeout(firedTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onDragOut, onPickMany]);
+  }, [onBeginDrag, onPickMany]);
 
   /* 滚动节流（2026-11-16 性能）：以前**每个 scroll 事件**都 `setScrollTop`，
      一帧里滚轮/触控板可能推 3–5 个事件，每个事件都把 40+ 个瓦片整体重渲一遍。
