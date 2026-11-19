@@ -789,6 +789,82 @@ fn am_watch(app: AppHandle, dirs: Vec<String>, watch_state: State<WatchState>) -
 
 /* ---------------- 拖出窗口（T01）：CF_HDROP，出的是原文件 ---------------- */
 
+/// 拖拽期间"光标位置轮询"的开关。
+///
+/// 为什么要它：`DoDragDrop` 一开就是模态消息循环，鼠标**整个**归 Windows 管，
+/// WebView 一个 `mousemove` 都收不到。于是「鼠标移到哪个面板就展开哪个」
+/// 和「实时高亮落点」这两件事在纯前端根本做不到 —— 只能由这里 30Hz 把
+/// 光标位置报回去，前端拿它做 `elementFromPoint`（owner 2026-11-19）。
+static DRAG_POLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 光标位置 → 窗口内 CSS 像素。拆成两半：
+///
+/// - `client_origin_scale` 在主线程算一次（客户区屏幕原点 + DPI 缩放）——
+///   拖拽期间窗口不会动，所以整个拖拽只取一次就够；
+/// - `cursor_pos` 是拖拽期间工作线程每 30ms 调的，只有这一个 Win32 调用，
+///   不去碰 tao / Tauri 的窗口对象（那些方法在工作线程上没有保证）。
+///
+/// 为什么用 `ClientToScreen` 而不是 `outer_position()`：后者是窗口外框（含标题栏），
+/// 换算出来的 y 会比真实位置高一个标题栏，落点判定整体偏上。
+#[cfg(windows)]
+fn client_origin_scale(win: &tauri::WebviewWindow) -> Option<(i32, i32, f64)> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn ClientToScreen(hwnd: isize, p: *mut Point) -> i32;
+        fn GetDpiForWindow(hwnd: isize) -> u32;
+    }
+    let hwnd = win.hwnd().ok()?.0 as isize;
+    let mut p = Point { x: 0, y: 0 };
+    if unsafe { ClientToScreen(hwnd, &mut p) } == 0 {
+        return None;
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
+    Some((p.x, p.y, scale))
+}
+
+#[cfg(windows)]
+fn cursor_pos() -> Option<(i32, i32)> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(p: *mut Point) -> i32;
+    }
+    let mut p = Point { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut p) } == 0 {
+        None
+    } else {
+        Some((p.x, p.y))
+    }
+}
+
+#[cfg(not(windows))]
+fn cursor_pos() -> Option<(i32, i32)> {
+    None
+}
+
+#[cfg(not(windows))]
+fn client_origin_scale(_win: &tauri::WebviewWindow) -> Option<(i32, i32, f64)> {
+    None
+}
+
+/// 屏幕坐标 → 窗口内 CSS 像素
+fn to_css(origin: (i32, i32, f64), p: (i32, i32)) -> (f64, f64) {
+    (
+        (p.0 - origin.0) as f64 / origin.2,
+        (p.1 - origin.1) as f64 / origin.2,
+    )
+}
+
 /// 把素材拖出窗口 —— 拖到 PS / 资源管理器 / 浏览器地址栏。
 ///
 /// 三条纪律（规格 §2.4）：
@@ -835,16 +911,39 @@ fn am_drag_out(
             };
             let app2 = app.clone();
             let win2 = win.clone();
+
+            /* 拖拽期间 30Hz 报坐标（见 `DRAG_POLL` 的注释）。
+               注意顺序：必须先起线程再进 `start_drag` —— 它一进去就阻塞在这里，
+               之后再想启动线程就没机会了。 */
+            DRAG_POLL.store(true, Ordering::SeqCst);
+            {
+                let app3 = app2.clone();
+                let origin = client_origin_scale(&win2);
+                std::thread::spawn(move || {
+                    while DRAG_POLL.load(Ordering::SeqCst) {
+                        if let (Some(p), Some(o)) = (cursor_pos(), origin) {
+                            let (x, y) = to_css(o, p);
+                            let _ = app3.emit("am://drag-move", serde_json::json!({ "x": x, "y": y }));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
+                });
+            }
+
             let r = drag::start_drag(
                 &win,
                 drag::DragItem::Files(files),
                 image,
                 move |result, pos| {
-                    // 松手位置换成本窗口的 CSS 像素，前端据此判断「是不是落在目录树上」
-                    let scale = win2.scale_factor().unwrap_or(1.0).max(0.5);
-                    let origin = win2.outer_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
-                    let lx = (pos.x - origin.0) as f64 / scale;
-                    let ly = (pos.y - origin.1) as f64 / scale;
+                    // 松手位置换成本窗口的 CSS 像素，前端据此判断落在哪
+                    let (lx, ly) = match (client_origin_scale(&win2), cursor_pos()) {
+                        (Some(o), Some(p)) => to_css(o, p),
+                        _ => {
+                            let scale = win2.scale_factor().unwrap_or(1.0).max(0.5);
+                            let origin = win2.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
+                            ((pos.x - origin.0) as f64 / scale, (pos.y - origin.1) as f64 / scale)
+                        }
+                    };
                     let payload = serde_json::json!({
                         "x": lx,
                         "y": ly,
@@ -856,6 +955,7 @@ fn am_drag_out(
                 },
                 drag::Options { mode: drag::DragMode::Copy, ..Default::default() },
             );
+            DRAG_POLL.store(false, Ordering::SeqCst);
             if let Err(e) = r {
                 eprintln!("拖拽启动失败：{e}");
             }

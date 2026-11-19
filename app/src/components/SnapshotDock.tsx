@@ -108,7 +108,6 @@ export function SnapshotDock({
   onRename,
   onCancelRename,
   onImport,
-  forceOpen,
 }: {
   items: SnapshotRow[];
   /** 正在新建（头部 + 或命令面板触发，状态在 App 里，输入行在这里） */
@@ -128,8 +127,6 @@ export function SnapshotDock({
   onRename: (id: number, name: string) => void;
   onCancelRename: () => void;
   onImport: () => void;
-  /** 正在拖拽素材 → 强制展开：收起时列表根本没渲染，拖到这一段就落不下来 */
-  forceOpen?: boolean;
 }) {
   const [closed, setClosed] = useState(loadClosed);
   /* 单击「只看这份」要延后 200ms 再执行：
@@ -148,18 +145,18 @@ export function SnapshotDock({
   }, [creating]);
 
   return (
-    <div className={`snap-section ${closed && !forceOpen ? "snap-collapsed" : ""}`}>
+    <div className={`snap-section ${closed ? "snap-collapsed" : ""}`}>
       <div className="snap-heading">
         <button
           className="snap-toggle"
           onClick={() => setClosed((v) => !v)}
-          aria-expanded={!(closed && !forceOpen)}
+          aria-expanded={!closed}
           /* 悬停气泡照 FontManager 的 hint.snapshotsSection：说清"这是什么 + 点标题干什么"。
              不再用原生 title（灰底黑字、延迟不定，两边的观感差得最明显）。 */
           data-hint-text="快照：把一批图片记成一份清单，之后一键打开灵感板（只记图片，不搬文件）；点标题展开或收起"
         >
           <span className="snap-chevron">
-            <Icon name="chevron" size={12} stroke={2} className={closed && !forceOpen ? "" : "rot90"} />
+            <Icon name="chevron" size={12} stroke={2} className={closed ? "" : "rot90"} />
           </span>
           <span>快照</span>
         </button>
@@ -181,7 +178,7 @@ export function SnapshotDock({
         </button>
       </div>
 
-      {(!closed || forceOpen) && (
+      {!closed && (
         <div className="snap-list scroll-hot">
           {creating && (
             <SnapshotInput

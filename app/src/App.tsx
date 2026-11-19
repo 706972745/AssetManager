@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
+import { setActiveDock } from "./lib/dockHover";
 import { loadHotkeys } from "./lib/hotkeys";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
@@ -260,11 +261,16 @@ export default function App() {
    *  系统拖放（CF_HDROP）只带得走文件路径，松手回头看落点时拿不到 id，
    *  而"拖到标签 / 分组 / 快照"要的正是 id（只建关联，不碰文件）。 */
   const dragIds = useRef<number[] | null>(null);
-  /** 正在拖拽（系统拖放进行中）。
-   *  为什么要进 React state：拖拽期间鼠标由 Windows 接管，WebView 收不到 hover，
-   *  标签 / 分组面板不会自己展开 —— 不展开就没有落点可拖。
-   *  起拖时置 true 让三块面板临时展开，松手 / 取消时置 false。 */
-  const [dragging, setDragging] = useState(false);
+  /** 拖拽时跟着鼠标的大缩略图（系统自带的那个是「小图 + 文件名」，认不出来）。
+   *  位置不进 state：由 `am://drag-move` 直接改 transform（30Hz 的 setState 会把界面拖死）。 */
+  const [dragGhost, setDragGhost] = useState<{
+    src: string | null;
+    name: string;
+    n: number;
+  } | null>(null);
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  /** 当前高亮的那一行落点（每次只能有一个） */
+  const hotRef = useRef<HTMLElement | null>(null);
   const dlg = useDialog();
   const askRef = useRef(dlg.ask);
   askRef.current = dlg.ask;
@@ -1845,23 +1851,19 @@ export default function App() {
       dragPaths.current = list;
       dragIds.current = many ? [...selectedIds] : [a.id];
       dragPreview.current = a.id;
-      /* 拖拽期间给所有落点打一圈虚线：系统拖放会接管鼠标，前端收不到 hover，
-         不提前标出来用户只能靠猜"哪儿能放"。
-         同时把标签 / 分组 / 快照三块面板临时撑开 —— 收起时那些行根本不在，
-         用户拖到侧栏只会落在目录树上，等于"拖到标签"这个功能不存在。 */
-      document.body.classList.add("am-dragging");
-      setDragging(true);
+      /* 跟手浮层：系统默认的那个拖影是「小缩略图 + 文件名」，owner 认不出那是缩略图
+         （2026-11-19）。这里自己画一个大的，位置由 Rust 30Hz 报坐标驱动。 */
+      setDragGhost({ src: thumbSrc(a, 256), name: a.name, n: list.length });
       try {
         await source.dragOut(list, a.id);
       } catch (e) {
         dragPaths.current = null;
         dragIds.current = null;
-        document.body.classList.remove("am-dragging");
-        setDragging(false);
+        setDragGhost(null);
         toast(String(e), true);
       }
     },
-    [selectedIds, selPaths, toast]
+    [selectedIds, selPaths, thumbSrc, toast]
   );
 
   /** 目录树里拖**文件夹**：出的是这个目录本身（CF_HDROP），
@@ -1871,28 +1873,82 @@ export default function App() {
       dragPaths.current = [path];
       dragIds.current = null;
       dragPreview.current = null;
-      document.body.classList.add("am-dragging");
-      setDragging(true);
+      setDragGhost({
+        src: null,
+        name: path.split(/[\\/]/).filter(Boolean).pop() ?? "文件夹",
+        n: 0,
+      });
       try {
         await source.dragOut([path], null);
       } catch (e) {
         dragPaths.current = null;
-        document.body.classList.remove("am-dragging");
-        setDragging(false);
+        setDragGhost(null);
         toast(String(e), true);
       }
     },
     [toast]
   );
 
-  /* 万一 drag-end 没回来（拖拽进程被系统吞掉），下一次按下鼠标就把虚线提示清掉 */
+  /** 收起跟手浮层 + 落点高亮（松手 / 取消 / 兜底清理都走这一个口） */
+  const endDragGhost = useCallback(() => {
+    setDragGhost(null);
+    hotRef.current?.classList.remove("drop-hot");
+    hotRef.current = null;
+    setActiveDock(null);
+  }, []);
+
+  /* 浮层一挂上就先摆在"刚才按下鼠标的地方"：万一坐标轮询没起来（GetCursorPos 拿不到），
+     用户至少还看得见拖影，而不是拖着一片空白。 */
   useEffect(() => {
-    const clear = () => {
-      document.body.classList.remove("am-dragging");
-      setDragging(false);
+    if (!dragGhost) return;
+    const g = ghostRef.current;
+    if (!g) return;
+    g.style.transform = `translate3d(${lastMouse.current.x + 16}px, ${lastMouse.current.y + 16}px, 0)`;
+    g.style.opacity = "1";
+  }, [dragGhost]);
+
+  /* 万一 drag-end 没回来（系统吞掉了拖拽），下一次按下鼠标兜底清一遍，
+     否则浮层会一直停在屏幕中间没人收。 */
+  useEffect(() => {
+    window.addEventListener("mousedown", endDragGhost, { passive: true });
+    return () => window.removeEventListener("mousedown", endDragGhost);
+  }, [endDragGhost]);
+
+  /* 拖拽期间（Rust 侧 30Hz 报坐标）：浮层跟手 + 落点高亮 + 面板按需展开。
+     为什么坐标只能来自 Rust：`DoDragDrop` 是模态消息循环，WebView 拿不到 mousemove。 */
+  useEffect(() => {
+    const off = onAppEvent<{ x: number; y: number }>("am://drag-move", (p) => {
+      const g = ghostRef.current;
+      if (g) {
+        // 只改 transform，不进 React state —— 30Hz 的 setState 会把整个网格拖成幻灯片
+        g.style.transform = `translate3d(${Math.round(p.x + 16)}px, ${Math.round(p.y + 16)}px, 0)`;
+        g.style.opacity = "1";
+      }
+
+      const el = document.elementFromPoint(p.x, p.y) as HTMLElement | null;
+
+      /* 面板：**只展开指针所在的那一块**。以前是起拖就把两块都撑开（owner 2026-11-19
+         明确不要），两块同时开还会把目录树挤没，想拖到文件夹反而更难。 */
+      if (el?.closest(".tag-dock")) setActiveDock("tags");
+      else if (el?.closest(".coll-dock")) setActiveDock("collections");
+      else setActiveDock(null);
+
+      /* 落点高亮：同一时刻只有一行亮着，松手就落在它身上 */
+      const hit =
+        el?.closest<HTMLElement>(
+          "[data-drop-tag],[data-drop-coll],[data-drop-snap],[data-dir-path]"
+        ) ?? null;
+      if (hit !== hotRef.current) {
+        hotRef.current?.classList.remove("drop-hot");
+        hotRef.current = hit;
+        if (hit) hit.classList.add("drop-hot");
+      }
+    });
+    return () => {
+      off();
+      hotRef.current?.classList.remove("drop-hot");
+      hotRef.current = null;
     };
-    window.addEventListener("mousedown", clear, { passive: true });
-    return () => window.removeEventListener("mousedown", clear);
   }, []);
 
   /* 松手之后：同一个系统拖放既能"拖出窗口给 PS / 资源管理器"，也能"落在本应用里的某一行上"。
@@ -1911,8 +1967,7 @@ export default function App() {
       const ids = dragIds.current;
       dragPaths.current = null;
       dragIds.current = null;
-      document.body.classList.remove("am-dragging");
-      setDragging(false);
+      endDragGhost();
       if (!p.dropped || !paths?.length) return;
 
       // 松手点换算是 Rust 侧算好的 CSS 像素（已除过 DPR），这里直接命中测试
@@ -1957,7 +2012,7 @@ export default function App() {
       void dragMoveRef.current(paths, target);
     });
     return off;
-  }, [toast]);
+  }, [toast, endDragGhost]);
 
   /* ---------------- 加库：原生文件夹选择器（T15） ---------------- */
   const onAddPath = async (path: string, label = "已加入库") => {
@@ -3027,7 +3082,6 @@ export default function App() {
           snapshotDock={
             <SnapshotDock
               items={snaps}
-              forceOpen={dragging}
               creating={snapCreating}
               renamingId={snapRenaming?.id ?? null}
               activeId={snapFilter}
@@ -3059,7 +3113,6 @@ export default function App() {
           collDock={
             <CollDock
               items={colls}
-              forceOpen={dragging}
               activeId={collFilter}
               onPick={(id) => {
                 /* 点分组 = 跨目录看这一撮素材；再点一次取消。
@@ -3088,7 +3141,6 @@ export default function App() {
           tagDock={
             <TagDock
               tags={tags}
-              forceOpen={dragging}
               groups={tagGroups}
               autoTags={autoTagCounts}
               activeTag={tagFilter}
@@ -3548,6 +3600,22 @@ export default function App() {
       {dlg.node}
       <Toaster items={toasts} />
       <HoverHintHost />
+
+      {/* 拖拽跟手浮层：位置由 Rust 报来的坐标驱动（transform 直改，不进 state）。
+          `opacity` 先藏起来，收到第一个坐标才显示 —— 否则它会先在左上角闪一下。 */}
+      {dragGhost && (
+        <div className="drag-ghost" ref={ghostRef} aria-hidden="true">
+          {dragGhost.src ? (
+            <img src={dragGhost.src} alt="" draggable={false} />
+          ) : (
+            <div className="drag-ghost-dir">
+              <Icon name="folder" size={22} stroke={1.5} />
+            </div>
+          )}
+          <span className="drag-ghost-name">{dragGhost.name}</span>
+          {dragGhost.n > 1 && <span className="drag-ghost-n tabular">{dragGhost.n}</span>}
+        </div>
+      )}
     </div>
   );
 }
