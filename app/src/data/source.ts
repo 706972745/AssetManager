@@ -190,8 +190,11 @@ export const tauriSource: Source = {
   collRename: (id, name) => invoke!<void>("am_coll_rename", { id, name }),
   collDelete: (id) => invoke!<void>("am_coll_delete", { id }),
   collAdd: (id, ids) => invoke!<number>("am_coll_add", { id, ids }),
+  collAddTag: (id, tag) => invoke!<number>("am_coll_add_tag", { id, tag }),
   collRemove: (id, ids) => invoke!<number>("am_coll_remove", { id, ids }),
   collOf: (gid) => invoke!<number[]>("am_coll_of", { gid }),
+  collOpen: (id) => invoke!<number>("am_coll_open", { coll: id }),
+  collPaste: (id) => invoke!<BoardPastedItem>("am_coll_paste", { coll: id }),
 
   /* ---------------- 快照（0.12.0） ---------------- */
   snapshotList: () => invoke!<SnapshotRow[]>("am_snapshot_list"),

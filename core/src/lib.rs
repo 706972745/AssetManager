@@ -1842,6 +1842,38 @@ impl App {
         reg::coll_delete(&self.reg, id)
     }
 
+    /// 某个标签下的全部全局 id。
+    ///
+    /// 「把整个标签加进分组 / 加进快照」这类操作要的是**一整批**，不是一屏；
+    /// 分页口径必须和列表一致（keyset + mtime_desc），否则加进去的和看到的不一样。
+    /// 上限 20 万：再大一屏操作本来也不该由界面一次性完成，防止把向量撑到几十兆。
+    pub fn ids_by_tag(&self, tag: &str) -> Result<Vec<i64>, String> {
+        let mut out: Vec<i64> = Vec::new();
+        let mut cursor: Option<(i64, i64)> = None;
+        loop {
+            let q = model::AssetQuery {
+                tag: Some(tag.to_string()),
+                limit: Some(1000),
+                cursor,
+                sort: Some("mtime_desc".into()),
+                ..Default::default()
+            };
+            let rows = self.list(&q)?;
+            if rows.is_empty() {
+                break;
+            }
+            out.extend(rows.iter().map(|r| r.id));
+            if out.len() >= 200_000 {
+                break;
+            }
+            match rows.last() {
+                Some(last) => cursor = Some((last.mtime, last.id)),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     pub fn coll_add(&mut self, id: i64, ids: &[i64]) -> Result<usize, String> {
         reg::coll_add(&self.reg, id, ids)
     }
@@ -2984,6 +3016,50 @@ mod tests {
     /* ---------------- 快照（0.12.0） ----------------
        这几条守的是**用户唯一的硬要求**：改名 / 换库之后，快照里的图还必须认得出来。
        身份是内容哈希，所以下面每一步都不看文件名、不看 id、不看路径。 */
+
+    /// 「把整个标签加进分组」：标签下有几张就进去几张，而且只是建关联 ——
+    /// 原文件一个不动、素材行也不复制（owner 2026-11-19 的验收点）。
+    #[test]
+    fn tag_batch_lands_in_collection() {
+        let d = tmp("tagcoll");
+        let lib = d.join("lib");
+        for i in 0..3u8 {
+            img_at(&lib.join(format!("a{i}.png")), 20, 20, [i * 40, 100, 200]);
+        }
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let all = app
+            .list(&model::AssetQuery {
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        let picked: Vec<i64> = all.iter().take(2).map(|a| a.id).collect();
+        app.tag_assets(&picked, "参考").unwrap();
+
+        let ids = app.ids_by_tag("参考").unwrap();
+        assert_eq!(ids.len(), 2, "标签下有几张就该取回几张");
+
+        let coll = app.coll_create("待选").unwrap();
+        assert_eq!(app.coll_add(coll, &ids).unwrap(), 2);
+        let in_coll = app
+            .list(&model::AssetQuery {
+                collection: Some(coll),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(in_coll.len(), 2, "加进分组的那两张要能在分组筛里看到");
+        assert_eq!(
+            app.list(&model::AssetQuery { limit: Some(10), ..Default::default() })
+                .unwrap()
+                .len(),
+            3,
+            "不许复制素材行：库里仍然只有 3 张"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn img_at(path: &std::path::Path, w: u32, h: u32, rgb: [u8; 3]) {
         if let Some(d) = path.parent() {

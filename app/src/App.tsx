@@ -890,6 +890,57 @@ export default function App() {
 
   /* ---------------- 标签自己的右键菜单 ---------------- */
 
+  /** 把**整个标签**加进某个分组（只建关联，原文件一个字节都不动）。
+      与「加进快照」同一层语义：标签是筛选视图，分组/快照才是"收起来的一撮"。 */
+  const addTagToColl = useCallback(
+    async (collId: number, tag: string) => {
+      try {
+        const n = await source.collAddTag(collId, tag);
+        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        setColls(await source.collList());
+        toast(
+          n > 0 ? `已把「${tag}」下的 ${n} 项加进「${name}」` : `「${name}」里已经有这些了`,
+          false,
+          "只建关联，原文件不动"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [colls, toast]
+  );
+
+  /** 「把标签下的图片加入分组…」的第二级菜单（与素材右键的 collPickMenu 同形） */
+  const tagCollMenu = useCallback(
+    (tag: string, x: number, y: number) => {
+      const label = isAutoTag(tag) ? autoTagLabel(tag) : tag;
+      if (!colls.length) {
+        setCtx({
+          x,
+          y,
+          items: [
+            { kind: "heading", label: "还没有分组" },
+            { label: "在侧栏「分组」里点 + 新建", icon: "plus", action: () => setCtx(null) },
+          ],
+        });
+        return;
+      }
+      setCtx({
+        x,
+        y,
+        items: [
+          { kind: "heading", label: `把「${label}」下的图加入分组` },
+          ...colls.map((c) => ({
+            label: c.name,
+            icon: "folder-open",
+            action: () => void addTagToColl(c.id, tag),
+          })),
+        ],
+      });
+    },
+    [colls, addTagToColl]
+  );
+
   const tagMenu = useCallback(
     (tag: string, x: number, y: number) => {
       const on = tagFilter === tag;
@@ -916,6 +967,13 @@ export default function App() {
                   tags.find((t) => t.name === tag)?.count ??
                   autoTagCounts.find((t) => t.name === tag)?.count,
               }),
+          },
+          {
+            /* 分组：同样只建关联。以前只有"素材右键 → 加入分组"，
+               用户按标签筛完想整批收起来时没有入口（owner 2026-11-19）。 */
+            label: "把标签下的图片加入分组…",
+            icon: "folder-open",
+            action: () => tagCollMenu(tag, x, y),
           },
           { kind: "separator" },
           {
@@ -946,7 +1004,7 @@ export default function App() {
         ],
       });
     },
-    [tagFilter, deleteTagEverywhere, toast]
+    [tagFilter, deleteTagEverywhere, toast, tagCollMenu, tags, autoTagCounts]
   );
 
   /* ---------------- 快照（0.12.0） ----------------
@@ -1254,9 +1312,15 @@ export default function App() {
         /* 标记来源：只有它能让分组面板保持展开（见 CtxState.source） */
         source: "coll",
         items: [
-          /* 顺序照 FontManager `collectionMenu`：改名 → 从分组建快照 → 筛选 → 删除 */
+          /* 顺序照 FontManager `collectionMenu`：改名 → 从分组建快照 → 筛选 → 删除。
+             2026-11-19 owner：分组也要能开灵感板（快照能开，分组没理由不能）。 */
           { label: "重命名…", action: () => setCollRenameId(row.id) },
           { kind: "separator" },
+          {
+            label: "打开灵感板（无限画布）",
+            icon: "expand",
+            action: () => void source.collOpen(row.id).catch((e) => toast(String(e), true)),
+          },
           {
             label: `从「${row.name}」创建快照`,
             icon: "camera",
@@ -1279,7 +1343,7 @@ export default function App() {
         ],
       });
     },
-    [collFilter, deleteColl, snapshotFromColl]
+    [collFilter, deleteColl, snapshotFromColl, toast]
   );
 
   /** 把一批素材加进某个分组（返回真正新增的条数，用于 toast） */

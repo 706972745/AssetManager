@@ -31,12 +31,14 @@ interface BoardItem {
 
 interface BoardBoot {
   label?: string;
-  /** 摆位的键（`tag:<标签>` / `snap:<id>`）：同一个标签/快照下次开板还摆回原样 */
+  /** 摆位的键（`tag:<标签>` / `snap:<id>` / `coll:<id>`）：同一个集合下次开板还摆回原样 */
   board?: string;
   /** 标签板：这块板对应哪个标签（Ctrl+V 打的就是这个标签） */
   tag?: string;
   /** 快照板：这块板对应哪份快照（Ctrl+V 加进这个快照） */
   snapshot?: { id: number; name: string };
+  /** 分组板：这块板对应哪个分组（Ctrl+V 加进这个分组；只建关联，文件不动） */
+  coll?: { id: number; name: string };
   title: string;
   items: BoardItem[];
   more?: boolean;
@@ -49,7 +51,7 @@ function bootData(): BoardBoot | null {
   const b = (window as unknown as { __AM_BOARD__?: BoardBoot }).__AM_BOARD__;
   if (!b) return null;
   // 快照板可能**一张都没对上**（硬盘没插）：那也要开板并说明，不能当成"数据丢失"
-  if (!b.tag && !b.snapshot) return null;
+  if (!b.tag && !b.snapshot && !b.coll) return null;
   return b;
 }
 
@@ -419,13 +421,18 @@ export function Board() {
   const paste = useCallback(async () => {
     if (!boot) return;
     const snap = boot.snapshot;
+    const coll = boot.coll;
     const tag = boot.tag;
     /* 按住 Ctrl+V 会连发 keydown：粘贴要读剪贴板 + 可能扫一遍截图目录，
        不加这道闸，一次长按就能给你粘出二十张一模一样的图。 */
     if (pasting.current) return;
     pasting.current = true;
     try {
-      const it = snap ? await source.snapshotPaste(snap.id) : await source.boardPaste(tag!);
+      const it = snap
+        ? await source.snapshotPaste(snap.id)
+        : coll
+          ? await source.collPaste(coll.id)
+          : await source.boardPaste(tag!);
       const root = rootRef.current;
       const W = root?.clientWidth ?? 1200;
       const H = root?.clientHeight ?? 800;
@@ -445,7 +452,9 @@ export function Board() {
       setHint({
         text: snap
           ? `已存进程序目录的 screenshots，并加进快照「${snap.name}」`
-          : `已存进程序目录的 screenshots，并打上「${tag}」`,
+          : coll
+            ? `已存进程序目录的 screenshots，并加进分组「${coll.name}」`
+            : `已存进程序目录的 screenshots，并打上「${tag}」`,
         bad: false,
       });
     } catch (e) {
@@ -720,7 +729,11 @@ export function Board() {
             ) : null}
             <kbd className="mono">Ctrl+V</kbd> 粘贴剪贴板里的图片 —— 会存到程序目录的{" "}
             <span className="mono">screenshots</span>，
-            {boot.snapshot ? `并加进快照「${boot.snapshot.name}」` : `并打上「${boot.tag}」标签`}
+            {boot.snapshot
+              ? `并加进快照「${boot.snapshot.name}」`
+              : boot.coll
+                ? `并加进分组「${boot.coll.name}」`
+                : `并打上「${boot.tag}」标签`}
           </span>
         </div>
       )}

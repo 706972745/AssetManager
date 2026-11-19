@@ -526,9 +526,15 @@ export interface Source {
   collDelete(id: number): Promise<void>;
   /** 把一批素材加进分组，返回真正新增的条数 */
   collAdd(id: number, ids: number[]): Promise<number>;
+  /** 把**整个标签**下的素材加进分组（只建关联，原文件不动）。返回真正新增的条数 */
+  collAddTag(id: number, tag: string): Promise<number>;
   collRemove(id: number, ids: number[]): Promise<number>;
   /** 这张素材在哪些分组里 */
   collOf(gid: number): Promise<number[]>;
+  /** 为这个分组开一块灵感板（与快照板同一套画布）。返回上板张数 */
+  collOpen(id: number): Promise<number>;
+  /** 分组板里 Ctrl+V：剪贴板图片存盘入库后加进这个分组，返回刚入库的那张 */
+  collPaste(id: number): Promise<BoardPastedItem>;
 
   /* ---------------- 快照（0.12.0） ----------------
      快照记的是**图片的内容指纹**（不是 id、不是路径），所以图片改名、换目录、

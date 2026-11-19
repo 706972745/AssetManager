@@ -472,11 +472,20 @@ export const mockSource: Source = {
   async collAdd() {
     return 0;
   },
+  async collAddTag() {
+    return 0;
+  },
   async collRemove() {
     return 0;
   },
   async collOf() {
     return [];
+  },
+  async collOpen() {
+    throw new Error("浏览器预览模式没有灵感板");
+  },
+  async collPaste() {
+    throw new Error("浏览器预览模式没有灵感板");
   },
   async snapshotList() {
     return [];

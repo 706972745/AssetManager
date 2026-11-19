@@ -2442,18 +2442,20 @@ struct BoardItem {
     path: String,
 }
 
-/// 按标签取全量素材（keyset 分页，单页上限 1000）。返回 `(条目, 命中总数)`。
-fn board_items(app: &App, tag: &str) -> Result<(Vec<BoardItem>, usize), String> {
+/// 取全量素材上板（keyset 分页，单页上限 1000）。返回 `(条目, 命中总数)`。
+///
+/// `base` 只决定"是哪个集合"（标签 / 分组 / 快照），分页与上限统一在这里 ——
+/// 以前只有标签一条路，分组想开板就得复制一整份实现。
+fn board_items_q(app: &App, base: AssetQuery) -> Result<(Vec<BoardItem>, usize), String> {
     let mut out: Vec<BoardItem> = Vec::new();
     let mut cursor: Option<(i64, i64)> = None;
     let mut total = 0usize;
     loop {
         let q = AssetQuery {
-            tag: Some(tag.to_string()),
             limit: Some(1000),
             cursor,
             sort: Some("mtime_desc".into()),
-            ..Default::default()
+            ..base.clone()
         };
         let rows = app.list(&q)?;
         if rows.is_empty() {
@@ -2485,6 +2487,28 @@ fn board_items(app: &App, tag: &str) -> Result<(Vec<BoardItem>, usize), String> 
         }
     }
     Ok((out, total))
+}
+
+/// 按标签取全量素材（灵感板 / 标签→快照都用它）
+fn board_items(app: &App, tag: &str) -> Result<(Vec<BoardItem>, usize), String> {
+    board_items_q(
+        app,
+        AssetQuery {
+            tag: Some(tag.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// 按分组取全量素材
+fn board_items_coll(app: &App, coll: i64) -> Result<(Vec<BoardItem>, usize), String> {
+    board_items_q(
+        app,
+        AssetQuery {
+            collection: Some(coll),
+            ..Default::default()
+        },
+    )
 }
 
 /// 开一块灵感板。同一个标签已经开着就直接聚焦，不重复开。
@@ -2585,6 +2609,38 @@ async fn am_board_open(
 #[tauri::command]
 async fn am_board_close(win: Window) -> Result<(), String> {
     win.close().map_err(|e| e.to_string())
+}
+
+/// 为**分组**开一块灵感板（结构照快照板：摆位键 `coll:<id>`，粘贴回填到分组）。
+///
+/// 为什么分组也要有板：分组和快照是同一层概念（一批图），
+/// 用户在图库里挑素材时先在分组里摆，再决定要不要固化成快照。
+#[tauri::command]
+async fn am_coll_open(app: AppHandle, state: State<'_, AppState>, coll: i64) -> Result<usize, String> {
+    let (name, items, total) = {
+        let a = lock(&state);
+        let name = a
+            .coll_list()?
+            .into_iter()
+            .find(|c| c.id == coll)
+            .map(|c| c.name)
+            .ok_or_else(|| "这个分组已经不在了".to_string())?;
+        let (items, total) = board_items_coll(&a, coll)?;
+        (name, items, total)
+    };
+    let shown = items.len();
+    let title = format!("灵感板 · 分组 {name}");
+    let boot = serde_json::json!({
+        /* 摆位的键：与 spawn_board 的 key 同源，改一处必须改两处 */
+        "board": format!("coll:{coll}"),
+        "coll": { "id": coll, "name": name },
+        "title": title,
+        "items": items,
+        "more": total > shown,
+        "total": total,
+    });
+    spawn_board(&app, &format!("coll:{coll}"), &title, boot)?;
+    Ok(shown)
 }
 
 /// 灵感板摆位：读上次摆的位置/尺寸（`[[gid,x,y,w,h], …]`）。读不到就空 —— 板按瀑布流重排
@@ -2700,27 +2756,54 @@ fn save_clip_png() -> Result<(PathBuf, u32, u32), String> {
     Ok((target, cw, ch))
 }
 
-#[tauri::command]
-async fn am_board_paste(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    tag: String,
-) -> Result<BoardItem, String> {
-    let tag = tag.trim().to_string();
-    if tag.is_empty() {
-        return Err("这块灵感板没有对应的标签".into());
+/// 板上 Ctrl+V 的落点：剪贴板图片存盘入库之后，要**挂到哪个集合**上。
+///
+/// 三种板（标签板 / 快照板 / 分组板）只有这一步不同，其余（存盘、入库、刷新、回传条目）
+/// 完全一样 —— 所以合成一条路，别再复制第三份。
+#[derive(Clone)]
+enum PasteSink {
+    Tag(String),
+    Snapshot(i64),
+    Coll(i64),
+}
+
+impl PasteSink {
+    /// 失败文案里"这次没做成什么"那一句：必须说清落在哪里，只说"失败"用户没法查
+    fn describe(&self) -> String {
+        match self {
+            PasteSink::Tag(t) => format!("没打上「{t}」标签"),
+            PasteSink::Snapshot(_) => "没进快照".to_string(),
+            PasteSink::Coll(_) => "没进分组".to_string(),
+        }
     }
+
+    fn log_key(&self) -> String {
+        match self {
+            PasteSink::Tag(t) => format!("tag={t}"),
+            PasteSink::Snapshot(id) => format!("snap={id}"),
+            PasteSink::Coll(id) => format!("coll={id}"),
+        }
+    }
+}
+
+/// 板上 Ctrl+V 的共用实现：存进截图目录 → 入库 → 挂到 `sink` → 回传一条能上板的条目。
+async fn paste_into(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    sink: PasteSink,
+) -> Result<BoardItem, String> {
     let (target, cw, ch) = save_clip_png()?;
     let saved = target.to_string_lossy().to_string();
 
     // 截图目录自动进库（库满 3 个就只存盘、不进库 —— 下面会明确告出来，不静默）
-    remember_shot_dir(&app);
+    remember_shot_dir(app);
 
     let (lib_id, local) = {
-        let a = lock(&state);
+        let a = lock(state);
         let lib_id = a.lib_for_path(&saved).ok_or_else(|| {
             format!(
-                "图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次没打上「{tag}」标签"
+                "图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次{}",
+                sink.describe()
             )
         })?;
         let local = db::asset_id_by_path(a.conn_for_path(&saved)?, &saved)?
@@ -2728,20 +2811,31 @@ async fn am_board_paste(
         (lib_id, local)
     };
     let g = am_core::gid(lib_id, local);
+    {
+        let mut a = lock(state);
+        match &sink {
+            PasteSink::Tag(t) => {
+                a.tag_assets(&[g], t)?;
+            }
+            PasteSink::Snapshot(id) => {
+                a.snapshot_add_assets(*id, &[g])?;
+            }
+            PasteSink::Coll(id) => {
+                a.coll_add(*id, &[g])?;
+            }
+        }
+    }
     let asset = {
-        let mut a = lock(&state);
-        a.tag_assets(&[g], &tag)?;
+        let a = lock(state);
         a.asset(g)?
-    };
-    let asset = asset.ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
+    }
+    .ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
 
     // 主窗的列表要立刻能看到这张新图（走的是「外部变更」那条刷新链路，400ms 去抖）
     if let Some(parent) = target.parent() {
         let _ = app.emit("fs://changed", vec![parent.to_string_lossy().to_string()]);
     }
-    if let Some(d) = LOG_DIR.get() {
-        log_runtime(d, &format!("board paste tag={tag} -> {saved}"));
-    }
+    log_runtime_opt(&format!("board paste {} -> {saved}", sink.log_key()));
 
     Ok(BoardItem {
         id: g,
@@ -2752,6 +2846,20 @@ async fn am_board_paste(
         name: asset.name.clone(),
         path: asset.path.clone(),
     })
+}
+
+/// 标签板里的 Ctrl+V：存盘入库后**打上这个标签**，再贴到板上。
+#[tauri::command]
+async fn am_board_paste(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tag: String,
+) -> Result<BoardItem, String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("这块灵感板没有对应的标签".into());
+    }
+    paste_into(&app, &state, PasteSink::Tag(tag)).await
 }
 
 /* ---------------- 快照（0.12.0） ----------------
@@ -2797,6 +2905,20 @@ fn am_coll_delete(id: i64, state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn am_coll_add(id: i64, ids: Vec<i64>, state: State<'_, AppState>) -> Result<usize, String> {
     lock(&state).coll_add(id, &ids)
+}
+
+/// 把**整个标签**下的素材加进分组（只建关联，原文件一个字节都不动）。
+///
+/// 为什么要后端做而不是前端先查一遍 id：一个标签可能有几万项，
+/// 前端要分页取完再回传，中间还要序列化两次；这里直接走同一套 keyset 分页取 id。
+#[tauri::command]
+fn am_coll_add_tag(id: i64, tag: String, state: State<'_, AppState>) -> Result<usize, String> {
+    let mut a = lock(&state);
+    let ids = a.ids_by_tag(&tag)?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    a.coll_add(id, &ids)
 }
 
 #[tauri::command]
@@ -3032,43 +3154,17 @@ async fn am_snapshot_paste(
     state: State<'_, AppState>,
     snapshot: i64,
 ) -> Result<BoardItem, String> {
-    let (target, cw, ch) = save_clip_png()?;
-    let saved = target.to_string_lossy().to_string();
-    remember_shot_dir(&app);
+    paste_into(&app, &state, PasteSink::Snapshot(snapshot)).await
+}
 
-    let (lib_id, local) = {
-        let a = lock(&state);
-        let lib_id = a.lib_for_path(&saved).ok_or_else(|| {
-            format!("图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次没进快照")
-        })?;
-        let local = db::asset_id_by_path(a.conn_for_path(&saved)?, &saved)?
-            .ok_or_else(|| format!("图片已存到 {saved}，但索引里还没找到它 —— 稍等一下再按一次 Ctrl+V"))?;
-        (lib_id, local)
-    };
-    let g = am_core::gid(lib_id, local);
-    {
-        let mut a = lock(&state);
-        a.snapshot_add_assets(snapshot, &[g])?;
-    }
-    let asset = {
-        let a = lock(&state);
-        a.asset(g)?
-    }
-    .ok_or_else(|| "素材刚入库就又找不到了，请重试".to_string())?;
-
-    if let Some(parent) = target.parent() {
-        let _ = app.emit("fs://changed", vec![parent.to_string_lossy().to_string()]);
-    }
-    log_runtime_opt(&format!("snapshot paste id={snapshot} -> {saved}"));
-
-    Ok(BoardItem {
-        id: g,
-        src: format!("http://thumb.localhost/{}?px=1024&r={}", asset.id, asset.mtime),
-        w: asset.width.unwrap_or(cw as i64).max(0) as u32,
-        h: asset.height.unwrap_or(ch as i64).max(0) as u32,
-        name: asset.name.clone(),
-        path: asset.path.clone(),
-    })
+/// 分组板里的 Ctrl+V：同样存盘入库，然后**加进这个分组**（只建关联，文件不动）。
+#[tauri::command]
+async fn am_coll_paste(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    coll: i64,
+) -> Result<BoardItem, String> {
+    paste_into(&app, &state, PasteSink::Coll(coll)).await
 }
 
 /// 记一行运行时日志（没有日志目录时什么都不做）
@@ -5588,8 +5684,11 @@ fn main() {
             am_coll_rename,
             am_coll_delete,
             am_coll_add,
+            am_coll_add_tag,
             am_coll_remove,
             am_coll_of,
+            am_coll_open,
+            am_coll_paste,
             am_snapshot_list,
             am_snapshot_create,
             am_snapshot_rename,
