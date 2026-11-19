@@ -659,13 +659,24 @@ function RatingStars({
       <button
         ref={btn}
         className={`rating-btn ${rating > 0 ? "on" : ""}`}
-        title={rating > 0 ? `已评 ${rating} 星 · 点击修改` : "还没评分 · 点击打分"}
+        title={
+          rating === 0
+            ? "点一下打 1 星 · 悬停可选 1–5 星"
+            : rating === 1
+              ? "已评 1 星 · 再点一下取消"
+              : `已评 ${rating} 星 · 点一下设为 1 星，悬停可改`
+        }
         aria-label="评分"
         aria-expanded={open}
         onMouseEnter={() => show(RATING_OPEN_DELAY)}
         onMouseLeave={hide}
         onFocus={() => show(0)}
-        onClick={() => (open ? closeNow() : show(0))}
+        onClick={() => {
+          /* owner 2026-11-19：单击 = 直接给 1 星，再点一下取消（0）。
+             精确的 2–5 星仍由悬浮面板给 —— 鼠标停上去就出来，所以单击不再只是"开门"。 */
+          onChange(rating === 1 ? 0 : 1);
+          closeNow();
+        }}
       >
         <Icon name="star" size={15} stroke={1.6} />
         {rating > 0 && <span className="rating-badge mono">{rating}</span>}
@@ -1191,6 +1202,35 @@ export function Detail({
                 </section>
               )}
 
+              {/* 来源（人写的）排在「引用」上面：owner 2026-11-19 ——
+                  引用是排障信息、默认收起，来源是可编辑的元数据，必须一眼能看到。 */}
+              <section>
+                <div className="detail-heading">来源</div>
+                <div className="mine-url">
+                  <input
+                    key={`url-${asset.id}`}
+                    className="mine-url-input mono"
+                    placeholder="来源 URL（选填）"
+                    defaultValue={asset.sourceUrl}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== asset.sourceUrl) onSetSource(asset.id, v);
+                    }}
+                  />
+                  {asset.sourceUrl && (
+                    <button
+                      className="mine-url-open"
+                      title="用浏览器打开来源"
+                      onClick={() => {
+                        void source.openUrl(asset.sourceUrl).catch(() => {});
+                      }}
+                    >
+                      <Icon name="reveal" size={12} stroke={1.5} />
+                    </button>
+                  )}
+                </div>
+              </section>
+
               {/* 引用（默认收起）：显示层 + 谁在用它 + 它引用了谁。
                   这些是"排障 / 想知道缩略图哪来的"才看的东西，不该占满屏。 */}
               <section className="detail-fold-sec">
@@ -1305,32 +1345,6 @@ export function Detail({
                 />
               </section>
 
-              <section>
-                <div className="detail-heading">来源</div>
-                <div className="mine-url">
-                  <input
-                    key={`url-${asset.id}`}
-                    className="mine-url-input mono"
-                    placeholder="来源 URL（选填）"
-                    defaultValue={asset.sourceUrl}
-                    onBlur={(e) => {
-                      const v = e.target.value.trim();
-                      if (v !== asset.sourceUrl) onSetSource(asset.id, v);
-                    }}
-                  />
-                  {asset.sourceUrl && (
-                    <button
-                      className="mine-url-open"
-                      title="用浏览器打开来源"
-                      onClick={() => {
-                        void source.openUrl(asset.sourceUrl).catch(() => {});
-                      }}
-                    >
-                      <Icon name="reveal" size={12} stroke={1.5} />
-                    </button>
-                  )}
-                </div>
-              </section>
 
               {/* 操作放最后（owner 2026-11-17）：删改这类动作不该挡在查看的路径上 */}
               <section>
@@ -1419,9 +1433,22 @@ function TagSection({
   const [pq, setPq] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
 
-  /** 候选 = 已有手工标签里，这张素材还没有的那些 */
-  const candidates = all.filter((t) => !manual.includes(t));
-  const list = candidates.filter((t) => !pq.trim() || t.toLowerCase().includes(pq.trim().toLowerCase()));
+  /**
+   * 候选 = 库里**全部**手工标签 + 这张素材身上推出来的自动标签。
+   *
+   * 以前把「已经在这张素材上的」过滤掉了，于是库里的标签全在这一张上时，
+   * 面板就只剩一句「没有匹配的标签」—— 侧栏明明有标签，这里却是空的（owner 2026-11-19）。
+   * 现在已在本素材上的照样列出来、勾着、不可点，比让它凭空消失好理解。
+   * 自动标签也列：点它 = 把软件推的这条**固定成自己的标签**（名字用显示名，如 PNG）。
+   */
+  const needle = pq.trim().toLowerCase();
+  const hitName = (...names: string[]) => !needle || names.some((n) => n.toLowerCase().includes(needle));
+  const manualRows = all.filter((t) => hitName(t));
+  const autoRows = auto.filter((a) => hitName(a.tag, isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag));
+  /** 按钮角标只数「还能加的」：已在素材上的不算 */
+  const addable =
+    manualRows.filter((t) => !manual.includes(t)).length +
+    autoRows.filter((a) => !manual.includes(autoTagLabel(a.tag))).length;
 
   /* 换素材就把草稿收掉：上一条打的半截字不该跟着到下一张 */
   const firstId = manual.join("\u0000");
@@ -1540,9 +1567,7 @@ function TagSection({
         >
           <Icon name="plus" size={11} stroke={1.6} />
           从已有标签选
-          {candidates.length > 0 && (
-            <span className="tag-pick-badge tabular">{candidates.length}</span>
-          )}
+          {addable > 0 && <span className="tag-pick-badge tabular">{addable}</span>}
         </button>
 
       {picker && (
@@ -1573,20 +1598,54 @@ function TagSection({
             </button>
           </div>
           <ul className="tag-picker-list">
-            {list.length === 0 ? (
+            {manualRows.length === 0 && autoRows.length === 0 ? (
               <li className="tag-picker-empty">没有匹配的标签</li>
             ) : (
-              list.map((t) => {
-                const on = picked.includes(t);
-                return (
-                  <li key={t}>
-                    <button className={`tag-picker-item ${on ? "on" : ""}`} onClick={() => togglePick(t)}>
-                      <span className="tag-picker-mark">{on && <Check size={11} strokeWidth={2} />}</span>
-                      <span className="tag-picker-name">{t}</span>
-                    </button>
-                  </li>
-                );
-              })
+              <>
+                {manualRows.map((t) => {
+                  const on = manual.includes(t);
+                  const pickedNow = picked.includes(t);
+                  return (
+                    <li key={t}>
+                      <button
+                        className={`tag-picker-item ${pickedNow ? "on" : ""}`}
+                        disabled={on}
+                        title={on ? "这张素材已经有这个标签了" : `打上「${t}」`}
+                        onClick={() => togglePick(t)}
+                      >
+                        <span className="tag-picker-mark">
+                          {(pickedNow || on) && <Check size={11} strokeWidth={2} />}
+                        </span>
+                        <span className="tag-picker-name">{t}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+                {autoRows.length > 0 && (
+                  <li className="tag-picker-sec">自动标签 · 点一下固定成你的标签</li>
+                )}
+                {autoRows.map((a) => {
+                  const label = isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag;
+                  const on = manual.includes(label);
+                  const pickedNow = picked.includes(label);
+                  return (
+                    <li key={`auto-${a.tag}`}>
+                      <button
+                        className={`tag-picker-item ${pickedNow ? "on" : ""}`}
+                        disabled={on}
+                        title={on ? "这张素材已经有同名标签了" : `${a.reason}｜点一下固定成「${label}」`}
+                        onClick={() => togglePick(label)}
+                      >
+                        <span className="tag-picker-mark">
+                          {(pickedNow || on) && <Check size={11} strokeWidth={2} />}
+                        </span>
+                        <Sparkles size={10} strokeWidth={1.6} className="tag-auto-spark" />
+                        <span className="tag-picker-name">{label}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </>
             )}
           </ul>
           <div className="tag-picker-foot">

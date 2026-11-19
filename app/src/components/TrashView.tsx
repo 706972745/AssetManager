@@ -35,11 +35,13 @@ export function TrashView({
 
       {items.length === 0 ? (
         <div className="empty-state">
-          <span className="empty-tile">
-            <Icon name="trash" size={26} stroke={1.5} />
-          </span>
-          <h2>回收站是空的</h2>
-          <p>移到回收站的文件会先放在这里，可以还原；清空或彻底删除时才进系统回收站。</p>
+          <div className="empty-inner">
+            <span className="empty-tile">
+              <Icon name="trash" size={26} stroke={1.5} />
+            </span>
+            <h2>回收站是空的</h2>
+            <p>移到回收站的文件会先放在这里，可以还原；清空或彻底删除时才进系统回收站。</p>
+          </div>
         </div>
       ) : (
         <div className="trash-list">

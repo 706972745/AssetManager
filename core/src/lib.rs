@@ -73,6 +73,9 @@ pub struct App {
     pub reg: rusqlite::Connection,
     pub libs: Vec<Lib>,
     pub data_dir: PathBuf,
+    /// 可再生成缓存的根（正常在安装目录，写不进去时退回 `data_dir/cache`）。
+    /// 缩略图**不在这里**：0.3.10 起每库自己一份，见 `Lib::thumbs`。
+    pub cache_dir: PathBuf,
     pub thumbs: thumb::ThumbStore,
     /// 当前"打开着"的那个库：侧栏的标签体系按它取（每个库一套标签）。
     /// 切库时由 `set_current_lib` 改；`None` 时退回第一个库。
@@ -82,8 +85,38 @@ pub struct App {
     snap_ids_cache: std::sync::Mutex<std::collections::HashMap<i64, (i64, Vec<i64>)>>,
 }
 
+/// 缓存目录是否真的可写：建得出来、也写得进去才算。
+///
+/// 只读目录（Program Files、只读介质）常常 `create_dir_all` 成功而写文件失败，
+/// 所以写一个探针再删掉 —— 缓存搬不过去时宁可退回数据目录，也不能让软件起不来。
+fn writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".am-write-probe");
+    match std::fs::write(&probe, b"1") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 impl App {
+    /// 打开索引（缓存默认放数据目录 —— 测试与 CLI 走这条）。
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_cache(data_dir, None)
+    }
+
+    /// 打开索引，并指定**可再生成缓存的根**（owner 2026-11-19：缓存放安装目录，别占 C 盘）。
+    ///
+    /// `cache` 只表示"想放这儿"：写不进去就退回 `<数据目录>/cache`，
+    /// 并把老位置的 `cache/` 一次性改名过来（同盘瞬时；跨盘或被占着就留着不动）。
+    pub fn open_with_cache(
+        data_dir: impl AsRef<Path>,
+        cache: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
         let reg_path = data_dir.join("index.db");
@@ -93,13 +126,41 @@ impl App {
         // 手上这份如果是那种库，先原地拆成一堆库文件，再继续往下走。
         libs_migrate::maybe_migrate(&mut reg, &data_dir)?;
 
-        let thumbs = thumb::ThumbStore::new(data_dir.join("cache").join("thumbs"));
+        let old_cache = data_dir.join("cache");
+        let cache_dir = match cache {
+            Some(c) if writable(&c) => c,
+            _ => old_cache.clone(),
+        };
+        /* 缓存搬家：`writable` 已经把目标目录建出来了，所以"目标是空目录"也要认，
+           否则这条搬家永远走不到（老缓存白留一份）。目标里已经有东西就不动，
+           避免把两份缓存混在一起。 */
+        let target_empty = !cache_dir.exists()
+            || (cache_dir.is_dir()
+                && std::fs::read_dir(&cache_dir)
+                    .map(|mut it| it.next().is_none())
+                    .unwrap_or(false));
+        if cache_dir != old_cache && old_cache.is_dir() && target_empty {
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            if let Err(e) = std::fs::rename(&old_cache, &cache_dir) {
+                /* 搬不动（被占用/跨盘）就先留着老池子：缓存能重建，不能因此起不来。
+                   但要留一句话，否则"C 盘怎么还有 300 MB"永远查不出来。 */
+                eprintln!(
+                    "[AssetManager] 缓存搬家失败，先继续用老目录 {}：{}",
+                    old_cache.display(),
+                    e
+                );
+                let _ = std::fs::create_dir_all(&cache_dir);
+            }
+        }
+
+        let thumbs = thumb::ThumbStore::new(cache_dir.join("thumbs"));
         std::fs::create_dir_all(&thumbs.root).map_err(|e| e.to_string())?;
 
         let mut app = Self {
             reg,
             libs: Vec::new(),
             data_dir,
+            cache_dir,
             thumbs,
             current: None,
             snap_ids_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -127,7 +188,7 @@ impl App {
         if std::fs::create_dir_all(&home).is_ok() {
             home
         } else {
-            self.data_dir.join("cache").join("thumbs")
+            self.cache_dir.join("thumbs")
         }
     }
 
@@ -382,7 +443,11 @@ impl App {
     /// 同一个 key 可能被两个库同时引用（内容相同）—— 第一个库**搬**，后面的**复制**，
     /// 否则第二个库会找不到文件、白重建一次。
     fn migrate_thumbs_into_libs(&mut self) {
-        let legacy_root = self.data_dir.join("cache").join("thumbs");
+        /* 老池子的位置有两处可能：数据目录（≤0.3.10）和安装目录（缓存搬家之后）。 */
+        let mut legacy_root = self.cache_dir.join("thumbs");
+        if !legacy_root.is_dir() {
+            legacy_root = self.data_dir.join("cache").join("thumbs");
+        }
         if !legacy_root.is_dir() {
             return;
         }
@@ -2638,6 +2703,34 @@ mod tests {
         let back = app.libs[0].thumbs.file_for(&out.key);
         assert!(back.is_file(), "老缓存要搬回库内：{}", back.display());
         assert!(!old_path.is_file(), "搬完老位置不该再留一份（白占空间）");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 缓存根跟着**壳层给的目录**走（owner 2026-11-19：缓存放安装目录，别占数据目录）。
+    /// 两条要点：老缓存要跟过去（不然用户白等一次重建）；目录写不进去必须退回数据目录。
+    #[test]
+    fn cache_follows_the_install_dir() {
+        let d = tmp("cacheroot");
+        let data = d.join("data");
+        let cache = d.join("install").join("cache");
+        std::fs::create_dir_all(data.join("cache").join("thumbs")).unwrap();
+        std::fs::write(data.join("cache").join("thumbs").join("x.webp"), b"1").unwrap();
+
+        let app = App::open_with_cache(&data, Some(cache.clone())).unwrap();
+        assert_eq!(app.cache_dir, cache, "给了可写的缓存目录就必须用它");
+        assert!(
+            cache.join("thumbs").join("x.webp").is_file(),
+            "老缓存要跟着搬过来，不能让用户白重建一次"
+        );
+        assert!(!data.join("cache").exists(), "搬完老目录不该留着");
+        drop(app);
+
+        /* 路径被一个文件挡住 = 写不进去 → 必须退回数据目录，而不是打不开 */
+        let blocked = d.join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+        let app = App::open_with_cache(&data, Some(blocked.join("cache"))).unwrap();
+        assert_eq!(app.cache_dir, data.join("cache"), "不可写就要退回数据目录");
 
         let _ = std::fs::remove_dir_all(&d);
     }

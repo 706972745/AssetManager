@@ -3402,6 +3402,10 @@ function Lightbox({
 
   const hi = thumbSrc(asset, 1600);
   const lo = thumbSrc(asset, 512);
+  /* 超长图（长截图 / 详情页）：contain 缩完只剩一条几十像素宽的细线，等于看不见。
+     这类图改「宽度锁成舞台宽 + 纵向滚动」——看清内容比一屏装下更重要（owner 2026-11-19）。
+     阈值 3 = 高是宽的三倍以上，普通手机截图（约 2.2）仍走 contain。 */
+  const tall = !!asset.width && !!asset.height && asset.height / asset.width >= 3;
 
   // 换图 → 缩放与位移复位（否则下一张会以 4 倍放大出现在角落里）
   useEffect(() => {
@@ -3539,10 +3543,14 @@ function Lightbox({
      用 zoomRef 拿最新值，监听只装一次。 */
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
+  /* 超长图靠原生滚动条看，滚轮必须让给滚动 —— 拦下来做缩放等于把唯一的查看手段废掉 */
+  const tallRef = useRef(false);
+  tallRef.current = tall;
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     const h = (e: WheelEvent) => {
+      if (tallRef.current) return;
       e.preventDefault();
       const z = zoomRef.current;
       const next = clampZoom(z * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
@@ -3588,7 +3596,7 @@ function Lightbox({
   const miniH = asset.width && asset.height
     ? Math.round((asset.height >= asset.width ? 132 : (132 * asset.height) / asset.width))
     : 72;
-  const showMini = overflow && !!nav;
+  const showMini = overflow && !!nav && !tall;
 
   return (
     <div className="lightbox" onClick={onClose}>
@@ -3618,23 +3626,31 @@ function Lightbox({
           </button>
         </div>
         <div
-          className={`lightbox-stage ${zoom > 1 ? "zoomed" : ""}`}
+          className={`lightbox-stage ${zoom > 1 ? "zoomed" : ""} ${tall ? "tall" : ""}`}
           ref={stageRef}
           onMouseDown={onDown}
           onMouseMove={onMove}
           onMouseUp={endDrag}
           onMouseLeave={endDrag}
           onDoubleClick={reset}
-          title={zoom > 1 ? "拖动平移 · 双击复位 · 右侧鸟瞰图可拖动定位" : "滚轮放大 · 双击复位"}
+          title={
+            tall
+              ? "长图：宽度铺满，上下滚动看全"
+              : zoom > 1
+                ? "拖动平移 · 双击复位 · 右侧鸟瞰图可拖动定位"
+                : "滚轮放大 · 双击复位"
+          }
         >
-          {loaded !== hi && <img className="lightbox-img ghost" src={lo} alt="" draggable={false} aria-hidden />}
+          {!tall && loaded !== hi && (
+            <img className="lightbox-img ghost" src={lo} alt="" draggable={false} aria-hidden />
+          )}
           <img
             ref={imgRef}
             className={`lightbox-img ${loaded === hi ? "in" : "out"}`}
             src={hi}
             alt=""
             draggable={false}
-            style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+            style={tall ? undefined : { transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
             onLoad={() => {
               painted.current.add(asset.id);
               setLoaded(hi);
@@ -3643,28 +3659,6 @@ function Lightbox({
             }}
             onDoubleClick={reset}
           />
-        </div>
-
-        {/* T43 边缘导航：光标到左右边缘才浮出来（贴图时最需要它） */}
-        <div className="lb-edge l" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="lb-edge-btn"
-            title="上一张（←）"
-            disabled={index <= 0}
-            onClick={onPrev}
-          >
-            <Icon name="chevron" size={20} className="rot180" />
-          </button>
-        </div>
-        <div className="lb-edge r" onClick={(e) => e.stopPropagation()}>
-          <button
-            className="lb-edge-btn"
-            title="下一张（→）"
-            disabled={index >= total - 1}
-            onClick={onNext}
-          >
-            <Icon name="chevron" size={20} />
-          </button>
         </div>
 
         {/* T40 鸟瞰图：只在图片比舞台大的时候出现（否则没有"定位"可言） */}

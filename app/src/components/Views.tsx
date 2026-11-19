@@ -464,10 +464,14 @@ export function AssetView({
 
 function Empty() {
   return (
-    <div className="empty">
-      <Icon name="image" size={26} stroke={1.4} />
-      <h2>这里还没有素材</h2>
-      <p>把文件夹加进库，或者换一个目录。AssetManager 只建索引，不会移动、复制你的原始文件。</p>
+    <div className="empty-state">
+      <div className="empty-inner">
+        <span className="empty-tile">
+          <Icon name="image" size={26} stroke={1.5} />
+        </span>
+        <h2>这里还没有素材</h2>
+        <p>把文件夹加进库，或者换一个目录。AssetManager 只建索引，不会移动、复制你的原始文件。</p>
+      </div>
     </div>
   );
 }

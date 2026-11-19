@@ -821,30 +821,64 @@
   }
 }
 
-/* 空态 */
-.empty {
+/* ---- 空态（照 FontManager 的 .empty-state，owner 2026-11-19：回收站那种裸文字不要） ----
+   一套结构三处用：主视图没素材、回收站空、以后别的空列表。数值全部与 FM 对齐
+   （56px 托盘 / 20px 标题 / 13px 说明 / 内容整体略高于正中 8vh），只把颜色换成本仓令牌。
+   以前 `.empty-tile` 压根没有样式，回收站空态就是左上角一行灰字。 */
+.empty-state {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 32px 32px 8vh;
+  text-align: center;
+}
+/* 主视图的空态叠在滚动容器上：内容再长也不该把它顶走 */
+.viewport > .empty-state {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 6px;
-  padding: 32px 32px 12vh;
-  text-align: center;
-  color: var(--text-3);
 }
-.empty h2 {
+.empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+/* 56px 圆角托盘：品牌色从左上角晕开，四周一圈极淡外发光 —— 比一个裸图标更像"这里该有东西" */
+.empty-tile {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  color: var(--accent);
+  background:
+    radial-gradient(100% 100% at 30% 0%, var(--accent-a), transparent 70%),
+    linear-gradient(180deg, rgba(var(--ink-rgb), 0.05), rgba(var(--ink-rgb), 0.02));
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  box-shadow:
+    inset 0 1px 0 var(--glass-top-highlight),
+    0 0 28px var(--accent-glow-soft),
+    var(--shadow-ground);
+}
+.empty-state h2 {
   margin: 0;
-  font-size: var(--fs-14);
+  font-size: var(--fs-20);
   font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.15;
   color: var(--text-1);
 }
-.empty p {
+.empty-state p {
   margin: 0;
-  max-width: 400px;
-  font-size: var(--fs-11);
+  max-width: 380px;
+  font-size: var(--fs-13);
   color: var(--text-2);
-  line-height: 1.7;
+  line-height: 1.5;
 }
 
 /* ---------------------------------------------------------------- 详情 */
@@ -1344,51 +1378,23 @@
 .lightbox-stage.zoomed {
   cursor: grab;
 }
-/* ---- 灯箱：边缘导航（T43） ----------------------------------------------
-   光标进到左右 64px 才浮出来（平时完全看不见，不挡图）。
-   为什么需要它：无边框贴图 / 灯箱里鼠标比键盘顺手，而顶栏那两个箭头离图太远。 */
-.lb-edge {
-  position: absolute;
-  top: 44px;
-  bottom: 0;
-  width: 64px;
-  display: grid;
-  place-items: center;
-  opacity: 0;
-  transition: opacity var(--t-quick) ease;
-  z-index: 6;
-}
-.lb-edge.l {
-  left: 0;
-  background: linear-gradient(to right, rgba(0, 0, 0, 0.28), transparent);
-}
-.lb-edge.r {
-  right: 0;
-  background: linear-gradient(to left, rgba(0, 0, 0, 0.28), transparent);
-}
-.lb-edge:hover {
-  opacity: 1;
-}
-.lb-edge-btn {
-  width: 34px;
-  height: 44px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(20, 20, 22, 0.66);
-  color: #fff;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-}
-.lb-edge-btn:hover:not(:disabled) {
-  background: rgba(32, 128, 240, 0.88);
-  border-color: rgba(32, 128, 240, 0.9);
-}
-.lb-edge-btn:disabled {
-  opacity: 0.25;
+/* ---- 灯箱：超长图（2026-11-19） ------------------------------------------
+   contain 会把 1880×21383 的长截图缩成一条几十像素的细线，等于看不见。
+   这类图改成「宽 = 舞台宽、高按比例」，超出部分交给原生滚动条；
+   滚轮让给滚动（不再缩放），鸟瞰图也不出现 —— 滚动条本身就是定位器。 */
+.lightbox-stage.tall {
+  display: block;
+  overflow-y: auto;
+  overflow-x: hidden;
   cursor: default;
 }
-
+.lightbox-stage.tall .lightbox-img {
+  width: 100%;
+  height: auto;
+  grid-area: auto;
+  object-fit: contain;
+  transform: none;
+}
 /* ---- 灯箱：鸟瞰图（T40） -------------------------------------------------
    只在"图比舞台大"时出现：放大后、或者超长图。点/拖 = 直接定位。 */
 .lb-mini {
@@ -5608,6 +5614,22 @@ body.board-body #root {
   padding: 9px 7px;
   font-size: var(--fs-11);
   color: var(--text-3);
+}
+/* 「自动标签」那一段的分隔标题：手工标签是用户的，自动标签是软件推的，主次不能混在一列里 */
+.tag-picker-sec {
+  padding: 8px 7px 4px;
+  font-size: var(--fs-11);
+  color: var(--text-3);
+}
+/* 已经在这张素材上的标签：照样列出来、勾着，但不可点 ——
+   过滤掉它们的话，库里标签全在这一张上时面板就只剩「没有匹配的标签」 */
+.tag-picker-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.tag-picker-item:disabled:hover {
+  background: transparent;
+  color: var(--text-2);
 }
 .tag-picker-foot {
   padding: 6px;

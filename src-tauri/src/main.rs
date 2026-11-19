@@ -461,7 +461,7 @@ fn am_scan_start(app: AppHandle, path: String, state: State<AppState>) -> Result
 
     std::thread::spawn(move || {
         let mut failed: Option<String> = None;
-        match App::open(&data_dir) {
+        match open_app(&data_dir) {
             Ok(mut a) => {
                 match a.scan_cancelable(&path, &cancel, |p| {
                     let _ = app.emit("scan://progress", p);
@@ -720,7 +720,7 @@ fn am_incremental(app: AppHandle, limit: Option<i64>, state: State<AppState>) ->
     let limit = limit.unwrap_or(4000);
     let cancel = scan_ctl().cancel.clone();
     std::thread::spawn(move || {
-        let Ok(mut a) = App::open(&data_dir) else { return };
+        let Ok(mut a) = open_app(&data_dir) else { return };
         if let Ok(s) = a.incremental(&cancel, limit, |p| {
             let _ = app.emit("scan://progress", p);
         }) {
@@ -877,7 +877,7 @@ fn am_rebuild_index(app: AppHandle, state: State<AppState>) -> Result<(), String
 
     std::thread::spawn(move || {
         let mut failed: Option<String> = None;
-        match App::open(&data_dir) {
+        match open_app(&data_dir) {
             Ok(mut a) => match a.rebuild(&cancel, None, |p| {
                 let _ = app.emit("scan://progress", p);
             }) {
@@ -1126,7 +1126,7 @@ fn am_move_start(
         let mut err: Option<String> = None;
         let mut outcome: Option<MoveOutcome> = None;
 
-        match App::open(&data_dir) {
+        match open_app(&data_dir) {
             Ok(mut a) => {
                 let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
                 let res = {
@@ -1999,6 +1999,56 @@ fn recall_to_item(app: &AppHandle, rec: &PeekRecall) -> Option<PeekItem> {
     item_of_file(p)
 }
 
+/// 贴图窗口要**直角 + 无系统描边**（owner 2026-11-19）。
+///
+/// 为什么不是 CSS 的事：Win11 会给每个顶层窗口自动加 8px 圆角和一圈系统描边，
+/// 贴图窗 `decorations(false) + transparent(true) + shadow(false)` 也躲不掉 ——
+/// 圆角把图的四个角切掉，描边在用户关掉「蓝色边框」之后仍然留着一条线，
+/// 看着就像开关没生效。这两样只能在 DWM 层关。
+/// 打开索引（所有入口共用一个）：**缓存放安装目录**（owner 2026-11-19：缓存别塞数据目录，
+/// 这样装到哪个盘、删哪个目录都是自洽的）。写不进去时 core 自己退回 `<数据目录>/cache`。
+fn open_app(data: &Path) -> Result<App, String> {
+    App::open_with_cache(data, Some(exe_dir().join("cache")))
+}
+
+#[cfg(windows)]
+fn peek_square_corners(win: &tauri::WebviewWindow) {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            attr: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWCP_DONOTROUND: i32 = 1;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    let Ok(h) = win.hwnd() else { return };
+    let hwnd = h.0 as isize;
+    unsafe {
+        let round = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &round as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        let none = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &none as *const u32 as *const core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn peek_square_corners(_win: &tauri::WebviewWindow) {}
+
 /// 开一扇贴图窗口（三种来源 + 重启恢复共用这一条路）
 async fn spawn_peek(
     app: &AppHandle,
@@ -2071,6 +2121,7 @@ async fn spawn_peek(
             return Err(format!("无边框窗口创建失败：{e}"));
         }
     };
+    peek_square_corners(&win);
     if let Some([px, py, pw, ph]) = rec.place {
         /* 原位原尺寸：先把窗口量准（图 + 两侧发光边），再挪到"选区左上角减去发光边"那个点 ——
            图就正好落在选区原来的位置、原来的大小。
@@ -5210,7 +5261,7 @@ fn main() {
                 });
                 log_runtime(&dir, &format!("PANIC at {loc}: {}", msg.unwrap_or_default()));
             }));
-            let st = App::open(&data).map_err(|e| format!("打开索引失败：{}", e))?;
+            let st = open_app(&data).map_err(|e| format!("打开索引失败：{}", e))?;
             // 旧版 JPEG 缩略图清一遍（后台跑，别卡首屏；删不掉的留到下次）
             let store = thumb::ThumbStore::new(st.thumbs.root.clone());
             std::thread::spawn(move || {
@@ -5239,7 +5290,7 @@ fn main() {
             let data2 = data.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(2500));
-                let Ok(mut a) = App::open(&data2) else { return };
+                let Ok(mut a) = open_app(&data2) else { return };
                 let cancel = AtomicBool::new(false);
                 if let Ok(s) = a.incremental(&cancel, 4000, |_p| {}) {
                     if s.dirs + s.removed_dirs > 0 {
