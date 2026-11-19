@@ -73,15 +73,18 @@
      阿尔法比原来的网格线（0.035）高：点覆盖的面积比线小得多，同一个透明度会看不见。 */
   --board-dot: rgba(255, 255, 255, 0.12);
   --accent: var(--ui-accent);
-  --accent-a: rgba(91, 140, 255, 0.16);
-  /* 强调色的第三、四档 + 渐变（FM 最终生效值 `app.css:8494-8495`，2026-11-19 补）。
-     注意 `--accent-a` 在 AM 与 FM **同名不同义**：FM 是实色 #5b8cff（当圆点/文字色），
-     AM 是 16% 淡蓝（被 20 多处当"选中态背景"用，行、瓦片、菜单 hover）。
-     所以这里**刻意不改 `--accent-a`** —— 一改全站的选中背景会变实心蓝、上面的字全看不清；
-     需要实色强调的地方一律用 `--ui-accent`（AM 已经是 #5b8cff）。
-     **预置令牌，本轮没有消费点，别当死代码删**：下一批「D 组」用来把 `.switch.on`
-     换成 `--accent-gradient`（FM `app.css:1379-1386` 的 `.pill-on`：渐变 + 顶部内高光
-     + `0 0 14px var(--accent-glow-soft)`），主按钮同理。 */
+  /* 与 FontManager 的语义已对齐（2026-11-19 三步走完成）：
+     `--accent-a` = 实色，和 FM 一样当"点亮"用（圆点 / 进度 / 强调描边）；
+     `--accent-soft` = 16% 淡蓝，是 AM 自己的"选中态底色"专属令牌。
+     历史上这两个语义挤在同一个 `--accent-a` 上（AM 当淡蓝底、FM 当实色），
+     同名不同义 —— 谁照 FM 整段搬样式谁就会把全站选中背景变成实心蓝。
+     现在源码里 `var(--accent-a)` 零消费点，是**刻意留空的 FM 兼容锚点**，
+     别当死代码删：以后从 FM 复制过来的片段会用到它。 */
+  --accent-a: #5b8cff;
+  --accent-soft: rgba(91, 140, 255, 0.16);
+  /* 强调色第三、四档 + 渐变（FM 最终生效值 `app.css:8494-8495`）。
+     已消费：`.switch.on` 用 `--accent-gradient`（对齐 FM `app.css:1379-1386` 的
+     `.pill-on`：渐变 + 顶部内高光 + `0 0 14px var(--accent-glow-soft)`）。 */
   --accent-b: #2f6bff;
   --accent-gradient: linear-gradient(135deg, #5b8cff, #2f6bff);
   --accent-glow: rgba(91, 140, 255, 0.42);
@@ -200,7 +203,9 @@ html[data-theme="light"] {
   --hairline: rgba(20, 20, 18, 0.06);
   /* 灵感板点阵色：板底始终是深灰（见 `:root` 里的说明），浅色主题同样用白点 */
   --board-dot: rgba(255, 255, 255, 0.12);
-  --accent-a: rgba(27, 79, 224, 0.12);
+  --accent-a: #1b4fe0;
+  /* 同上：预置令牌，值逐字等于迁移前的浅色 --accent-a，零视觉变化 */
+  --accent-soft: rgba(27, 79, 224, 0.12);
   /* 浅色的强调色第 3/4 档 + 渐变：FM `app.css:8498-8500`（浅色是另一套深蓝，别照抄深色值） */
   --accent-b: #1a42b8;
   --accent-gradient: linear-gradient(135deg, #1b4fe0, #1a42b8);

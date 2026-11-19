@@ -216,7 +216,7 @@
 }
 .ctl.on {
   color: var(--text-1);
-  box-shadow: inset 0 0 0 1px var(--accent-a);
+  box-shadow: inset 0 0 0 1px var(--accent-soft);
 }
 .ctl.on .ctl-ico {
   color: var(--accent);
@@ -511,7 +511,7 @@
 }
 .tree-row.drop-hover {
   box-shadow: inset 0 0 0 1px var(--accent);
-  background: var(--accent-a);
+  background: var(--accent-soft);
 }
 .tree-row .nav-icon {
   flex: none;
@@ -911,7 +911,7 @@
   margin-bottom: 14px;
   color: var(--accent);
   background:
-    radial-gradient(100% 100% at 30% 0%, var(--accent-a), transparent 70%),
+    radial-gradient(100% 100% at 30% 0%, var(--accent-soft), transparent 70%),
     linear-gradient(180deg, rgba(var(--ink-rgb), 0.05), rgba(var(--ink-rgb), 0.02));
   border: 1px solid rgba(var(--ink-rgb), 0.08);
   box-shadow:
@@ -1603,7 +1603,7 @@
 /* 拖拽落点提示（库内移动） */
 .drop-target {
   box-shadow: inset 0 0 0 1px var(--accent);
-  background: var(--accent-a);
+  background: var(--accent-soft);
 }
 .ghost {
   position: fixed;
@@ -1720,7 +1720,7 @@
 }
 .set-search input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-a);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .set-search-clear {
   position: absolute;
@@ -1918,7 +1918,8 @@
   height: 28px;
   padding: 2px;
   border: 1px solid var(--hairline);
-  border-radius: 5px;
+  /* R8（`app.css:9580`）把分段控件统一到 4px 体系：0/4/8/12，原来是 5px */
+  border-radius: 4px;
   background: var(--e1);
 }
 .seg-btn {
@@ -1955,7 +1956,11 @@
     box-shadow var(--t-quick) ease;
 }
 .switch.on {
-  background: var(--accent);
+  /* 照 FM `.pill-on`（`app.css:1379-1386`）：开态从实色强调换成 135° 渐变。
+     `border-color` 与两层 box-shadow 原本就与 FM 逐字相同，不用动。
+     `--accent-gradient` 深浅两套分别是 5b8cff→2f6bff / 1b4fe0→1a42b8（上一批预置），
+     所以两套主题都能看；滑块是绝对定位的，FM 那条 justify-content 在这里不适用。 */
+  background: var(--accent-gradient);
   border-color: transparent;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.25),
@@ -1998,7 +2003,7 @@
 }
 .set-num input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-a);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .set-unit {
   font-size: var(--fs-10);
@@ -2563,7 +2568,7 @@
   height: 30px;
   padding: 0 14px;
   border-bottom: 1px solid var(--hairline);
-  background: var(--accent-a);
+  background: var(--accent-soft);
   color: var(--text-1);
   font-size: var(--fs-11);
 }
@@ -3424,7 +3429,7 @@
 }
 .tag-chip.pick.on {
   border-color: var(--accent);
-  background: var(--accent-a);
+  background: var(--accent-soft);
   color: var(--accent);
 }
 .tag-edit-newgroup {
@@ -4839,7 +4844,7 @@ body.snip-body #root {
   border-radius: 5px;
   border: 1px solid var(--accent);
   background: var(--ui-hover);
-  box-shadow: 0 0 0 3px var(--accent-a);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .snap-input-row .nav-icon {
   flex: none;
@@ -5350,7 +5355,7 @@ body.board-body #root {
 .detail-resize:hover,
 .detail-resize:active {
   color: var(--text-3);
-  background: linear-gradient(90deg, var(--accent-a), transparent);
+  background: linear-gradient(90deg, var(--accent-soft), transparent);
 }
 
 /* ---------------- 评分：星标 + 角标 + 浮层 ---------------- */
@@ -5791,7 +5796,7 @@ body.board-body #root {
 }
 .detail-resize:active {
   color: var(--accent);
-  background: linear-gradient(90deg, var(--accent-glow) 0%, var(--accent-a) 42%, transparent);
+  background: linear-gradient(90deg, var(--accent-glow) 0%, var(--accent-soft) 42%, transparent);
 }
 .detail-resize:active::before {
   content: "";
@@ -6263,7 +6268,7 @@ body.board-body #root {
 }
 /* 选中：和网格里 `.tile.sel` 同一套观感（淡强调底 + 1px 内描边） */
 .trash-row.sel {
-  background: var(--accent-a);
+  background: var(--accent-soft);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 /* 行首缩略图：40×40 方框，图铺满（`cover`），加载不到就退回图标。
@@ -6932,7 +6937,7 @@ body.board-body #root {
 
 /* 内置库那一行：淡强调底 + 强调边框，一眼区分"这行不是你加的" */
 .lib-row.is-builtin {
-  background: var(--accent-a);
+  background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--text-1);
 }
@@ -7168,7 +7173,7 @@ html[data-motion="reduced"] .set-update-spin {
 .coll-row.drop-hot,
 .snap-row.drop-hot {
   box-shadow: inset 0 0 0 1px var(--accent);
-  background: var(--accent-a);
+  background: var(--accent-soft);
   color: var(--text-1);
 }
 
@@ -7290,7 +7295,7 @@ body.am-dragging * {
 }
 /* 键盘选中 / 鼠标悬停同一套高亮：用户用哪种都看得出"回车会选这一条" */
 .suggest-item.on {
-  background: var(--accent-a);
+  background: var(--accent-soft);
   color: var(--text-1);
 }
 .suggest-icon {
@@ -7440,7 +7445,7 @@ body.am-dragging * {
   cursor: default;
 }
 .lang-item.on {
-  background: var(--accent-a);
+  background: var(--accent-soft);
   color: var(--text-1);
 }
 .lang-item-name {
