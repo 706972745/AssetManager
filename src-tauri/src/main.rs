@@ -1626,6 +1626,12 @@ fn parse_query(q: Option<&str>) -> u32 {
     for part in q.split('&') {
         if let Some(v) = part.strip_prefix("px=") {
             if let Ok(n) = v.parse::<u32>() {
+                /* `0` 是**哨兵值**：要原图（长图在灯箱里铺满一屏时用）。
+                   这里必须先放行 —— 夹到 64 就会出 64px 宽的缩略图，铺到 1000px 就是一团糊
+                   （0.3.12 上线当天踩到：灯箱比上一版还糊）。 */
+                if n == 0 {
+                    return 0;
+                }
                 // 上限 2048：灯箱要 1600 档（1360 CSS × DPR1.25 ≈ 1700 设备像素），
                 // 原来卡在 1024 会把大图看糊 —— 而且钳位是**静默**的，排查时只看得到「档位没生成」
                 return n.clamp(64, 2048);
@@ -5686,5 +5692,16 @@ mod tests {
         let body = std::fs::read_to_string(d.join("runtime.log")).unwrap();
         assert!(body.contains("hello"));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `px=0` 是「要原图」的哨兵值，**不许**被档位钳位吃掉。
+    /// 0.3.12 上线当天就栽在这：0 被夹成 64，长图在灯箱里反而比改之前更糊。
+    #[test]
+    fn px_zero_means_original() {
+        assert_eq!(super::parse_query(Some("px=0&r=1&v=2")), 0);
+        assert_eq!(super::parse_query(Some("px=384&r=1")), 384);
+        assert_eq!(super::parse_query(Some("px=9999")), 2048, "上限仍是 2048");
+        assert_eq!(super::parse_query(Some("px=8")), 64, "小档位仍按 64 兜底");
+        assert_eq!(super::parse_query(None), 256, "没有参数时的默认档");
     }
 }
