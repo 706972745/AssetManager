@@ -2375,8 +2375,12 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     if !(0.5..=2.0).contains(&step) {
         return Err("缩放步长不合法".into());
     }
-    let size = win.outer_size().map_err(|e| e.to_string())?;
-    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    /* **客户区**而不是外框：`outer_size` 含系统描边，DWM 描边哪怕只 1px，
+       每次缩放都把它算进"图"的尺寸里，几次之后内容盒就比图宽/高几像素，
+       `object-fit` 于是留出四条透明缝 —— 表现就是"放大后四个角又有边框"。
+       `set_size` 设的本来就是客户区，这里配套用 `inner_*` 口径才对得上。 */
+    let size = win.inner_size().map_err(|e| e.to_string())?;
+    let pos = win.inner_position().map_err(|e| e.to_string())?;
     let scale = win.scale_factor().map_err(|e| e.to_string())?;
 
     /* 缩放的是「图」，不是整扇窗：先把四周的发光边减掉，缩完再加回去，
@@ -2401,6 +2405,11 @@ async fn am_peek_zoom(win: tauri::Window, step: f64) -> Result<(), String> {
     let ny = (pos.y as f64 + (size.height as f64 - wh) / 2.0).round();
     win.set_size(tauri::PhysicalSize::new(ww, wh)).map_err(|e| e.to_string())?;
     win.set_position(tauri::PhysicalPosition::new(nx, ny)).map_err(|e| e.to_string())?;
+    /* 缩放改了几何 → 系统描边会回来，补一刀（和 spawn_peek 里同一个理由）。 */
+    #[cfg(windows)]
+    if let Ok(h) = win.hwnd() {
+        peek_square_corners_hwnd(h.0 as isize);
+    }
     peek_touch(win.label(), |r| {
         r.long_edge = (w.max(h) / scale).round();
         r.x = nx as i32;

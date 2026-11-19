@@ -2251,12 +2251,23 @@ fn deliver_to(c: &mut Ctx, action: &str) {
     if sel[2] < 4 || sel[3] < 4 {
         return;
     }
+    /* 交付前把画面重算成「冻结图（选区外压暗）+ 标注」，**不带选区框**。
+       `c.bits` 是屏幕上的合成结果，里面有 2px 蓝框、四角 9×9 的白色把手、
+       尺寸标签和工具栏 —— 直接裁剪的话这些全都跟着进 PNG。截图贴图四周
+       那圈"边框"就是这么来的（owner 2026-11-19 反复报的那个）。
+       重放标注用的是 `c.ops`，所以箭头/文字/涂鸦一个都不少。 */
+    c.fill_base();
+    c.draw_ops();
     if let Some(png) = crop_png(c, sel) {
         c.done = Some((
             action.to_string(),
             png,
             [sel[0] as f64, sel[1] as f64, sel[2] as f64, sel[3] as f64],
         ));
+    }
+    /* 交付失败（写盘出错等）时窗口还开着，把选区框补回来，别让用户看着一块没有框的画面。 */
+    if c.done.is_none() {
+        c.draw_sel();
     }
 }
 
