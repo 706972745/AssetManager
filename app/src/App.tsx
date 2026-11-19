@@ -256,6 +256,15 @@ export default function App() {
   dirRef.current = dir;
   const dragPaths = useRef<string[] | null>(null);
   const dragPreview = useRef<number | null>(null);
+  /** 拖动时"这一批是谁"（库内 id）。
+   *  系统拖放（CF_HDROP）只带得走文件路径，松手回头看落点时拿不到 id，
+   *  而"拖到标签 / 分组 / 快照"要的正是 id（只建关联，不碰文件）。 */
+  const dragIds = useRef<number[] | null>(null);
+  /** 正在拖拽（系统拖放进行中）。
+   *  为什么要进 React state：拖拽期间鼠标由 Windows 接管，WebView 收不到 hover，
+   *  标签 / 分组面板不会自己展开 —— 不展开就没有落点可拖。
+   *  起拖时置 true 让三块面板临时展开，松手 / 取消时置 false。 */
+  const [dragging, setDragging] = useState(false);
   const dlg = useDialog();
   const askRef = useRef(dlg.ask);
   askRef.current = dlg.ask;
@@ -948,13 +957,10 @@ export default function App() {
       setCtx({
         x,
         y,
+        /* 标签菜单里**没有**「打开灵感板」（owner 2026-11-19 要求删掉）：
+           灵感板是"收起来的一撮"的画布，而标签只是随时会变的筛选视图；
+           要开板走分组 / 快照的右键。 */
         items: [
-          {
-            label: "打开灵感板（无限画布）",
-            icon: "expand",
-            action: () =>
-              void source.boardOpen(tag).catch((e) => toast(String(e))),
-          },
           {
             /* 快照：把这一整个标签下的图都记进快照（文件一个都不动） */
             label: "把标签下的图片加入快照…",
@@ -1004,7 +1010,7 @@ export default function App() {
         ],
       });
     },
-    [tagFilter, deleteTagEverywhere, toast, tagCollMenu, tags, autoTagCounts]
+    [tagFilter, deleteTagEverywhere, tagCollMenu, tags, autoTagCounts]
   );
 
   /* ---------------- 快照（0.12.0） ----------------
@@ -1803,32 +1809,144 @@ export default function App() {
   const dragMoveRef = useRef(doMove);
   dragMoveRef.current = doMove;
 
+  /** 拖到快照行松手：只记内容指纹，文件一个都不动（与右键「加入快照…」同一件事） */
+  const dropToSnapshot = useCallback(
+    async (id: number, ids: number[]) => {
+      try {
+        const r = await source.snapshotAdd(id, ids);
+        const name = snaps.find((s) => s.id === id)?.name ?? "快照";
+        setRefreshKey((k) => k + 1);
+        const notes: string[] = [];
+        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
+        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
+        toast(
+          `已记进「${name}」：${r.added} 张`,
+          r.failed.length > 0,
+          notes.join(" · ") || "只记内容指纹，原文件不动"
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [snaps, toast]
+  );
+
+  /* 落点处理器：这批 id 该挂到哪个集合上。跟素材右键菜单里的三个动作是同一套语义，
+     入口换成「拖过去松手」（owner 2026-11-19）。存 ref 是因为下面的拖拽监听
+     是空依赖的常驻 effect —— 直接闭包会一直用第一次渲染时的那份函数。 */
+  const dragDropRef = useRef({ tag: applyTag, coll: addToColl, snap: dropToSnapshot });
+  dragDropRef.current = { tag: applyTag, coll: addToColl, snap: dropToSnapshot };
+
   const onDragOut = useCallback(
     async (a: Asset) => {
       // 拖的是「选中集合里的一员」就整批拖出去，否则只拖这一张
       const many = selectedIds.has(a.id) && selectedIds.size > 1;
       const list = many ? selPaths : [a.path];
       dragPaths.current = list;
+      dragIds.current = many ? [...selectedIds] : [a.id];
       dragPreview.current = a.id;
+      /* 拖拽期间给所有落点打一圈虚线：系统拖放会接管鼠标，前端收不到 hover，
+         不提前标出来用户只能靠猜"哪儿能放"。
+         同时把标签 / 分组 / 快照三块面板临时撑开 —— 收起时那些行根本不在，
+         用户拖到侧栏只会落在目录树上，等于"拖到标签"这个功能不存在。 */
+      document.body.classList.add("am-dragging");
+      setDragging(true);
       try {
         await source.dragOut(list, a.id);
       } catch (e) {
         dragPaths.current = null;
+        dragIds.current = null;
+        document.body.classList.remove("am-dragging");
+        setDragging(false);
         toast(String(e), true);
       }
     },
     [selectedIds, selPaths, toast]
   );
 
-  /* OLE 拖拽结束回调：如果松手位置压在本窗口的目录树上，就当「移到这里」 */
+  /** 目录树里拖**文件夹**：出的是这个目录本身（CF_HDROP），
+      松手在别的目录上就是移动整个文件夹（后端 `am_move` 对目录走 fs::rename）。 */
+  const onDragDir = useCallback(
+    async (path: string) => {
+      dragPaths.current = [path];
+      dragIds.current = null;
+      dragPreview.current = null;
+      document.body.classList.add("am-dragging");
+      setDragging(true);
+      try {
+        await source.dragOut([path], null);
+      } catch (e) {
+        dragPaths.current = null;
+        document.body.classList.remove("am-dragging");
+        setDragging(false);
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  /* 万一 drag-end 没回来（拖拽进程被系统吞掉），下一次按下鼠标就把虚线提示清掉 */
+  useEffect(() => {
+    const clear = () => {
+      document.body.classList.remove("am-dragging");
+      setDragging(false);
+    };
+    window.addEventListener("mousedown", clear, { passive: true });
+    return () => window.removeEventListener("mousedown", clear);
+  }, []);
+
+  /* 松手之后：同一个系统拖放既能"拖出窗口给 PS / 资源管理器"，也能"落在本应用里的某一行上"。
+     Rust 侧把松手坐标换算成 CSS 像素回来（`am://drag-end`），这里做命中测试：
+
+       · 标签行 → 打这个标签（只建关联）
+       · 分组行 → 加进这个分组（只建关联）
+       · 快照行 → 记进这份快照（只记内容指纹）
+       · 目录行 → 移动**源文件**（老行为，T02）
+
+     前三种要求"这批素材是索引里的条目"，所以只认拖素材（`dragIds` 非空）；
+     拖文件夹时只有目录行是合法落点。 */
   useEffect(() => {
     const off = onAppEvent<{ x: number; y: number; dropped: boolean }>("am://drag-end", (p) => {
       const paths = dragPaths.current;
+      const ids = dragIds.current;
       dragPaths.current = null;
+      dragIds.current = null;
+      document.body.classList.remove("am-dragging");
+      setDragging(false);
       if (!p.dropped || !paths?.length) return;
+
       // 松手点换算是 Rust 侧算好的 CSS 像素（已除过 DPR），这里直接命中测试
       const el = document.elementFromPoint(p.x, p.y) as HTMLElement | null;
-      const row = el?.closest<HTMLElement>("[data-dir-path]");
+      if (!el) return;
+
+      if (ids?.length) {
+        const tagEl = el.closest<HTMLElement>("[data-drop-tag]");
+        if (tagEl?.dataset.dropTag) {
+          void dragDropRef.current.tag(tagEl.dataset.dropTag, ids);
+          return;
+        }
+        const collEl = el.closest<HTMLElement>("[data-drop-coll]");
+        if (collEl?.dataset.dropColl) {
+          void dragDropRef.current.coll(Number(collEl.dataset.dropColl), ids);
+          return;
+        }
+        const snapEl = el.closest<HTMLElement>("[data-drop-snap]");
+        if (snapEl?.dataset.dropSnap) {
+          void dragDropRef.current.snap(Number(snapEl.dataset.dropSnap), ids);
+          return;
+        }
+      } else if (el.closest("[data-drop-tag],[data-drop-coll],[data-drop-snap]")) {
+        /* 拖的是文件夹：标签/分组/快照只装"素材条目"，装不了一个目录。
+           不说清楚的话，用户只会看到"松手什么都没发生"。 */
+        toast(
+          "文件夹只能拖到左边的目录上（那是移动），标签 / 分组 / 快照只收素材",
+          true,
+          "要整批收起来：先选中里面的图片，再拖到分组或快照"
+        );
+        return;
+      }
+
+      const row = el.closest<HTMLElement>("[data-dir-path]");
       const target = row?.dataset.dirPath;
       if (!target) return;
       // 拖回自己所在的目录 = 无操作，别弹一堆提示
@@ -1839,7 +1957,7 @@ export default function App() {
       void dragMoveRef.current(paths, target);
     });
     return off;
-  }, []);
+  }, [toast]);
 
   /* ---------------- 加库：原生文件夹选择器（T15） ---------------- */
   const onAddPath = async (path: string, label = "已加入库") => {
@@ -2893,6 +3011,7 @@ export default function App() {
           onDropTo={(n) => {
             if (selPaths.length) void doMove(selPaths, n.path);
           }}
+          onDragDir={(p) => void onDragDir(p)}
           onToast={toast}
           onOpenLibrary={onOpenLibrary}
           onTrash={() => {
@@ -2908,6 +3027,7 @@ export default function App() {
           snapshotDock={
             <SnapshotDock
               items={snaps}
+              forceOpen={dragging}
               creating={snapCreating}
               renamingId={snapRenaming?.id ?? null}
               activeId={snapFilter}
@@ -2939,6 +3059,7 @@ export default function App() {
           collDock={
             <CollDock
               items={colls}
+              forceOpen={dragging}
               activeId={collFilter}
               onPick={(id) => {
                 /* 点分组 = 跨目录看这一撮素材；再点一次取消。
@@ -2965,7 +3086,9 @@ export default function App() {
             />
           }
           tagDock={
-            <TagDock              tags={tags}
+            <TagDock
+              tags={tags}
+              forceOpen={dragging}
               groups={tagGroups}
               autoTags={autoTagCounts}
               activeTag={tagFilter}

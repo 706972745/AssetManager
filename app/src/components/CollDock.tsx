@@ -43,6 +43,7 @@ export function CollDock({
   onMenu,
   renameId,
   hold,
+  forceOpen,
 }: {
   items: CollRow[];
   activeId: number | null;
@@ -58,6 +59,8 @@ export function CollDock({
    */
   renameId?: number | null;
   hold?: boolean;
+  /** 正在拖拽素材 → 强制展开（拖拽期间收不到 hover，收起时分组行不在，落点就没有） */
+  forceOpen?: boolean;
   /** @deprecated 由 dockOpen 自动判定两块是否同开，调用点不用再传 */
   half?: boolean;
 }) {
@@ -111,7 +114,8 @@ export function CollDock({
 
   /** 看某个分组时面板保持展开（不改用户的固定开关） */
   const selectedHold = activeId !== null;
-  const open = pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold || adding || renaming !== null;
+  const open =
+    pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold || adding || renaming !== null || !!forceOpen;
   const showingPinned = pinned || selectedHold;
   const half = open && dockOpen.tags;
 
@@ -293,6 +297,8 @@ export function CollDock({
                 tabIndex={0}
                 aria-selected={activeId === c.id}
                 className={`tag-row coll-row ${activeId === c.id ? "sel" : ""}`}
+                /* 拖放落点：拖到这里 = 把素材加进这个分组（只建关联，文件不动） */
+                data-drop-coll={c.id}
                 onClick={() => onPick(activeId === c.id ? null : c.id)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {

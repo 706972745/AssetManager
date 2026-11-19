@@ -68,6 +68,7 @@ export function TagDock({
   onTagMenu,
   onGroupMenu,
   hold,
+  forceOpen,
 }: {
   tags: TagCount[];
   groups: TagGroup[];
@@ -85,6 +86,10 @@ export function TagDock({
   onGroupMenu: (name: string, x: number, y: number) => void;
   /** 有弹层开着（编辑卡 / 批量打标签 / 右键菜单）→ 面板必须留在原地 */
   hold?: boolean;
+  /** 正在拖拽素材 → 强制展开。
+   *  拖拽期间鼠标由系统接管，WebView 收不到 hover，面板不会自己展开；
+   *  而收起状态下列表根本不在（高度 32px），拖到侧栏就只会落在目录树上。 */
+  forceOpen?: boolean;
 }) {
   const [pinned, setPinned] = useState(loadPinned);
   const [closed, setClosed] = useState<Set<string>>(loadClosed);
@@ -125,7 +130,7 @@ export function TagDock({
 
   /** 有标签正在筛时面板保持展开（不改用户的固定开关） */
   const selectedHold = activeTag !== null;
-  const open = pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold;
+  const open = pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold || !!forceOpen;
   /** 「已固定」的显示口径：手动固定的，或被选中项撑开的 */
   const showingPinned = pinned || selectedHold;
   /** 两块同时开 → 各让一步 */
@@ -210,6 +215,9 @@ export function TagDock({
       role="option"
       tabIndex={0}
       aria-selected={activeTag === t.name}
+      /* 拖放落点：把素材拖到标签上 = 打这个标签（只建关联，文件不动）。
+         自动标签**不是落点** —— 它由规则推导，手工塞不进去。 */
+      data-drop-tag={isAuto ? undefined : t.name}
       onClick={() => onPickTag(activeTag === t.name ? null : t.name)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

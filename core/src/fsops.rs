@@ -822,6 +822,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 施工图纸 0.3.16：**整个文件夹**也能当被移动对象（目录树里直接拖一个文件夹）。
+    ///
+    /// 钉住三件事：① 目录连内容一起搬走、源目录不再存在；
+    /// ② `plan_move` 把它列进 `dirs`（前端据此提示"这是移动整个文件夹"）；
+    /// ③ 拖进它自己的子目录必须**拒绝**，否则整个目录树会被搬进自己里，等于数据消失。
+    #[test]
+    fn folder_move_takes_the_whole_tree() {
+        let base = std::env::temp_dir().join(format!("am-mvdir-{}", std::process::id()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(src.join("品牌").join("子目录")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("品牌").join("a.txt"), b"a").unwrap();
+        std::fs::write(src.join("品牌").join("子目录").join("b.txt"), b"b").unwrap();
+
+        let conn = crate::db::open(&base.join("t.db")).unwrap();
+        let ops = FsOps::new(&conn);
+
+        let plan = plan_move(&[src.join("品牌")], &dst).unwrap();
+        assert_eq!(plan.files, 2, "递归统计子文件");
+        assert_eq!(plan.dirs.len(), 1, "目录要单独列出来");
+
+        // 自己拖进自己的子目录：必须报错，且**什么都不动**
+        let bad = ops.mv_with(&[src.join("品牌")], &src.join("品牌").join("子目录"), MovePolicy::Skip);
+        assert!(bad.is_err(), "拖进自己的子目录必须拒绝");
+        assert!(src.join("品牌").join("a.txt").exists(), "拒绝时源文件不能被碰");
+
+        let r = ops.mv_with(&[src.join("品牌")], &dst, MovePolicy::Skip).unwrap();
+        assert_eq!(r.report.moved, 1);
+        assert!(dst.join("品牌").join("子目录").join("b.txt").exists(), "子目录要跟着走");
+        assert!(!src.join("品牌").exists(), "源目录不该还在");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 后台移动（缺陷 #7）：逐项进度必须真的回调，且结束时的计数与磁盘一致。
     #[test]
     fn move_reports_progress_per_item() {

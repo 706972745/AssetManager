@@ -483,6 +483,20 @@
   box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--accent-a);
 }
+
+/* ---- 拖拽中：把"能接住的地方"标出来 -------------------------------------
+   系统拖放（OLE）期间 WebView 收不到 hover，鼠标一路由 Windows 接管，
+   前端没有任何机会做实时高亮。所以起拖时在 body 上挂一个 class，提前把落点圈出来：
+   目录行 = 移动源文件；标签 / 分组 / 快照 = 只建关联（文件不动）。 */
+body.am-dragging [data-drop-tag],
+body.am-dragging [data-drop-coll],
+body.am-dragging [data-drop-snap] {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-a);
+}
+body.am-dragging [data-dir-path] {
+  box-shadow: inset 0 0 0 1px var(--line-2, rgba(128, 128, 128, 0.35));
+}
 .tree-row .nav-icon {
   flex: none;
   display: grid;

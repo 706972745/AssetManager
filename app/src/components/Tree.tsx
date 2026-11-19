@@ -70,6 +70,8 @@ interface Props {
   selected: number | null;
   onSelect: (n: DirNode) => void;
   onDropTo: (target: DirNode) => void;
+  /** 拖动一个文件夹行（源文件级拖动）：由 App 交给系统拖放，松手在别的目录上就是移动 */
+  onDragDir: (path: string) => void;
   /** 出错/成功要说话（新建文件夹这类"真的动了磁盘"的动作不能静默） */
   onToast: (msg: string, err?: boolean, detail?: string) => void;
   onOpenLibrary: () => void;
@@ -90,6 +92,7 @@ export function Tree({
   selected,
   onSelect,
   onDropTo,
+  onDragDir,
   onToast,
   onOpenLibrary,
   onTrash,
@@ -131,6 +134,49 @@ export function Tree({
   }, [source]);
 
   const isBuiltin = (p: string) => builtin.some((b) => samePath(b, p));
+
+  /* 文件夹行也能拖（**源文件级**）：拖到别的目录 = 移动这个文件夹，
+     拖到资源管理器 / PS = 把这个文件夹拷出去（系统拖放的 COPY 语义）。
+     按下先记坐标，移动超过 6px 才起拖 —— 否则单击选目录会被当成拖动。 */
+  const dirPress = useRef<{ path: string; x: number; y: number } | null>(null);
+  const dirFired = useRef(false);
+  const dirFiredTimer = useRef(0);
+
+  const pressDir = (path: string, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    dirPress.current = { path, x: e.clientX, y: e.clientY };
+  };
+
+  /** 拖动之后浏览器还会补一个 click（= 切到那个目录）：吃掉它，
+      否则「把文件夹拖出去」会顺手把左侧选中的目录换掉。 */
+  const eatClickAfterDrag = () => dirFired.current;
+
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const p = dirPress.current;
+      if (!p || e.buttons !== 1) return;
+      if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 6) return;
+      dirPress.current = null;
+      dirFired.current = true;
+      if (dirFiredTimer.current) window.clearTimeout(dirFiredTimer.current);
+      dirFiredTimer.current = window.setTimeout(() => {
+        dirFired.current = false;
+      }, 400);
+      onDragDir(p.path);
+    };
+    const up = () => {
+      dirPress.current = null;
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    window.addEventListener("blur", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("blur", up);
+      if (dirFiredTimer.current) window.clearTimeout(dirFiredTimer.current);
+    };
+  }, [onDragDir]);
 
   /** 「+」：在当前库里新建文件夹。
    *
@@ -349,7 +395,11 @@ export function Tree({
         /* 内置库：右键菜单靠它不给「从素材库移除」 */
         data-dir-builtin={bi ? "1" : undefined}
         style={{ paddingLeft: ROW_PAD }}
-        onClick={() => switchLib(r)}
+        onMouseDown={(e) => pressDir(r.path, e)}
+        onClick={() => {
+          if (eatClickAfterDrag()) return;
+          switchLib(r);
+        }}
         title={`${r.path}\n点一下切换到这个素材库${
           bi ? "\n（软件自己的截图目录，不占素材库名额）" : ""
         }`}
@@ -408,7 +458,11 @@ export function Tree({
         data-dir-root={n.parentId === null ? "1" : undefined}
         data-dir-builtin={bi ? "1" : undefined}
         style={{ paddingLeft: ROW_PAD + depth * DEPTH_STEP }}
-        onClick={() => selectNode(n)}
+        onMouseDown={(e) => pressDir(n.path, e)}
+        onClick={() => {
+          if (eatClickAfterDrag()) return;
+          selectNode(n);
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           setHover(n.id);
@@ -543,7 +597,9 @@ export function Tree({
               data-dir-root="1"
               data-dir-builtin="1"
               title={`${shotRoot.path}\n软件截图存放目录（内置，不占素材库名额）`}
+              onMouseDown={(e) => pressDir(shotRoot.path, e)}
               onClick={() => {
+                if (eatClickAfterDrag()) return;
                 /* 点段头 = 打开这个库：展开子目录 + 列表切到它（和点一行目录同一个结果） */
                 void (async () => {
                   if (!open.has(shotRoot.id)) {
