@@ -294,6 +294,16 @@ export const mockSource: Source = {
   async trashMedia() {
     return [];
   },
+  async uiPrefsSet() {
+    /* 浏览器预览没有后端：托盘/自启/缩放都只在前端记住，不报错 */
+  },
+  async setUiScale(scale: number | null) {
+    return scale ?? 1;
+  },
+  async setAutostart() {},
+  async getAutostart() {
+    return false;
+  },
   async trashList() {
     return [];
   },

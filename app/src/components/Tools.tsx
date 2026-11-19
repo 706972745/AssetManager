@@ -58,6 +58,12 @@ export function Tools({
   thumbSrc: (a: Asset, px: number) => string;
 }) {
   const [cur, setCur] = useState<ToolTab>(tab);
+  /* `useState` 只在首次挂载取一次 `tab`，而这个面板是常驻挂载的（`open` 只控制显隐）——
+     不补这个同步，从批量条点「批量重命名」打开的还是上次那个页签，
+     用户看到的是"重复检测"，自然以为按钮没做（0.3.30）。 */
+  useEffect(() => {
+    if (open) setCur(tab);
+  }, [open, tab]);
   const [busy, setBusy] = useState(false);
 
   // 重复

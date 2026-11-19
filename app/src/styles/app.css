@@ -7193,3 +7193,130 @@ body.am-dragging * {
   min-height: 0;
   overflow: hidden;
 }
+
+/* ---- 搜索建议下拉（0.3.30，照 FontManager 的 SearchSuggest） --------------
+   挂在 `.topbar-search`（它本来就是 position:relative）下面，宽度跟输入框一致。
+   为什么用 absolute 而不是 portal：输入框在顶栏里不会被任何 overflow 裁掉，
+   portal 反而要多算一次锚点位置（排序/筛选菜单走 portal 是因为它们贴着视口边缘弹）。 */
+.topbar-search .suggest-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--e2);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.3);
+  max-height: 320px;
+  overflow: auto;
+  animation: suggest-in 120ms ease;
+}
+@keyframes suggest-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-4);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-11);
+  text-align: left;
+  cursor: default;
+}
+/* 键盘选中 / 鼠标悬停同一套高亮：用户用哪种都看得出"回车会选这一条" */
+.suggest-item.on {
+  background: var(--accent-a);
+  color: var(--text-1);
+}
+.suggest-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+}
+.suggest-item[data-kind="tag"] .suggest-icon {
+  color: var(--accent);
+}
+.suggest-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.suggest-kind {
+  flex: none;
+  font-size: var(--fs-10);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 设置：语言选择 / 缺语言提示 / 界面缩放（0.3.30） ---- */
+.set-select {
+  height: var(--control-h);
+  min-width: 136px;
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--e1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-11);
+  cursor: pointer;
+}
+.set-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 「没有你的语言？」那一块：虚线框 + 浅底，和真的能改东西的行区分开
+   （它只是两个外链，不是设置项） */
+.set-lang-miss {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--e1);
+}
+.set-lang-miss-title {
+  margin-bottom: 8px;
+  font-size: var(--fs-11);
+  color: var(--text-3);
+}
+.set-lang-miss-actions {
+  display: flex;
+  gap: 8px;
+}
+/* 界面缩放：标题 + 一句"当前多少"，下面一排档位（复用 .seg） */
+.set-zoom {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+.set-zoom-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.set-zoom-title {
+  font-size: var(--fs-11);
+  color: var(--text-1);
+}
+.set-zoom-hint {
+  font-size: var(--fs-10);
+  color: var(--text-3);
+}

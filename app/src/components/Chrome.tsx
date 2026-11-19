@@ -7,6 +7,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { SearchSuggest, useSuggest } from "./SearchSuggest";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
 import {
   badge,
@@ -212,6 +213,42 @@ export function TopBar({
     portrait: "纵向",
     square: "方形",
   };
+  /* ---- 搜索联想（0.3.30，照 FontManager）----
+     `sugOpen` 管面板开合，`sugActive` 是键盘选中项（-1 = 还没用方向键选过）。
+     数据源见 `useSuggest`：图片走后端模糊查、标签本地过滤。 */
+  const [sugOpen, setSugOpen] = useState(false);
+  const [sugActive, setSugActive] = useState(-1);
+  const sugItems = useSuggest(source, text, tags, sugOpen && !trashMode);
+
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    /* 面板没内容时只处理 Esc（关面板），别把方向键吃掉 —— 输入框里左右移动光标是正常操作 */
+    if (!sugItems.length) {
+      if (e.key === "Escape") setSugOpen(false);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSugActive((i) => Math.min(sugItems.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSugActive((i) => Math.max(-1, i - 1));
+    } else if (e.key === "Enter") {
+      /* 没选过就用第一条：用户敲完字直接回车，得到的是最像的那条 */
+      const pick = sugItems[sugActive >= 0 ? sugActive : 0];
+      if (pick) {
+        e.preventDefault();
+        onText(pick.value);
+        setSugOpen(false);
+        setSugActive(-1);
+      }
+    } else if (e.key === "Escape") {
+      /* 必须 stopPropagation：App 的全局 Esc 会顺手把详情面板也收掉 */
+      e.preventDefault();
+      e.stopPropagation();
+      setSugOpen(false);
+    }
+  };
+
   const kind = KINDS.find((k) => k.key === kindKey) ?? KINDS[0];
   /* 回收站的"最近修改"其实是"最近删除"（条目只有删除时间这一个时间戳），
      文案必须跟着换，否则用户以为在按原文件的修改时间排。 */
@@ -377,11 +414,33 @@ export function TopBar({
         <Icon name="search" size={13} stroke={1.7} className="tf-icon" />
         <BlinkCaretInput
           value={text}
-          onChange={onText}
+          onChange={(v) => {
+            onText(v);
+            /* 一打字就开面板（和 FontManager 一致）；`useSuggest` 自己防抖 */
+            setSugOpen(true);
+            setSugActive(-1);
+          }}
           placeholder="搜索文件名 / 标签…"
           inputClassName="topbar-field"
           ariaLabel="搜索文件名或标签"
+          onFocus={() => setSugOpen(true)}
+          /* 点建议项那一下已经 `preventDefault`，不会走到这里；
+             键盘 Tab 走开时靠它收面板 */
+          onBlur={() => setSugOpen(false)}
+          onKeyDown={onSearchKey}
         />
+        {sugOpen && (
+          <SearchSuggest
+            items={sugItems}
+            active={sugActive}
+            onHover={setSugActive}
+            onPick={(s) => {
+              onText(s.value);
+              setSugOpen(false);
+              setSugActive(-1);
+            }}
+          />
+        )}
       </div>
 
       {!trashMode && (

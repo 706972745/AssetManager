@@ -13,6 +13,14 @@ const MAX_LIBS = 3;
 /** 切库时"选中的那个挪到最上面"的动效：略带回弹的弹簧，跟 FontManager 同一手感。 */
 const LIB_SPRING = { type: "spring", stiffness: 460, damping: 36, mass: 0.7 } as const;
 
+/* 切库三步的节拍：必须和 CSS / motion 的真实时长对齐，否则"等动画做完"是假的。
+   `KIDS_MS` = `.tree-kids` 的 grid-template-rows 过渡（见 app.css）；
+   `MOVE_MS` = 上面这个 spring 的落定时间（stiffness 460 / damping 36 实测约 280–320ms）。 */
+const KIDS_MS = 140;
+const MOVE_MS = 320;
+
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
 /** 路径比较口径（与后端 same_path 一致）：斜杠统一、去尾分隔符、小写。 */
 function samePath(a: string, b: string) {
   const f = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
@@ -365,21 +373,65 @@ export function Tree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, roots]);
 
-  /** 切库 = 打开它（展开 + 载入子目录）并把列表切到它的库根 */
-  const switchLib = (r: DirNode) => {
-    setActivePath(r.path);
-    saveActiveLib(r.path);
-    void (async () => {
+  /** 切库 = 三步**排队**（owner 2026-11-19：以前"点击后的动画太乱"）。
+   *
+   *  ① 先把当下这个库收起来（子树 0fr，140ms）
+   *  ② 再把点中的库挪到最上面（`layout="position"` 的 FLIP 位移动画）
+   *  ③ 最后展开它（子树 1fr，140ms）
+   *
+   *  为什么必须串行：这三件事落在**同一个 `.lib-block`** 上 ——
+   *  收起/展开是 `grid-template-rows` 过渡，挪位是 transform 的 FLIP，
+   *  而且两行的内容同时要换（当前库行带箭头、普通行带「切换」）。
+   *  三步一起发的话，高度、位移、内容三个动画互相拉扯，位移的起点还在变，
+   *  看上去就是"一顿乱跳"。等前一步真做完（`sleep` 对齐 CSS 时长）再走下一步。
+   */
+  const switchToken = useRef(0);
+  const switchLib = async (r: DirNode) => {
+    const prev = activeRoot;
+    /* 点的是已经开着的库：没有"收起 / 挪上去"可做，只保证它是展开的 */
+    if (prev && samePath(prev.path, r.path)) {
       if (!open.has(r.id)) {
         await load(r.id);
-        const next = new Set(open).add(r.id);
-        setOpen(next);
-        const paths = openSet();
-        paths.add(r.path);
-        saveOpenPaths(paths);
+        setOpen((c) => new Set(c).add(r.id));
       }
       onSelect(r);
-    })();
+      return;
+    }
+
+    /* 连点保护：每次切库领一个号，await 回来发现号变了就说明用户又点了别的库，
+       本次链路就地放弃 —— 否则两条链会各收各的、各展各的。 */
+    const my = ++switchToken.current;
+    const alive = () => switchToken.current === my;
+
+    /* ① 收起当下这个库（只关子树；`activePath` 不动，所以它还留在第一行） */
+    if (prev && open.has(prev.id)) {
+      setOpen((c) => {
+        const n = new Set(c);
+        n.delete(prev.id);
+        return n;
+      });
+      const paths = openSet();
+      paths.delete(prev.path);
+      saveOpenPaths(paths);
+      await sleep(KIDS_MS);
+      if (!alive()) return;
+    }
+
+    /* ② 改 activePath：排序函数（`orderedRoots`）立刻把它排到第一，motion 做位移 */
+    setActivePath(r.path);
+    saveActiveLib(r.path);
+    /* 列表内容这时候就换（用户点库的主目的），不必等位移动画跑完 */
+    onSelect(r);
+    await sleep(MOVE_MS);
+    if (!alive()) return;
+
+    /* ③ 展开目标库（`load` 内部按 `loaded` 去重，重复调用不会重复发请求） */
+    await load(r.id);
+    if (!alive()) return;
+    setOpen((c) => new Set(c).add(r.id));
+    const paths2 = openSet();
+    paths2.add(r.path);
+    saveOpenPaths(paths2);
   };
 
   /** 内置库小标：一眼看出"这行不是你加的" */
@@ -409,7 +461,7 @@ export function Tree({
         onMouseDown={(e) => pressDir(r.path, e)}
         onClick={() => {
           if (eatClickAfterDrag()) return;
-          switchLib(r);
+          void switchLib(r);
         }}
         title={`${r.path}\n点一下切换到这个素材库${
           bi ? "\n（软件自己的截图目录，不占素材库名额）" : ""

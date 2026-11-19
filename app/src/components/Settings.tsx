@@ -7,6 +7,14 @@ import { DataFolderCard } from "./DataFolderCard";
 import { LibraryCard } from "./LibraryCard";
 import { UpdateSection } from "./UpdateSection";
 import { onAppEvent } from "../data/source";
+import {
+  LOCALES,
+  setLocalePref,
+  useLocalePref,
+  useT,
+  type LocalePref,
+  type TKey,
+} from "../lib/i18n";
 
 /**
  * 设置面板：左列导航 + 右侧分组卡片 + 右下角「应用 / 保存设置」，
@@ -16,26 +24,28 @@ import { onAppEvent } from "../data/source";
  * 交互纪律：所有控件都真的改东西。没有「记录快捷键」「重置全部」这类没实现的空壳按钮。
  */
 
+/* 「关于」**不再是一页设置**（owner 2026-11-19）：主页已经有「关于」面板，
+   两处维护同一份信息必然先对不上再打架。设置里只留真正"会改东西"的页。 */
 export type SettingsKey =
   | "general"
   | "libs"
   | "appearance"
   | "cache"
   | "shortcuts"
-  | "update"
-  | "about";
+  | "update";
 
-const NAV: { key: SettingsKey; label: string; icon: string }[] = [
-  { key: "general", label: "常用", icon: "sliders" },
-  { key: "libs", label: "素材库", icon: "folder" },
-  { key: "appearance", label: "外观", icon: "image" },
-  { key: "cache", label: "缓存与索引", icon: "database" },
-  { key: "shortcuts", label: "快捷键", icon: "keyboard" },
-  /* 「更新」放在「快捷键」和「关于」之间（FontManager 也是这个次序）：
-     它是"软件自己的事"，和外观/缓存这些"我的偏好"不是一类，
-     但也没到「关于」那种纯信息页的地步。 */
-  { key: "update", label: "更新", icon: "refresh" },
-  { key: "about", label: "关于", icon: "info" },
+/**
+ * 导航项。`label` 仍写中文 —— 它是**设置搜索的关键词**（用户用中文搜"外观"要能搜到），
+ * 而且 `label` 还会当兜底文案用（万一某个语言的 json 漏了这条）。
+ * 界面上显示的是 `tk` 翻出来的文字。
+ */
+const NAV: { key: SettingsKey; label: string; tk: TKey; icon: string }[] = [
+  { key: "general", label: "常用", tk: "nav.general", icon: "sliders" },
+  { key: "libs", label: "素材库", tk: "nav.libs", icon: "folder" },
+  { key: "appearance", label: "外观", tk: "nav.appearance", icon: "image" },
+  { key: "cache", label: "缓存与索引", tk: "nav.cache", icon: "database" },
+  { key: "shortcuts", label: "快捷键", tk: "nav.shortcuts", icon: "keyboard" },
+  { key: "update", label: "更新", tk: "nav.update", icon: "refresh" },
 ];
 
 interface RowDef {
@@ -91,6 +101,15 @@ export function Settings({
    */
   updateAvailable?: string | null;
 }) {
+  const t = useT();
+  /* 语言偏好必须订阅：`t` 是模块级稳定函数，光调 `useT()` 不会让 `groups` 的
+     useMemo 重算 —— 切了语言设置页文案会不跟着变。`localePref` 变化才是真信号。 */
+  const localePref = useLocalePref();
+  /* 开机自启的真实状态在注册表（后端），前端不知道；打开面板时问一次 */
+  const [autoStart, setAutoStart] = useState<boolean | null>(null);
+  /* 缩放实际生效倍率：选"自动"时后端会算一个值回来，界面要显示它 */
+  const [scaleNow, setScaleNow] = useState<number | null>(null);
+
   const [draft, setDraft] = useState<Prefs>(prefs);
   const [section, setSection] = useState<SettingsKey>(initialSection ?? "general");
   /* 元数据 / 引用 / 库文件：都只在面板打开时拉，避免平白跑 IO */
@@ -104,6 +123,26 @@ export function Settings({
       dead = true;
     };
   }, [open, source]);
+  /* 打开面板：问一次自启状态，并按当前偏好应用一次缩放（顺便拿到实际倍率） */
+  useEffect(() => {
+    if (!open || !source.desktop) return;
+    void source.getAutostart().then(setAutoStart).catch(() => setAutoStart(null));
+    void source.setUiScale(draft.uiScale).then(setScaleNow).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, source]);
+
+  /* 「关闭到托盘 / 启动时最小化 / 缩放」三项必须同步给后端：
+     这两件都发生在 webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs）。 */
+  useEffect(() => {
+    void source
+      .uiPrefsSet({
+        closeToTray: draft.closeToTray,
+        startMinimized: draft.startMinimized,
+        uiScale: draft.uiScale,
+      })
+      .catch(() => {});
+  }, [draft.closeToTray, draft.startMinimized, draft.uiScale, source]);
+
   const [q, setQ] = useState("");
   const [stat, setStat] = useState<CacheStat | null>(null);
   const [total, setTotal] = useState<number | null>(null);
@@ -197,7 +236,9 @@ export function Settings({
     bodyRef.current?.scrollTo({ top: 0 });
   }, [section, q]);
 
-  const groups = useMemo<{ key: SettingsKey; title: string; rows: RowDef[] }[]>(() => {
+  const groups = useMemo<
+    { key: SettingsKey; title: string; tk: TKey; rows: RowDef[] }[]
+  >(() => {
     const seg = (value: number | string, options: { v: number | string; label: string }[], on: (v: any) => void) => (
       <div className="seg">
         {options.map((o) => (
@@ -212,10 +253,132 @@ export function Settings({
       </div>
     );
 
+    /** 开关（和 seg 同一个位置定义，省得到处重复 role/aria） */
+    const sw = (on: boolean, toggle: () => void) => (
+      <button
+        className={`switch ${on ? "on" : ""}`}
+        role="switch"
+        aria-checked={on}
+        onClick={toggle}
+      >
+        <span className="switch-knob" />
+      </button>
+    );
+
     return [
+      /* ---- 语言（0.3.30，owner 2026-11-19 指定照 FontManager）----
+         九种语言 + 跟随系统；缺翻译自动回落英文（见 lib/i18n.ts）。 */
+      {
+        key: "general",
+        title: "语言",
+        tk: "lang.title",
+        rows: [
+          {
+            id: "language",
+            label: "语言",
+            hint: "立即生效；下次启动也保持",
+            kw: "语言 language locale 中文 English 繁體 日本語 Deutsch Español Français Русский Português",
+            node: (
+              <select
+                className="set-select"
+                value={localePref}
+                onChange={(e) => {
+                  const v = e.target.value as LocalePref;
+                  setLocalePref(v);
+                  patch({ locale: v });
+                }}
+                aria-label="界面语言"
+              >
+                <option value="system">跟随系统</option>
+                {LOCALES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            ),
+          },
+          {
+            /* 「没有你的语言？」那一块：翻译指南 + 申请添加语言。
+               这两个按钮真的能打开 GitHub —— 不做成不可点的装饰。 */
+            id: "language-missing",
+            label: "",
+            block: true,
+            kw: "翻译 贡献 语言 translate contribute",
+            node: (
+              <div className="set-lang-miss">
+                <div className="set-lang-miss-title">没有你的语言？</div>
+                <div className="set-lang-miss-actions">
+                  <button
+                    className="btn btn-tiny"
+                    onClick={() =>
+                      void source
+                        .openUrl("https://github.com/706972745/AssetManager#readme")
+                        .catch((e) => onToast(String(e), true))
+                    }
+                  >
+                    翻译指南
+                  </button>
+                  <button
+                    className="btn btn-tiny"
+                    onClick={() =>
+                      void source
+                        .openUrl("https://github.com/706972745/AssetManager/issues/new")
+                        .catch((e) => onToast(String(e), true))
+                    }
+                  >
+                    申请添加语言
+                  </button>
+                </div>
+              </div>
+            ),
+          },
+        ],
+      },
+      /* ---- 系统：关闭到托盘 / 开机自启 / 启动时最小化 ---- */
+      {
+        key: "general",
+        title: "系统",
+        tk: "sys.title",
+        rows: [
+          {
+            id: "closeToTray",
+            label: "关闭到托盘",
+            hint: "点关闭时收进托盘，程序继续在后台跑；点托盘图标就回来",
+            kw: "托盘 tray 最小化 关闭 后台",
+            node: sw(draft.closeToTray, () => patch({ closeToTray: !draft.closeToTray })),
+          },
+          {
+            id: "autostart",
+            label: "开机自动启动",
+            hint: "登录 Windows 后自动打开（可在任务管理器「启动」里关掉）",
+            kw: "开机 自启 启动 autostart 登录",
+            node: sw(!!autoStart, () => {
+              const next = !autoStart;
+              /* 乐观更新：注册表写入通常几毫秒，但失败要退回去并说清楚 */
+              setAutoStart(next);
+              void source
+                .setAutostart(next)
+                .then(() => onToast(next ? "已开启开机自动启动" : "已关闭开机自动启动"))
+                .catch((e) => {
+                  setAutoStart(!next);
+                  onToast(String(e), true);
+                });
+            }),
+          },
+          {
+            id: "startMinimized",
+            label: "启动时最小化",
+            hint: "启动后直接待在托盘里，不弹窗口",
+            kw: "启动 最小化 托盘 不弹窗",
+            node: sw(draft.startMinimized, () => patch({ startMinimized: !draft.startMinimized })),
+          },
+        ],
+      },
       {
         key: "general",
         title: "常用",
+        tk: "nav.general",
         rows: [
           {
             id: "size",
@@ -246,6 +409,7 @@ export function Settings({
            来设置里找「库地址」，找不到就会把「数据文件夹」当素材库设。 */
         key: "libs",
         title: "素材库",
+        tk: "nav.libs",
         rows: [
           {
             id: "library",
@@ -266,6 +430,7 @@ export function Settings({
       {
         key: "appearance",
         title: "外观",
+        tk: "nav.appearance",
         rows: [
           {
             id: "theme",
@@ -331,11 +496,45 @@ export function Settings({
               </button>
             ),
           },
+          /* ---- 界面缩放（0.3.30，图2 那一排）----
+             走 `set_zoom`（浏览器缩放级别），不是 CSS `zoom`：
+             这个软件的拖拽 / 框选 / 灯箱全都在算 getBoundingClientRect，
+             CSS zoom 会把这些值一起放大，坐标换算全乱。 */
+          {
+            id: "uiscale",
+            label: "",
+            block: true,
+            kw: "缩放 界面 zoom scale 显示 大小 100% 125% 放大",
+            node: (
+              <div className="set-zoom">
+                <div className="set-zoom-head">
+                  <span className="set-zoom-title">界面缩放</span>
+                  <span className="set-zoom-hint">
+                    {`已根据你的屏幕调整——当前为 ${Math.round((scaleNow ?? 1) * 100)}%`}
+                  </span>
+                </div>
+                {seg(draft.uiScale === null ? "auto" : String(draft.uiScale), [
+                  { v: "auto", label: "自动" },
+                  { v: "0.8", label: "80%" },
+                  { v: "0.9", label: "90%" },
+                  { v: "1", label: "100%" },
+                  { v: "1.1", label: "110%" },
+                  { v: "1.25", label: "125%" },
+                ], (v) => {
+                  const next = v === "auto" ? null : Number(v);
+                  patch({ uiScale: next });
+                  /* 立刻应用并把后端算出的实际倍率显示出来（选"自动"时才知道是多少） */
+                  void source.setUiScale(next).then(setScaleNow).catch(() => {});
+                })}
+              </div>
+            ),
+          },
         ],
       },
       {
         key: "cache",
         title: "缓存与索引",
+        tk: "nav.cache",
         rows: [
           {
             id: "cache-size",
@@ -624,6 +823,7 @@ export function Settings({
       {
         key: "shortcuts",
         title: "快捷键",
+        tk: "nav.shortcuts",
         rows: [
           {
             id: "hk-snip",
@@ -678,6 +878,7 @@ export function Settings({
            关掉它连版本号都不查（不是"查了不提醒"），这一点必须写在 hint 里。 */
         key: "update",
         title: "更新",
+        tk: "nav.update",
         rows: [
           {
             id: "update-auto",
@@ -705,79 +906,8 @@ export function Settings({
           },
         ],
       },
-      {
-        key: "about",
-        title: "关于",
-        rows: [
-          {
-            id: "ver",
-            label: "版本",
-            kw: "版本 version 号",
-            node: <span className="set-value mono">{__APP_VERSION__} 正式版</span>,
-          },
-          {
-            id: "what",
-            label: "定位",
-            hint: "素材管理器，主场是百万级库的流畅度。索引式库：不搬动、不复制你的原文件。",
-            kw: "说明 介绍 定位",
-            node: <span className="set-value">索引式素材库</span>,
-          },
-          {
-            id: "rule",
-            label: "一条铁律",
-            hint: "界面里的缩略图只用于显示；重命名 / 删除 / 拖出，作用对象永远是磁盘上的原文件。",
-            kw: "铁律 原文件 缩略图",
-            node: <span className="set-value">缩略图只是显示层</span>,
-          },
-          /* 下面三行是 0.1.35 补的：以前"关于"只有三行文字，用户想反馈问题
-             还得自己去搜仓库地址 —— 那就等于没有反馈渠道。 */
-          {
-            id: "home",
-            label: "项目主页",
-            hint: "github.com/706972745/AssetManager",
-            kw: "主页 项目 仓库 github 源码 homepage repo",
-            node: (
-              <button
-                className="btn btn-tiny"
-                onClick={() =>
-                  void source
-                    .openUrl("https://github.com/706972745/AssetManager")
-                    .catch((e) => onToast(String(e), true))
-                }
-              >
-                打开
-              </button>
-            ),
-          },
-          {
-            id: "issues",
-            label: "问题反馈",
-            hint: "遇到 bug、想加功能，都往 issue 里写；带上截图和版本号最好定位。",
-            kw: "反馈 issue 问题 bug 建议 需求 报错",
-            node: (
-              <button
-                className="btn btn-tiny"
-                onClick={() =>
-                  void source
-                    .openUrl("https://github.com/706972745/AssetManager/issues")
-                    .catch((e) => onToast(String(e), true))
-                }
-              >
-                打开
-              </button>
-            ),
-          },
-          {
-            id: "license",
-            label: "许可证",
-            hint: "开源许可，源码在项目主页",
-            kw: "许可 协议 license gpl 开源 版权",
-            node: <span className="set-value">GPL-3.0</span>,
-          },
-        ],
-      },
     ];
-  }, [draft, stat, total, busy]);
+  }, [draft, stat, total, busy, t, localePref, autoStart, scaleNow, source, onToast]);
 
   const needle = q.trim().toLowerCase();
   const shown = needle
@@ -813,8 +943,8 @@ export function Settings({
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="搜索设置…"
-              aria-label="搜索设置"
+              placeholder={t("common.searchSettings")}
+              aria-label={t("common.searchSettings")}
             />
             {q && (
               <button className="set-search-clear" onClick={() => setQ("")} title="清空">
@@ -835,7 +965,7 @@ export function Settings({
                 <span className="set-nav-icon">
                   <Icon name={n.icon} size={14} stroke={1.5} />
                 </span>
-                <span className="set-nav-label">{n.label}</span>
+                <span className="set-nav-label">{t(n.tk)}</span>
                 {/* 有小圆点 = 启动时静默查到了新版（0.1.35）。role="img" 是为了让
                     aria-label 真被读屏念出来 —— 光秃秃的 <span> 里的 aria-label 会被忽略。 */}
                 {n.key === "update" && updateAvailable ? (
@@ -853,7 +983,7 @@ export function Settings({
 
         <section className="set-main">
           <header className="set-head">
-            <h2 className="set-head-title">{needle ? `搜索：${q.trim()}` : current.label}</h2>
+            <h2 className="set-head-title">{needle ? `搜索：${q.trim()}` : t(current.tk)}</h2>
             <button className="set-close" onClick={onClose} title="关闭（Esc）">
               <Icon name="close" size={15} stroke={1.5} />
             </button>
@@ -866,7 +996,7 @@ export function Settings({
               shown.map((g) => (
                 <div className="set-card" key={g.key}>
                   <div className="set-card-head">
-                    {g.title}
+                    {t(g.tk)}
                     <span className="set-card-count">{g.rows.length}</span>
                   </div>
                   {g.rows.map((r) =>
@@ -892,7 +1022,7 @@ export function Settings({
           <footer className="set-foot">
             <span className="set-dirty">所有改动即时生效，不需要点保存</span>
             <button className="set-btn set-btn-accent" onClick={onClose}>
-              完成
+              {t("common.done")}
             </button>
           </footer>
         </section>

@@ -153,6 +153,22 @@ export default function App() {
      tick 还会按旧值继续打接口。走 ref 读最新的。 */
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
+
+  /* 启动时把「界面缩放 / 关闭到托盘 / 启动时最小化」推给后端一次（0.3.30）。
+     为什么需要这一推：后端在 setup 里读的是 `ui-prefs.json`，而用户偏好的
+     真正来源是 localStorage —— 重装、换机器、或 json 被清掉时两边会不一致，
+     以 localStorage 为准再推一次最省事（推完 json 也就补上了）。 */
+  useEffect(() => {
+    void source
+      .uiPrefsSet({
+        closeToTray: prefs.closeToTray,
+        startMinimized: prefs.startMinimized,
+        uiScale: prefs.uiScale,
+      })
+      .catch(() => {});
+    void source.setUiScale(prefs.uiScale).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   /** 启动时静默查到的可更新版本号（null = 没有新版 / 没查）；只用于设置里的一个小圆点 */
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>(prefs.view);
@@ -2460,6 +2476,15 @@ export default function App() {
     return [...list].sort(cmp[sort] ?? cmp.mtime_desc);
   }, [trash, text, trashFormat, sort]);
 
+  /* 回收站详情**常驻**（owner 2026-11-19）：有条目时右侧一直在，没选中就默认第一条。
+     为什么要默认选：不选的话右侧是块空面板，用户得先点一下才知道里面有什么；
+     而"回收站里有几张图"这件事本身就是进这个页面的目的。 */
+  useEffect(() => {
+    if (page !== "trash") return;
+    if (trashSel && trashShown.some((x) => x.id === trashSel)) return;
+    setTrashSel(trashShown[0]?.id ?? null);
+  }, [page, trashShown, trashSel]);
+
   /* 开大图：网格双击、详情里的「看图」都走这一处 */
   const openLightbox = (a: Asset) => {    const i = items.findIndex((x) => x.id === a.id);
     setLightbox(i >= 0 ? i : 0);
@@ -3485,6 +3510,17 @@ export default function App() {
                 >
                   加入快照
                 </button>
+                {/* 批量重命名（0.3.30）：只开**工具面板的 rename 页**并把当前选中带过去 ——
+                    重命名规则（前缀/序号/查找替换/大小写）和预览确认都在那边，
+                    这里再复制一套表单必然两边逻辑走偏。 */}
+                <button
+                  className="btn btn-tiny"
+                  disabled={busy}
+                  onClick={() => setTools({ tab: "rename" })}
+                  title="按规则批量重命名选中的素材（先预览，确认后才动磁盘）"
+                >
+                  批量重命名
+                </button>
                 <button
                   className="btn btn-tiny"
                   disabled={busy || !dir}
@@ -3554,19 +3590,19 @@ export default function App() {
             回收站里选中一条时换成回收站自己的详情（0.3.29）—— 复用 `Detail` 会造出
             一堆假 Asset 字段（id / rating / 标签），不如给它一块干净的骨架。 */}
         {page === "trash" ? (
+          /* 有条目就一直显示；一条都没有时整块不渲染（空面板白占 348px） */
           (() => {
-            const t = trashSel ? trash.find((x) => x.id === trashSel) : null;
+            const t = (trashSel ? trash.find((x) => x.id === trashSel) : null) ?? trashShown[0] ?? null;
             return t ? (
               <TrashDetail
                 entry={t}
                 src={trashThumbs[t.id]}
                 onRestore={(ids, to) => void restoreTrash(ids, to)}
                 onPurge={(ids) => void purgeTrash(ids)}
-                onClose={() => setTrashSel(null)}
               />
             ) : null;
           })()
-        ) : (
+        ) : page === "about" ? null : (
         <Detail
           asset={selected}
           source={source}

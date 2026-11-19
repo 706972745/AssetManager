@@ -3456,6 +3456,167 @@ fn data_dir_of(app: &AppHandle) -> PathBuf {
     g.data_dir.clone()
 }
 
+/* ---------------- 界面偏好：缩放 / 关闭到托盘 / 启动时最小化（0.3.30） ----------------
+   这几个键为什么要在后端单独存一份：它们必须**在窗口显示之前**就被后端读到
+   （「启动时最小化」要决定建不建可见窗口，「关闭到托盘」要在 CloseRequested 里拦），
+   而前端 prefs 存在 webview 的 localStorage 里 —— 那时候 webview 还没跑起来。
+   所以这里存一份"后端看得见的副本"，前端每次改动都同步过来（`am_ui_prefs_set`）。
+   其余偏好仍只在前端，不重复存（一份数据一个地方，避免两边打架）。 */
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct UiPrefs {
+    /// 关闭窗口 = 收进托盘（不退出程序）
+    #[serde(default, rename = "closeToTray")]
+    close_to_tray: bool,
+    /// 启动后直接收进托盘（不弹主窗口）
+    #[serde(default, rename = "startMinimized")]
+    start_minimized: bool,
+    /// 界面缩放：`None` = 自动（按工作区尺寸挑一档）
+    #[serde(default, rename = "uiScale")]
+    ui_scale: Option<f64>,
+}
+
+fn ui_prefs_path(app: &AppHandle) -> PathBuf {
+    data_dir_of(app).join("ui-prefs.json")
+}
+
+fn read_ui_prefs(app: &AppHandle) -> UiPrefs {
+    std::fs::read_to_string(ui_prefs_path(app))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn am_ui_prefs_get(app: AppHandle) -> UiPrefs {
+    read_ui_prefs(&app)
+}
+
+#[tauri::command]
+fn am_ui_prefs_set(app: AppHandle, prefs: UiPrefs) -> Result<(), String> {
+    let p = ui_prefs_path(&app);
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let body = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
+    std::fs::write(&p, body).map_err(|e| format!("写界面偏好失败：{e}"))
+}
+
+/* 界面缩放的自动档：工作区 / 设计尺寸，取不超过它的最大档。
+   和 FontManager 同一套档位（0.8 / 0.9 / 1.0），再往上 1.1 / 1.25 由用户手选 ——
+   自动只是"这台机器不挤"，不代表用户不想放大。 */
+const DESIGN_W: f64 = 1440.0;
+const DESIGN_H: f64 = 900.0;
+const SCALE_STEPS: [f64; 3] = [0.8, 0.9, 1.0];
+
+fn auto_ui_scale(avail_w: f64, avail_h: f64) -> f64 {
+    let raw = (avail_w / DESIGN_W).min(avail_h / DESIGN_H);
+    let mut chosen = SCALE_STEPS[0];
+    for step in SCALE_STEPS {
+        if step <= raw + 0.0001 {
+            chosen = step;
+        }
+    }
+    chosen
+}
+
+/// 设界面缩放。`scale = None` → 按当前显示器算自动档，并把**算出来的值**回给前端
+/// （前端要显示"当前 100%"这种文案，不能自己再算一遍，否则和后端不一致）。
+#[tauri::command]
+fn am_set_ui_scale(window: tauri::WebviewWindow, scale: Option<f64>) -> Result<f64, String> {
+    let resolved = match scale {
+        Some(s) => s.clamp(0.5, 2.0),
+        None => {
+            let m = window
+                .current_monitor()
+                .map_err(|e| e.to_string())?
+                .ok_or("拿不到显示器信息")?;
+            let dpi = m.scale_factor().max(0.1);
+            let a = m.work_area();
+            auto_ui_scale(a.size.width as f64 / dpi, a.size.height as f64 / dpi)
+        }
+    };
+    window.set_zoom(resolved).map_err(|e| e.to_string())?;
+    Ok(resolved)
+}
+
+/* ---------------- 托盘（0.3.30） ---------------- */
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// 建托盘。失败只记日志、不影响启动 —— 托盘是个便利设施，
+/// 它挂了也不该让软件打不开（「关闭到托盘」那边会检查 `tray_ok`）。
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let show = MenuItem::with_id(app, "show", "打开 AssetManager", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::InvalidIcon(std::io::Error::other("没有内置窗口图标")))?;
+
+    let builder = TrayIconBuilder::with_id("am-tray")
+        .icon(icon)
+        .tooltip("AssetManager")
+        .menu(&menu);
+
+    /* Windows 上左键直接开主窗口（菜单只走右键），符合资源管理器托盘图标的习惯；
+       其他平台保留左键弹菜单。 */
+    let builder = if cfg!(target_os = "windows") {
+        builder.show_menu_on_left_click(false)
+    } else {
+        builder
+    };
+
+    builder
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/* ---------------- 开机自动启动（0.3.30，官方插件写 HKCU Run） ---------------- */
+
+#[tauri::command]
+fn am_set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn am_get_autostart(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
 /// 把一个刚写出来的 PNG 收进**软件回收站**，返回它现在的位置。
 ///
 /// 为什么默认进回收站（owner 2026-11-19）：贴图是"临时摆到屏幕上"的动作，
@@ -5648,6 +5809,12 @@ fn main() {
                 })
                 .build(),
         )
+        /* 开机自启（写 HKCU\...\Run）。参数为空：不需要额外的启动参数，
+           正常启动就是正常启动 —— 要不要最小化由 `ui-prefs.json` 决定，不靠命令行。 */
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None::<Vec<&str>>,
+        ))
         .setup(|app| {
             /* 数据目录可配置（照 FontManager 的「字体库文件夹」）：
                `%LOCALAPPDATA%\AssetManager\data-root.json` 记着自定义位置；
@@ -5683,6 +5850,46 @@ fn main() {
                 }
             });
             app.manage(AppState(Mutex::new(st)));
+
+            /* ---- 托盘 / 关闭到托盘 / 启动时最小化 / 界面缩放（0.3.30） ----
+               这一块必须紧跟 `manage(AppState)`：`read_ui_prefs` 要靠 AppState 里的 data_dir。 */
+            {
+                let h = app.handle().clone();
+                let ui = read_ui_prefs(&h);
+                let tray_ok = match build_tray(&h) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log_runtime(&default_dir, &format!("tray build FAIL: {e}"));
+                        false
+                    }
+                };
+                /* 启动时缩放：`uiScale = None` 走自动档。放在窗口显示之前，
+                   否则用户会看到"先是 100%，随后跳成 80%"那一下。 */
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = am_set_ui_scale(w.clone(), ui.ui_scale);
+                }
+                /* 启动时最小化：直接不显示主窗口（托盘里点一下再出来） */
+                if ui.start_minimized && tray_ok {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                }
+                /* 关闭窗口 → 收进托盘。`tray_ok` 是前提：托盘没建成就藏起来，
+                   用户既看不到窗口也找不到托盘图标，只能去任务管理器杀进程 —— 比"关不掉"更糟。 */
+                if let Some(w) = app.get_webview_window("main") {
+                    let h2 = h.clone();
+                    w.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            if tray_ok && read_ui_prefs(&h2).close_to_tray {
+                                api.prevent_close();
+                                if let Some(w) = h2.get_webview_window("main") {
+                                    let _ = w.hide();
+                                }
+                            }
+                        }
+                    });
+                }
+            }
 
             /* 内置截图库：**启动就登记**。owner 2026-11-17 的原话是「要随时可以显示的」——
                它不能等用户截过一张图才出现在侧栏。放后台线程：目录里截图攒到几千张时
@@ -5942,6 +6149,12 @@ fn main() {
             am_open_recycle,
             am_trash_list,
             am_trash_media,
+            /* 界面偏好 / 托盘 / 自启 / 缩放（0.3.30） */
+            am_ui_prefs_get,
+            am_ui_prefs_set,
+            am_set_ui_scale,
+            am_set_autostart,
+            am_get_autostart,
             am_trash_restore,
             am_trash_purge,
             am_trash_empty,

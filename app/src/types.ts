@@ -633,6 +633,15 @@ export interface Source {
   /** 回收站条目的预览地址（顺序与入参一致；`null` = 文件已经不在了）。
    *  只认账本里的 id —— 回收站里的文件已经不是素材，`thumb://` 取不到。 */
   trashMedia(ids: string[]): Promise<(string | null)[]>;
+  /* ---- 界面偏好 / 缩放 / 自启（0.3.30） ----
+     缩放和托盘这几项必须让**后端也存一份**：启动时最小化、关闭拦截都发生在
+     webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs 注释）。 */
+  /** 把「关闭到托盘 / 启动时最小化 / 缩放」同步给后端 */
+  uiPrefsSet(p: { closeToTray: boolean; startMinimized: boolean; uiScale: number | null }): Promise<void>;
+  /** 设缩放；传 null = 自动。返回**实际生效**的倍率（前端拿它显示"当前 100%"） */
+  setUiScale(scale: number | null): Promise<number>;
+  setAutostart(on: boolean): Promise<void>;
+  getAutostart(): Promise<boolean>;
   /** 还原（`to` 给了就还原到那个目录，不给回原位置） */
   trashRestore(ids: string[], to?: string): Promise<number>;
   trashPurge(ids: string[]): Promise<number>;
@@ -689,6 +698,21 @@ export interface Prefs {
    * 多开几个实例 + 反复点「立即检查」很容易被限流。
    */
   updateLastCheck: number;
+  /**
+   * 界面缩放（0.3.30）：`null` = 自动（按显示器工作区挑档）。
+   * 存的是真实倍率（0.8 / 0.9 / 1 / 1.1 / 1.25），不是档位索引 ——
+   * 后端 `set_zoom` 直接吃这个值，中间少一层映射就少一处对不上。
+   */
+  uiScale: number | null;
+  /** 关闭窗口 = 收进托盘（不退出） */
+  closeToTray: boolean;
+  /** 启动后直接收进托盘 */
+  startMinimized: boolean;
+  /**
+   * 界面语言：`system` = 跟随系统（默认）；其余是具体语言代码。
+   * 类型放宽成 string 是为了**老数据/新语言**都不炸：真正的白名单校验在 i18n 里。
+   */
+  locale: string;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -703,6 +727,12 @@ export const DEFAULT_PREFS: Prefs = {
   updateCheck: true,
   updateSkipped: "",
   updateLastCheck: 0,
+  uiScale: null,
+  /* 「关闭到托盘」「启动时最小化」默认都**关**：托盘是新增能力，
+     默认开启会让人以为"关不掉软件"（FontManager 也是默认关）。 */
+  closeToTray: false,
+  startMinimized: false,
+  locale: "system",
 };
 
 /* ---------------- 检查更新（0.1.35） ---------------- */
@@ -769,6 +799,15 @@ export function loadPrefs(): Prefs {
         typeof p.updateLastCheck === "number" && Number.isFinite(p.updateLastCheck) && p.updateLastCheck >= 0
           ? p.updateLastCheck
           : 0,
+      /* 缩放只接受合理区间：存坏了（0 / 负数 / 字符串）就当自动，
+         而不是把界面缩成看不见的一团 */
+      uiScale:
+        typeof p.uiScale === "number" && p.uiScale >= 0.5 && p.uiScale <= 2
+          ? p.uiScale
+          : null,
+      closeToTray: p.closeToTray === true,
+      startMinimized: p.startMinimized === true,
+      locale: typeof p.locale === "string" && p.locale ? p.locale : "system",
     };
   } catch {
     return { ...DEFAULT_PREFS };

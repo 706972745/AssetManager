@@ -139,18 +139,21 @@ export function TrashView({
  * 回收站里的条目只有「名字 / 大小 / 删除时间 / 原位置」四个事实 —— 硬塞进 Asset
  * 只能编造 id、rating 这些假字段，下一个人读到只会被骗。
  */
+/**
+ * 回收站详情。**没有关闭按钮**（owner 2026-11-19）：
+ * 它是常驻面板 —— 回收站里有条目时一直在右侧，选中哪条显示哪条；
+ * 既然"关不掉也不该关"，右上角那个 × 只会让人点了之后困惑"面板去哪了"。
+ */
 export function TrashDetail({
   entry,
   src,
   onRestore,
   onPurge,
-  onClose,
 }: {
   entry: TrashEntry;
   src?: string;
   onRestore: (ids: string[], to?: string) => void;
   onPurge: (ids: string[]) => void;
-  onClose: () => void;
 }) {
   return (
     <aside className="detail trash-detail" style={{ width: 348 }} aria-label="回收站详情">
@@ -160,14 +163,6 @@ export function TrashDetail({
           <span className="detail-title" title={entry.name}>
             {entry.name}
           </span>
-          <button
-            className="detail-close"
-            aria-label="关闭详情"
-            title="关闭详情（Esc）"
-            onClick={onClose}
-          >
-            <Icon name="close" size={15} stroke={1.5} />
-          </button>
         </header>
 
         <div className="detail-body">

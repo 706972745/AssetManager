@@ -141,6 +141,10 @@ export const tauriSource: Source = {
   /* 应用内回收站（0.1.6） */
   trashList: () => invoke!<TrashEntry[]>("am_trash_list"),
   trashMedia: (ids) => invoke!<(string | null)[]>("am_trash_media", { ids }),
+  uiPrefsSet: (prefs) => invoke!<void>("am_ui_prefs_set", { prefs }),
+  setUiScale: (scale) => invoke!<number>("am_set_ui_scale", { scale }),
+  setAutostart: (enabled) => invoke!<void>("am_set_autostart", { enabled }),
+  getAutostart: () => invoke!<boolean>("am_get_autostart"),
   trashRestore: (ids: string[], to?: string) =>
     invoke!<number>("am_trash_restore", { ids, to: to ?? null }),
   trashPurge: (ids: string[]) => invoke!<number>("am_trash_purge", { ids }),

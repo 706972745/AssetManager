@@ -11,6 +11,8 @@ import { Board } from "./components/Board";
 import { installMomentumScroll } from "./lib/momentumScroll";
 import { installScrollHot } from "./lib/scrollHot";
 import { installPerfProbe } from "./lib/perf";
+import { hydrateLocalePref, isLocalePref } from "./lib/i18n";
+import { loadPrefs } from "./types";
 
 /* 同一个前端包跑三种窗口：主窗（App）、贴图（Peek）、截图覆盖层（Snip）。
    用**初始化脚本注入的全局变量**区分（Rust 侧 `initialization_script` 写 __AM_PEEK__）：
@@ -18,6 +20,14 @@ import { installPerfProbe } from "./lib/perf";
 const isPeek = !!(window as unknown as { __AM_PEEK__?: unknown }).__AM_PEEK__;
 const isSnip = !!(window as unknown as { __AM_SNIP__?: unknown }).__AM_SNIP__;
 const isBoard = !!(window as unknown as { __AM_BOARD__?: unknown }).__AM_BOARD__;
+
+/* 语言必须在**第一次渲染之前**定下来（0.3.30）：放进 App 的 effect 里做，
+   首帧会先按浏览器语言画一遍、再跳成用户选的语言，屏幕上闪一下。
+   偏好还是以 prefs 为准（设置页写的是它），i18n 自己那份 localStorage 只是缓存。 */
+if (!isPeek && !isSnip && !isBoard) {
+  const saved = loadPrefs().locale;
+  if (isLocalePref(saved)) hydrateLocalePref(saved);
+}
 
 /* 惯性滚动（照 FontManager）：Windows 上的 WebView2 滚轮没有惯性，松手就停。
    这里统一接管成「继续滑行 + 指数减速」。自带边界（到底交还原生、输入框 /
