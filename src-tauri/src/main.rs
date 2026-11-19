@@ -1105,9 +1105,18 @@ fn am_rename(path: String, name: String, state: State<AppState>) -> Result<Strin
 
 #[tauri::command]
 fn am_mkdir(parent: String, name: String, state: State<AppState>) -> Result<String, String> {
-    let app = lock(&state);
-    let ops = fsops::FsOps::new(app.conn_for_path(&parent)?);
-    let out = ops.mkdir(std::path::Path::new(&parent), &name)?;
+    let mut app = lock(&state);
+    let out = {
+        let ops = fsops::FsOps::new(app.conn_for_path(&parent)?);
+        ops.mkdir(std::path::Path::new(&parent), &name)?
+    };
+    /* **必须把新目录写进索引**：以前只建磁盘、不写库，于是紧接着的
+       `am_children(parent)` 查不到它 —— 侧栏里"新建了却看不见"，
+       要等下一次全库扫描才冒出来（owner 2026-11-19 报的就是这个）。
+       重扫父目录一层就够（几十毫秒，只读元数据）。 */
+    let mut dirty: HashSet<PathBuf> = HashSet::new();
+    dirty.insert(PathBuf::from(&parent));
+    refresh_dirs(&mut app, &dirty);
     Ok(out.to_string_lossy().to_string())
 }
 

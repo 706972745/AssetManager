@@ -7034,3 +7034,41 @@ body.am-dragging {
 body.am-dragging * {
   cursor: grabbing !important;
 }
+
+/* ---- 瀑布流：能就地滚动的长图 --------------------------------------------
+   布局把宽高比 clamp 在 1:5，再长的图会被 cover 截掉一截。这种瓦片悬停时
+   用滚轮可以上下滚图（Views 里改 object-position），这里给一条细指示条：
+   不露出来的话，用户不知道"这张能滚"，只会以为图被裁了。 */
+.tile-scrollbar {
+  position: absolute;
+  right: 4px;
+  top: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+  z-index: 4;
+}
+.tile:hover .tile-scrollbar {
+  opacity: 0.85;
+}
+
+/* ---- 目录树：可折叠子树的高度过渡 -----------------------------------------
+   以前是 `isOpen && list.map()` 直接挂载/卸载 —— 高度当帧跳变，视觉上就是"一顿"。
+   现在容器常驻，用 grid-template-rows 0fr → 1fr 过渡（Chrome 107+ 支持插值），
+   收起时 `overflow: hidden` 把内容裁掉，不占高度也不影响命中测试。 */
+.tree-kids {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 140ms ease;
+}
+.tree-kids.open {
+  grid-template-rows: 1fr;
+}
+.tree-kids-in {
+  min-height: 0;
+  overflow: hidden;
+}

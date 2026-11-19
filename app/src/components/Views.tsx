@@ -428,6 +428,8 @@ export function AssetView({
               onHintEnter={showHint}
               onHintMove={moveHint}
               onHintLeave={hideHint}
+              /* 瀑布流里超高图可以被"就地滚动"看到全貌（网格是正方形格子，没这个必要） */
+              scrollInside={view === "waterfall"}
             />
           ))}
           {marqueeBox && marqueeBox.w > 2 && (
@@ -514,6 +516,7 @@ const Tile = memo(function Tile({
   onHintEnter,
   onHintMove,
   onHintLeave,
+  scrollInside,
 }: {
   rect: Rect;
   selected: boolean;
@@ -526,6 +529,8 @@ const Tile = memo(function Tile({
   onHintEnter: (a: Asset, x: number, y: number) => void;
   onHintMove: (x: number, y: number) => void;
   onHintLeave: () => void;
+  /** 允许"悬停后用滚轮滚动这张图"（瀑布流专用） */
+  scrollInside?: boolean;
 }) {
   /* `loadedSrc` 只记录「已经画出来的那张」，和 src 不一致时说明在换图 */
   const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
@@ -533,8 +538,58 @@ const Tile = memo(function Tile({
   const ready = loadedSrc === src;
   /* 这类文件没有缩略图可出（json / pdf / 音频 / 模型…），直接画"代替缩略图"的卡片 */
   const noPreview = !PREVIEWABLE_KINDS.has(a.kind);
+
+  /* ---- 瀑布流里"超高图就地滚动"（owner 2026-11-19）-------------------------
+     布局把宽高比 clamp 在 0.2~5（`aspectOf`），1:8 的长图只按 1:5 出格子，
+     `object-fit: cover` 于是把上下截掉 —— 用户得开灯箱才看得到全貌。
+     这里让它在**悬停时用滚轮滚**：改 `object-position` 的纵向百分比（cover 下等价于
+     在溢出的那一段里上下移动），到顶/到底就把滚轮还给列表。
+     为什么手动 addEventListener：React 的 onWheel 挂在 root 上是 passive，preventDefault 无效。 */
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const barRef = useRef<HTMLSpanElement | null>(null);
+  const scrollPos = useRef(0);
+
+  const iw = a.width ?? 0;
+  const ih = a.height ?? 0;
+  const imgAspect = iw > 0 && ih > 0 ? iw / ih : rect.w / Math.max(1, rect.h);
+  /* cover 下图片的实际显示高度（宽铺满 → 高按比例） */
+  const shownH = rect.w / Math.max(0.01, imgAspect);
+  const overflow = Math.max(0, shownH - rect.h);
+  const scrollable = !!scrollInside && !noPreview && overflow > 6;
+
+  useEffect(() => {
+    const el = rootRef.current;
+    const img = imgRef.current;
+    const bar = barRef.current;
+    if (!el || !img || !scrollable) return;
+
+    scrollPos.current = 0;
+    img.style.objectPosition = "50% 0%";
+    const track = rect.h;
+    const barH = Math.max(20, (track * rect.h) / shownH);
+    if (bar) {
+      bar.style.height = `${barH}px`;
+      bar.style.transform = "translateY(0px)";
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      const cur = scrollPos.current;
+      const next = Math.min(overflow, Math.max(0, cur + e.deltaY));
+      /* 到顶 / 到底就不拦：再滚一下交给列表（否则用户想滚列表时被这张图吃掉一次） */
+      if (next === cur) return;
+      e.preventDefault();
+      scrollPos.current = next;
+      img.style.objectPosition = `50% ${(next / overflow) * 100}%`;
+      if (bar) bar.style.transform = `translateY(${(next / overflow) * (track - barH)}px)`;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [scrollable, overflow, shownH, rect.h]);
+
   return (
     <div
+      ref={rootRef}
       className={`tile ${selected ? "sel" : ""} ${loadedSrc ? "loaded" : ""}`}
       data-asset-id={a.id}
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h, transform: "translateZ(0)" }}
@@ -565,6 +620,7 @@ const Tile = memo(function Tile({
           )}
           {!failed && (
             <img
+              ref={imgRef}
               className={`tile-img ${ready ? "in" : "out"}`}
               src={src}
               alt=""
@@ -577,6 +633,8 @@ const Tile = memo(function Tile({
               }}
             />
           )}
+          {/* 能滚的长图在悬停时露一条细滚动条：不然用户不知道"这张能滚" */}
+          {scrollable && <span className="tile-scrollbar" ref={barRef} aria-hidden="true" />}
           {!loadedSrc && !failed && <div className="tile-skel" />}
           {failed && (
             <div className="tile-fail">

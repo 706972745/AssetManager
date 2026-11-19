@@ -786,6 +786,33 @@ mod tests {
         assert!(explain_io(&e, "改名失败").contains("权限"));
     }
 
+    /// 新建文件夹：**同名绝不覆盖**，自动加 `(2)`；目录要真的建在磁盘上。
+    /// （owner 2026-11-19 报「在软件里新建的文件夹看不到」—— 那条真因是 `am_mkdir`
+    ///  只建磁盘不写索引，这里先把"建出来的是什么"钉住。）
+    #[test]
+    fn mkdir_auto_renames_instead_of_overwriting() {
+        let base = std::env::temp_dir().join(format!("am-mkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("已有")).unwrap();
+
+        let conn = crate::db::open(&base.join("t.db")).unwrap();
+        let ops = FsOps::new(&conn);
+
+        let a = ops.mkdir(&base, "新文件夹").unwrap();
+        assert_eq!(a.file_name().unwrap().to_string_lossy(), "新文件夹");
+        assert!(a.is_dir(), "要真的建在磁盘上");
+
+        let b = ops.mkdir(&base, "新文件夹").unwrap();
+        assert_eq!(b.file_name().unwrap().to_string_lossy(), "新文件夹 (2)");
+        assert_ne!(a, b);
+
+        // 磁盘上已经有同名目录时也不许覆盖
+        let c = ops.mkdir(&base, "已有").unwrap();
+        assert_eq!(c.file_name().unwrap().to_string_lossy(), "已有 (2)");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 同名三选的真实验证：Skip 不动、KeepBoth 改名进去、plan 能提前报冲突。
     #[test]
     fn move_policies() {

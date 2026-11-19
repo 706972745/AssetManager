@@ -509,7 +509,9 @@ export function Tree({
       <div key={n.id}>
         {rowSelf(n, depth)}
         {createRow(n.id, depth + 1)}
-        {isOpen && list?.map((c) => row(c, depth + 1))}
+        <div className={`tree-kids ${isOpen ? "open" : ""}`}>
+          <div className="tree-kids-in">{list?.map((c) => row(c, depth + 1))}</div>
+        </div>
       </div>
     );
   };
@@ -525,15 +527,19 @@ export function Tree({
     return (
       <motion.div
         key={r.path}
-        layout
+        /* `layout="position"` 而不是 `layout`：切库时只做**位移**动画（需求就是"挪到最上面"），
+           不参与尺寸动画 —— 展开/收起子树时高度变化不再触发 FLIP 测量与缩放，
+           那正是"展开的时候一顿一顿"的来源（owner 2026-11-19）。 */
+        layout="position"
         transition={LIB_SPRING}
         className="lib-block"
-        /* 子树高度变化（展开/收起）时不缩放文字，只做位移 */
         style={{ position: "relative" }}
       >
         {isActive ? rowSelf(r, 0) : libRow(r)}
         {createRow(r.id, 1)}
-        {isActive && open.has(r.id) && kids.get(r.id)?.map((c) => row(c, 1))}
+        <div className={`tree-kids ${isActive && open.has(r.id) ? "open" : ""}`}>
+          <div className="tree-kids-in">{kids.get(r.id)?.map((c) => row(c, 1))}</div>
+        </div>
       </motion.div>
     );
   };
