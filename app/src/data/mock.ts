@@ -291,6 +291,9 @@ export const mockSource: Source = {
   async openRecycle() {
     throw new Error("浏览器预览模式不支持打开回收站");
   },
+  async trashMedia() {
+    return [];
+  },
   async trashList() {
     return [];
   },

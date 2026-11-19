@@ -4276,11 +4276,12 @@ body.peek-body #root {
   display: block;
   width: 100%;
   height: 100%;
-  /* **fill 而不是 contain**：窗口内框 = 图 + 2×10px 发光边，理论上两者比例一致，
-     但窗口尺寸是物理像素取整过的，缩放过一次之后内容盒和图就差 1~2px ——
-     contain 会把这点误差变成**四边各一条透明缝**（底下是桌面，看着就是"还有边框"）。
-     fill 把这 1px 摊到整张图上拉伸，肉眼不可见，但没有缝（owner 2026-11-19 报的就是这个）。 */
-  object-fit: fill;
+  /* **contain 而不是 fill**（0.3.29 改回来）：`fill` 只要窗口比例和图差一点就把图**拉变形** ——
+     长图（1844×9797）转贴图时被压扁就是它（owner 2026-11-19 报的）。
+     现在窗口比例由 `Peek.tsx` 的 onLoad 按真实像素校正（后端 `am_peek_ratio`），
+     正常情况下 contain == fill；真出现 1~2px 取整误差时宁可留一条透明缝，
+     也绝不接受"图变形"。 */
+  object-fit: contain;
   /* 这里**不再**自己画 1px 发丝线（owner 2026-11-18 报「关掉蓝色边框后还有一圈」）。
      以前为了"白图贴在白底网页上不至于消失"加了一条 inset 白线，但它不受开关控制 ——
      用户关掉蓝边后看到的就是这条线，自然会认为开关没生效。
@@ -6206,8 +6207,35 @@ body.board-body #root {
   padding: 8px 10px;
   border-radius: var(--r-4);
 }
+.trash-row {
+  cursor: pointer; /* 点一行 = 看它的详情（右侧），按钮各自 stopPropagation */
+}
 .trash-row:hover {
   background: var(--e1);
+}
+/* 选中：和网格里 `.tile.sel` 同一套观感（淡强调底 + 1px 内描边） */
+.trash-row.sel {
+  background: var(--accent-a);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+/* 行首缩略图：40×40 方框，图铺满（`cover`），加载不到就退回图标。
+   贴图默认进回收站之后，一屏全是同名截图，没有缩略图等于让人猜。 */
+.trash-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-4);
+  overflow: hidden;
+  background: var(--e1);
+  color: var(--text-3);
+}
+.trash-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .trash-info {
   flex: 1;
@@ -6234,6 +6262,39 @@ body.board-body #root {
   flex: none;
   font-size: var(--fs-10);
   color: var(--text-3);
+}
+
+/* 回收站详情：和素材详情共用骨架，只换预览那块 —— 这里没有色板/EXIF，
+   预览就是**整张图**（contain，不裁），高的往下滚。 */
+.trash-detail .trash-hero {
+  width: 100%;
+  max-height: 420px;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-6);
+  background: var(--e1);
+  color: var(--text-3);
+  font-size: var(--fs-11);
+  padding: 8px;
+  box-sizing: border-box;
+}
+.trash-detail .trash-hero img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+.trash-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+.trash-detail .detail-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ===== 关于（照 FontManager 的 AboutView） ===== */

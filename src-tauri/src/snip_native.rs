@@ -536,6 +536,12 @@ struct Ctx {
     bits: *mut u8,
     base: Vec<u8>,
     dim: Vec<u8>,
+    /// **不许压暗的矩形**（物理像素，相对虚拟桌面左上角）—— 屏幕上的贴图窗口。
+    ///
+    /// 为什么：贴图是用户特意摆在屏幕上的东西，owner 2026-11-19 要求"截图时贴图
+    /// 不透明度 100%"。冻结图里本来就有它们，但整屏压暗会连它们一起压暗，
+    /// 看上去就是"贴图慢慢消失了"。这里在压暗之后再从原始冻结图盖一遍。
+    keep: Vec<[i32; 4]>,
     sel: Option<[i32; 4]>,
     sel0: [i32; 4],
     ops: Vec<Op>,
@@ -702,6 +708,31 @@ impl Ctx {
                     (self.w as usize) * (self.h as usize) * 4,
                 );
             },
+        }
+        /* 压暗之后再把这些矩形从**原始冻结图**盖回来：贴图窗口保持 100% 亮度。
+           放在压暗之后、标注之前 —— 标注（箭头/文字）依然可以画在贴图上。 */
+        if !self.keep.is_empty() {
+            let row = self.w as usize * 4;
+            for r in &self.keep {
+                let x0 = r[0].max(0);
+                let y0 = r[1].max(0);
+                let x1 = (r[0] + r[2]).min(self.w);
+                let y1 = (r[1] + r[3]).min(self.h);
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let n = (x1 - x0) as usize * 4;
+                for y in y0..y1 {
+                    let off = y as usize * row + x0 as usize * 4;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            self.base.as_ptr().add(off),
+                            self.bits.add(off),
+                            n,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2654,7 +2685,7 @@ pub struct Delivered {
 ///
 /// `theme` 是主窗的 `UI_THEME` 口径（0 未知 / 1 浅 / 2 深）。覆盖层必须跟主窗一个主题 ——
 /// 否则深色软件里按 F1 弹出一块白工具栏，看着像别人的软件。
-pub fn run(shot: &screen::Shot, theme: u8) -> Option<Delivered> {
+pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivered> {
     let (w, h) = (shot.w as i32, shot.h as i32);
     if w == 0 || h == 0 {
         return None;
@@ -2742,6 +2773,7 @@ pub fn run(shot: &screen::Shot, theme: u8) -> Option<Delivered> {
                 bits: bits as *mut u8,
                 base,
                 dim,
+                keep: keep.to_vec(),
                 sel: None,
                 sel0: [0; 4],
                 ops: Vec::new(),
@@ -2892,6 +2924,7 @@ mod bar_preview {
             bits: bits as *mut u8,
             base: vec![0u8; (w * h * 4) as usize],
             dim: vec![0u8; (w * h * 4) as usize],
+            keep: Vec::new(),
             sel: None,
             sel0: [0; 4],
             ops: Vec::new(),
@@ -2969,6 +3002,40 @@ mod bar_preview {
             }
         }
         write_bmp(&std::env::temp_dir().join(name), zw * s, zh * s, &tile);
+    }
+
+    /// 贴图矩形（`keep`）在压暗之后必须保持**原始亮度**（owner 2026-11-19：
+    /// 「截图时原本贴在图上的不许消失」）。
+    ///
+    /// 钉住三件事：矩形内 = base 的像素；矩形外 = dim 的像素；右边界不漏。
+    /// 这条测试是纯像素断言，不依赖窗口 —— 真机按键在 CI/沙箱里送不进去。
+    #[test]
+    fn keep_rects_stay_bright() {
+        unsafe {
+            let (mut c, _bmp) = mk_ctx(200, 120, Palette::dark());
+            for p in c.base.chunks_exact_mut(4) {
+                p[0] = 200;
+                p[1] = 200;
+                p[2] = 200;
+                p[3] = 255;
+            }
+            for p in c.dim.chunks_exact_mut(4) {
+                p[0] = 40;
+                p[1] = 40;
+                p[2] = 40;
+                p[3] = 255;
+            }
+            c.keep = vec![[50, 20, 40, 40]];
+            c.sel = None;
+            c.fill_base();
+            let at = |x: i32, y: i32| -> u8 {
+                let o = ((y as usize) * (c.w as usize) + x as usize) * 4;
+                *c.bits.add(o)
+            };
+            assert_eq!(at(60, 30), 200, "贴图矩形里必须保持原始亮度");
+            assert_eq!(at(10, 10), 40, "矩形外照常压暗");
+            assert_eq!(at(95, 30), 40, "矩形右边界外要压暗（差 1px 就会漏一条亮边）");
+        }
     }
 
     /// 离屏预览：两套主题各出一张「工具栏 + 快捷键面板」对照图。

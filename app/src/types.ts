@@ -630,6 +630,9 @@ export interface Source {
   openRecycle(): Promise<void>;
   /* 应用内回收站（0.1.6）：删除=搬进 <data>/trash，下面四个管列表与清账 */
   trashList(): Promise<TrashEntry[]>;
+  /** 回收站条目的预览地址（顺序与入参一致；`null` = 文件已经不在了）。
+   *  只认账本里的 id —— 回收站里的文件已经不是素材，`thumb://` 取不到。 */
+  trashMedia(ids: string[]): Promise<(string | null)[]>;
   /** 还原（`to` 给了就还原到那个目录，不给回原位置） */
   trashRestore(ids: string[], to?: string): Promise<number>;
   trashPurge(ids: string[]): Promise<number>;

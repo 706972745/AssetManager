@@ -140,6 +140,7 @@ export const tauriSource: Source = {
   openRecycle: () => invoke!<void>("am_open_recycle"),
   /* 应用内回收站（0.1.6） */
   trashList: () => invoke!<TrashEntry[]>("am_trash_list"),
+  trashMedia: (ids) => invoke!<(string | null)[]>("am_trash_media", { ids }),
   trashRestore: (ids: string[], to?: string) =>
     invoke!<number>("am_trash_restore", { ids, to: to ?? null }),
   trashPurge: (ids: string[]) => invoke!<number>("am_trash_purge", { ids }),

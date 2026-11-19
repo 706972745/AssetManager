@@ -130,6 +130,9 @@ export function Peek() {
   /* 窗口建出来是**不可见**的（后端 `.visible(false)`），首帧真画上去了才让它露面 ——
      否则 WebView2 会先闪一下自己的默认底色，中键贴图时那一闪特别难看。 */
   const shown = useRef(false);
+  /* 比例只校正一次：换图（←/→）会重新触发 onLoad，那时按新图再校一次是对的，
+     但同一张图反复 load（缓存/重排）不能每次都改窗口，否则会和滚轮缩放抢 */
+  const ratioFixed = useRef(false);
   const markReady = useCallback(() => {
     if (shown.current) return;
     shown.current = true;
@@ -194,6 +197,8 @@ export function Peek() {
       setView({ s: 1, x: 0, y: 0 });
       setRot(0);
       setFlip({ h: false, v: false });
+      /* 换图后允许 onLoad 再按真实像素校一次比例（`it.w/h` 是索引里的值，可能是缩略图尺寸） */
+      ratioFixed.current = false;
       if (it.w && it.h) void source.peekRatio(it.w, it.h).catch(() => {});
       void source.peekTrack(it.path, it.gid).catch(() => {});
     },
@@ -437,7 +442,27 @@ export function Peek() {
           alt=""
           draggable={false}
           data-tauri-drag-region
-          onLoad={markReady}
+          onLoad={(e) => {
+            /* **比例校正**（owner 2026-11-19：「长图转贴图被压扁了」）。
+               窗口尺寸是后端按长边算的，只要实际比例和窗口比例差一点（DPI 取整、
+               老存档里的 longEdge、手拖过窗口边），`object-fit` 就会把图拉变形。
+               这里量到真实像素再让后端按比例重设一次窗口 —— 只做**一次**，
+               否则会和用户的滚轮缩放打架。 */
+            const img = e.currentTarget;
+            const box = root.current?.getBoundingClientRect();
+            if (!ratioFixed.current && box && img.naturalWidth && img.naturalHeight) {
+              const want = img.naturalWidth / img.naturalHeight;
+              /* 拿**内容盒**比（窗口要比图大一圈 2×10px 的发光边，`.peek-root` 的 --peek-glow）。
+                 用外框比的话每扇窗都会被判成"比例不对"，白白重设一次尺寸。 */
+              const glow = 20;
+              const got = (box.width - glow) / Math.max(1, box.height - glow);
+              if (Math.abs(want - got) / want > 0.02) {
+                ratioFixed.current = true;
+                void source.peekRatio(img.naturalWidth, img.naturalHeight).catch(() => {});
+              }
+            }
+            markReady();
+          }}
           onError={markReady}
           style={{
             opacity: opac,

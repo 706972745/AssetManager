@@ -38,7 +38,7 @@ import {
 import { AssetView, THUMB_PX, type ViewMode } from "./components/Views";
 import { Detail, TitleBar, TopBar } from "./components/Chrome";
 import { HoverHintHost } from "./components/HoverHint";
-import { TrashView } from "./components/TrashView";
+import { TrashDetail, TrashView } from "./components/TrashView";
 import { AboutView } from "./components/AboutView";
 import { Settings, type SettingsKey } from "./components/Settings";
 import { Shortcuts } from "./components/Shortcuts";
@@ -184,6 +184,10 @@ export default function App() {
   /** 主内容区是哪个页面：素材列表 / 回收站 / 关于（侧栏底栏切换） */
   const [page, setPage] = useState<"assets" | "trash" | "about">("assets");
   const [trash, setTrash] = useState<TrashEntry[]>([]);
+  /* 回收站：选中哪一条 / id→预览地址 / 按扩展名筛（0.3.29） */
+  const [trashSel, setTrashSel] = useState<string | null>(null);
+  const [trashThumbs, setTrashThumbs] = useState<Record<string, string>>({});
+  const [trashFormat, setTrashFormat] = useState<string | null>(null);
   /** 多选集合（T11）：详情面板盯 `selected`，批量操作作用于这个集合 */
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -2359,7 +2363,17 @@ export default function App() {
   /* 回收站：进页面时拉一次；还原/彻底删除/清空后自己刷新一遍 */
   const loadTrash = useCallback(async () => {
     try {
-      setTrash(await source.trashList());
+      const list = await source.trashList();
+      setTrash(list);
+      /* 预览地址按**账本 id**现开（`thumb://` 只认素材 id）。
+         一次全拉：回收站通常几十条，令牌表后端自己会裁。 */
+      const urls = await source.trashMedia(list.map((t) => t.id)).catch(() => []);
+      const map: Record<string, string> = {};
+      list.forEach((t, i) => {
+        const u = urls[i];
+        if (u) map[t.id] = u;
+      });
+      setTrashThumbs(map);
     } catch (e) {
       toast(String(e), true);
     }
@@ -2373,6 +2387,7 @@ export default function App() {
     try {
       const n = await source.trashRestore(ids, to);
       toast(to ? `已还原 ${n} 项到 ${to}` : `已还原 ${n} 项`);
+      if (trashSel && ids.includes(trashSel)) setTrashSel(null);
       await loadTrash();
       setRefreshKey((k) => k + 1);
     } catch (e) {
@@ -2384,6 +2399,7 @@ export default function App() {
     try {
       const n = await source.trashPurge(ids);
       toast(`已彻底删除 ${n} 项`);
+      if (trashSel && ids.includes(trashSel)) setTrashSel(null);
       await loadTrash();
     } catch (e) {
       toast(String(e), true);
@@ -2409,9 +2425,43 @@ export default function App() {
     }
   };
 
+  /* 回收站的筛选与排序（0.3.29，owner 2026-11-19）：
+     顶栏那套控件在这里只认三件事 —— 搜名字/路径、按扩展名筛、按删除时间/名称/大小排。
+     标签、评分、颜色、文件夹对它没有意义（文件已经不在库里了），所以菜单里也不列。 */
+  const trashFormats = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of trash) {
+      const i = t.name.lastIndexOf(".");
+      const ext = i > 0 ? t.name.slice(i + 1).toLowerCase() : "";
+      if (!ext) continue;
+      m.set(ext, (m.get(ext) ?? 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]) as [string, number][];
+  }, [trash]);
+
+  const trashShown = useMemo(() => {
+    const q = text.trim().toLowerCase();
+    const list = trash.filter((t) => {
+      if (trashFormat) {
+        const i = t.name.lastIndexOf(".");
+        const ext = i > 0 ? t.name.slice(i + 1).toLowerCase() : "";
+        if (ext !== trashFormat) return false;
+      }
+      if (!q) return true;
+      return (
+        t.name.toLowerCase().includes(q) || t.originalPath.toLowerCase().includes(q)
+      );
+    });
+    const cmp: Record<string, (a: TrashEntry, b: TrashEntry) => number> = {
+      mtime_desc: (a, b) => b.deletedAt - a.deletedAt,
+      name_asc: (a, b) => a.name.localeCompare(b.name, "zh"),
+      size_desc: (a, b) => b.size - a.size,
+    };
+    return [...list].sort(cmp[sort] ?? cmp.mtime_desc);
+  }, [trash, text, trashFormat, sort]);
+
   /* 开大图：网格双击、详情里的「看图」都走这一处 */
-  const openLightbox = (a: Asset) => {
-    const i = items.findIndex((x) => x.id === a.id);
+  const openLightbox = (a: Asset) => {    const i = items.findIndex((x) => x.id === a.id);
     setLightbox(i >= 0 ? i : 0);
   };
 
@@ -3330,6 +3380,10 @@ export default function App() {
                 setCollFilter(null);
               }
             }}
+            trashMode={page === "trash"}
+            trashFormats={trashFormats}
+            trashFormat={trashFormat}
+            onTrashFormat={setTrashFormat}
           />
 
           {colorFilter && (
@@ -3363,11 +3417,17 @@ export default function App() {
               <div className="page-view">
                 {page === "trash" ? (
                   <TrashView
-                    items={trash}
-                    onRestore={(ids) => void restoreTrash(ids)}
+                    items={trashShown}
+                    thumbs={trashThumbs}
+                    selected={trashSel}
+                    onSelect={setTrashSel}
+                    onRestore={(ids, to) => void restoreTrash(ids, to)}
                     onPurge={(ids) => void purgeTrash(ids)}
                     onEmpty={() => void emptyTrash()}
-                    onClose={() => setPage("assets")}
+                    onClose={() => {
+                      setPage("assets");
+                      setTrashSel(null);
+                    }}
                   />
                 ) : (
                   <AboutView
@@ -3490,7 +3550,23 @@ export default function App() {
           </div>
         </div>
 
-        {/* 详情面板常驻（owner 2026-11-16）：不做收起，也不再绑定 showDetail 状态 */}
+        {/* 详情面板常驻（owner 2026-11-16）：不做收起，也不再绑定 showDetail 状态。
+            回收站里选中一条时换成回收站自己的详情（0.3.29）—— 复用 `Detail` 会造出
+            一堆假 Asset 字段（id / rating / 标签），不如给它一块干净的骨架。 */}
+        {page === "trash" ? (
+          (() => {
+            const t = trashSel ? trash.find((x) => x.id === trashSel) : null;
+            return t ? (
+              <TrashDetail
+                entry={t}
+                src={trashThumbs[t.id]}
+                onRestore={(ids, to) => void restoreTrash(ids, to)}
+                onPurge={(ids) => void purgeTrash(ids)}
+                onClose={() => setTrashSel(null)}
+              />
+            ) : null;
+          })()
+        ) : (
         <Detail
           asset={selected}
           source={source}
@@ -3537,6 +3613,7 @@ export default function App() {
             setSelected(null);
           }}
         />
+        )}
       </div>
 
       {tagEdit && (

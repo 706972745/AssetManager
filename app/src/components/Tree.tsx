@@ -114,6 +114,9 @@ export function Tree({
     if (!openPaths.current) openPaths.current = new Set();
     return openPaths.current;
   };
+  /** 已经拉过子列表的目录（`refreshKey` 变化时整体作废） */
+  const loaded = useRef<Set<number>>(new Set());
+
   const nodesRef = useRef<Map<number, DirNode>>(new Map());
   const [sectionOpen, setSectionOpen] = useState(true);
   const [hover, setHover] = useState<number | null>(null);
@@ -232,6 +235,7 @@ export function Tree({
          索引里补上目录行就够，下一次增量扫描会自然对齐） */
       const ch = await source.children(target.id);
       remember(ch);
+      loaded.current.add(target.id);
       setKids((m) => new Map(m).set(target.id, ch));
       const created = ch.find((c) => c.path === made) ?? ch.find((c) => c.name === name);
       if (created) onSelect(created);
@@ -277,6 +281,8 @@ export function Tree({
       });
       const flat = kidsList.flat();
       remember(flat);
+      /* 恢复树时已经拉过这些层的子列表 → 记下来，免得用户点开时再拉一遍 */
+      for (const n of level) loaded.current.add(n.id);
       level = flat.filter((c) => want.has(c.path));
       for (const n of level) next.add(n.id);
     }
@@ -284,6 +290,10 @@ export function Tree({
   };
 
   useEffect(() => {
+    /* 每次外部刷新（新建/删除文件夹、扫描完、移动完）都把"这层拉过了"的记号清掉，
+       否则 `load()` 看到 kids 里有缓存就直接返回 —— 新建的文件夹永远不出现
+       （owner 2026-11-19：「软件里新建的文件夹，软件里看不到」）。 */
+    loaded.current.clear();
     void source.roots().then((r) => {
       // 库根可能变了（重建索引 / 加删库），把已经不存在的路径丢掉，
       // 否则 localStorage 里会越攒越多死路径
@@ -294,8 +304,9 @@ export function Tree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source, refreshKey]);
 
-  const load = async (id: number) => {
-    if (kids.has(id)) return;
+  const load = async (id: number, force = false) => {
+    if (!force && loaded.current.has(id)) return;
+    loaded.current.add(id);
     const ch = await source.children(id);
     remember(ch);
     setKids((m) => new Map(m).set(id, ch));

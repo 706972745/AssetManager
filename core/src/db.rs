@@ -683,6 +683,32 @@ pub fn dir_by_id(c: &Connection, id: i64) -> Res<Option<(String, Option<i64>)>> 
     .map_err(e2s)
 }
 
+/// 按路径查目录行 id（新建文件夹时要用父目录的 id 挂上去）。
+pub fn dir_id_by_path(c: &Connection, path: &str) -> Res<Option<i64>> {
+    c.query_row("SELECT id FROM dirs WHERE path=?1", params![path], |r| r.get(0))
+        .optional()
+        .map_err(e2s)
+}
+
+/// 同 `dir_id_by_path`，但按**规范化路径**比（斜杠、大小写、尾分隔符不同也能对上）。
+///
+/// 只给"新建文件夹"这种一次性动作兜底：全表扫一遍在库里只有几千个目录时是毫秒级，
+/// 而在热路径（列表 / 树）上绝不能用。
+pub fn find_dir_id_norm(c: &Connection, path: &str) -> Res<Option<i64>> {
+    let want = crate::norm_path(path);
+    let mut s = c.prepare("SELECT id, path FROM dirs").map_err(e2s)?;
+    let rows = s
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(e2s)?;
+    for row in rows {
+        let (id, p) = row.map_err(e2s)?;
+        if crate::norm_path(&p) == want {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
 /// 目录树子节点（懒加载，只查一层）。
 ///
 /// `asset_cnt` 是**整棵子树**的素材数，不是直接子项 ——

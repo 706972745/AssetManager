@@ -914,6 +914,34 @@ impl App {
         self.tree(None)
     }
 
+    /// 把**刚建出来的空目录**写进索引，返回它的目录 id。
+    ///
+    /// 为什么必须单独写一行：`scan_one_dir(parent)` 只索引**文件**，空目录在磁盘上
+    /// 存在但 `dirs` 表里没有行 —— `children(parent)` 自然查不到，用户看到的就是
+    /// "在软件里新建了文件夹，软件里却看不见"（owner 2026-11-19 报的）。
+    ///
+    /// 失败不影响磁盘上的目录（调用方已建好），只是这一层看不到 —— 所以调用点
+    /// 可以只记日志，不必把整个动作判失败。
+    pub fn index_new_dir(&mut self, path: &str, parent: &str) -> Result<i64, String> {
+        let lib_id = self
+            .lib_for_path(path)
+            .ok_or_else(|| format!("这个目录不在任何素材库里：{path}"))?;
+        let mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let l = self.lib_mut(lib_id)?;
+        let pid = match db::dir_id_by_path(&l.conn, parent)? {
+            Some(id) => Some(id),
+            /* 前端的路径字符串和索引里存的可能一个斜杠/大小写不同（老的扫描版本写过别的写法），
+               对不上就按规范化路径再找一次 —— 挂错父节点的话，新文件夹会跑到树根上去。 */
+            None => db::find_dir_id_norm(&l.conn, parent)?,
+        };
+        db::upsert_dir(&l.conn, path, pid, mtime)
+    }
+
     pub fn total(&self) -> Result<i64, String> {
         let mut n = 0;
         for l in &self.libs {
@@ -2565,6 +2593,32 @@ mod tests {
             uniq.dedup();
             assert_eq!(uniq.len(), 14, "{sort}：不许有重复条目");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 新建的空文件夹必须立刻出现在目录树里（owner 2026-11-19：建完看不见）。
+    #[test]
+    fn new_empty_folder_shows_in_tree() {
+        let d = tmp("mkdir");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let root = app.roots().unwrap().into_iter().next().unwrap();
+
+        let made = {
+            let ops = crate::fsops::FsOps::new(app.conn_for_path(&root.path).unwrap());
+            ops.mkdir(std::path::Path::new(&root.path), "相册").unwrap()
+        };
+        /* 走 am_mkdir 同一条路：建完把空目录写进索引 */
+        app.index_new_dir(&made.to_string_lossy(), &root.path).unwrap();
+
+        let kids = app.tree(Some(root.id)).unwrap();
+        assert!(
+            kids.iter().any(|k| k.name == "相册"),
+            "新建的空目录必须出现在目录树里，实际：{:?}",
+            kids.iter().map(|k| &k.name).collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1110,14 +1110,19 @@ fn am_mkdir(parent: String, name: String, state: State<AppState>) -> Result<Stri
         let ops = fsops::FsOps::new(app.conn_for_path(&parent)?);
         ops.mkdir(std::path::Path::new(&parent), &name)?
     };
-    /* **必须把新目录写进索引**：以前只建磁盘、不写库，于是紧接着的
-       `am_children(parent)` 查不到它 —— 侧栏里"新建了却看不见"，
-       要等下一次全库扫描才冒出来（owner 2026-11-19 报的就是这个）。
-       重扫父目录一层就够（几十毫秒，只读元数据）。 */
+    let made = out.to_string_lossy().to_string();
+    /* **空目录自己也要有目录行**（owner 2026-11-19）：`scan_one_dir` 只索引文件，
+       不写子目录行 —— 只刷父目录的话，新建的文件夹在树里依然看不见。 */
+    if let Err(e) = app.index_new_dir(&made, &parent) {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("mkdir index FAIL {made}：{e}"));
+        }
+    }
+    /* 父目录再扫一遍：目录 mtime 变了，增量扫描的判据要对齐（顺手索引里面的文件，通常是空的）。 */
     let mut dirty: HashSet<PathBuf> = HashSet::new();
     dirty.insert(PathBuf::from(&parent));
     refresh_dirs(&mut app, &dirty);
-    Ok(out.to_string_lossy().to_string())
+    Ok(made)
 }
 
 /// 落盘前的体检（T05）：给前端弹「>100 个 / >2GB」与「同名三选」用。
@@ -1318,6 +1323,26 @@ fn am_delete(paths: Vec<String>, state: State<AppState>) -> Result<usize, String
 fn am_trash_list(state: State<AppState>) -> Vec<am_core::trash::TrashEntry> {
     let app = lock(&state);
     am_core::trash::list(&app.data_dir)
+}
+
+/// 回收站里那些文件的预览地址（**只认账本里的 id**，不接受任意路径）。
+///
+/// 回收站行左侧要缩略图、右侧详情要整张图，而 `thumb://` 只认素材 id ——
+/// 进回收站的文件已经不是素材了。这里复用 `peekfile://` 的令牌表，按 id 现开一张，
+/// 返回顺序与入参一致（`None` = 这条已经没了）。
+#[tauri::command]
+fn am_trash_media(ids: Vec<String>, state: State<AppState>) -> Vec<Option<String>> {
+    let app = lock(&state);
+    let list = am_core::trash::list(&app.data_dir);
+    ids.iter()
+        .map(|id| {
+            list.iter()
+                .find(|t| &t.id == id)
+                .map(|t| PathBuf::from(&t.trashed_path))
+                .filter(|p| p.is_file())
+                .map(|p| media_url(&p))
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -4538,11 +4563,28 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        （冻结图 / 拖框 / 工具栏 / 标注 / 撤销全在里面），交付仍复用 `am_snip_finish`。
        老路径留在后面，`AM_SNIP_WEBVIEW=1` 可以切回去对照。 */
     if std::env::var("AM_SNIP_WEBVIEW").map(|v| v == "1").unwrap_or(false) == false {
+        /* 屏幕上的贴图窗口：原生层压暗时要**把它们跳过去**，保持 100% 亮度
+           （owner 2026-11-19：「截图时贴图不该慢慢消失」）。
+           矩形用物理像素、换算到虚拟桌面左上角 —— 和 `shot` 的坐标系一致。 */
+        let keep: Vec<[i32; 4]> = {
+            use tauri::Manager;
+            let mut v = Vec::new();
+            for (l, w) in app.webview_windows() {
+                if !l.starts_with("peek") {
+                    continue;
+                }
+                let (Ok(p), Ok(s)) = (w.outer_position(), w.outer_size()) else {
+                    continue;
+                };
+                v.push([p.x - shot.x, p.y - shot.y, s.width as i32, s.height as i32]);
+            }
+            v
+        };
         let app2 = app.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
             let theme = UI_THEME.load(std::sync::atomic::Ordering::SeqCst);
-            let out = snip_native::run(&shot, theme);
+            let out = snip_native::run(&shot, theme, &keep);
             match out {
                 Some(d) => {
                     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -5899,6 +5941,7 @@ fn main() {
             am_pick_folder,
             am_open_recycle,
             am_trash_list,
+            am_trash_media,
             am_trash_restore,
             am_trash_purge,
             am_trash_empty,

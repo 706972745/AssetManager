@@ -146,6 +146,10 @@ export function TopBar({
   autoTags,
   rating,
   onRating,
+  trashMode,
+  trashFormats,
+  trashFormat,
+  onTrashFormat,
 }: {
   text: string;
   onText: (v: string) => void;
@@ -176,6 +180,13 @@ export function TopBar({
   /** 评分下限（1–5 星；null = 不筛） */
   rating: number | null;
   onRating: (n: number | null) => void;
+  /** 回收站模式（owner 2026-11-19）：只留**搜索 / 筛选（按格式）/ 排序**，
+   *  缩略图大小与网格↔瀑布流切换对一张列表没有意义，整块不渲染。 */
+  trashMode?: boolean;
+  /** 回收站里出现过的扩展名 + 条数（筛选菜单用） */
+  trashFormats?: [string, number][];
+  trashFormat?: string | null;
+  onTrashFormat?: (ext: string | null) => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "sort" | "filter" | "color" } | null>(
     null
@@ -202,6 +213,13 @@ export function TopBar({
     square: "方形",
   };
   const kind = KINDS.find((k) => k.key === kindKey) ?? KINDS[0];
+  /* 回收站的"最近修改"其实是"最近删除"（条目只有删除时间这一个时间戳），
+     文案必须跟着换，否则用户以为在按原文件的修改时间排。 */
+  const sortLabel =
+    trashMode && sort === "mtime_desc" ? "最近删除" : SORT_LABEL[sort];
+  const sortKeys: SortKey[] = trashMode
+    ? ["mtime_desc", "name_asc", "size_desc"]
+    : (Object.keys(SORT_LABEL) as SortKey[]);
 
   const openMenu = (e: React.MouseEvent<HTMLElement>, k: "sort" | "filter" | "color") => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -335,6 +353,24 @@ export function TopBar({
     },
   ];
 
+  /* 回收站的筛选只有"格式"一个维度：标签 / 文件夹 / 评分 / 颜色都不属于已删除的文件
+     （它们已经不在库里了），列出来只会点出一片空。 */
+  const trashFilterItems: MenuItem[] = [
+    {
+      label: "全部格式",
+      on: !trashFormat,
+      check: !trashFormat,
+      onPick: () => onTrashFormat?.(null),
+    },
+    ...(trashFormats ?? []).map(([ext, n]) => ({
+      label: ext.toUpperCase(),
+      meta: String(n),
+      on: trashFormat === ext,
+      check: trashFormat === ext,
+      onPick: () => onTrashFormat?.(trashFormat === ext ? null : ext),
+    })),
+  ];
+
   return (
     <div className="topbar">
       <div className="topbar-search">
@@ -348,6 +384,7 @@ export function TopBar({
         />
       </div>
 
+      {!trashMode && (
       <div className="topbar-size" title={`缩略图大小：${SIZE_LABEL[sizeIndex]}`}>
         <input
           type="range"
@@ -360,7 +397,9 @@ export function TopBar({
         />
         <span className="size-value">{SIZE_PX[sizeIndex]}px</span>
       </div>
+      )}
 
+      {!trashMode && (
       <button
         className={`ctl ctl-icon ${color ? "on" : ""}`}
         onClick={(e) => openMenu(e, "color")}
@@ -372,11 +411,20 @@ export function TopBar({
           style={color ? { background: `var(--c-${color}, #8b8b86)` } : undefined}
         />
       </button>
+      )}
 
       <button
-        className={`ctl ctl-icon ${kindKey !== "all" || dirNode || activeTag || rating !== null ? "on" : ""}`}
+        className={`ctl ctl-icon ${
+          trashMode
+            ? trashFormat
+              ? "on"
+              : ""
+            : kindKey !== "all" || dirNode || activeTag || rating !== null
+              ? "on"
+              : ""
+        }`}
         onClick={(e) => openMenu(e, "filter")}
-        title="筛选：类型 / 标签 / 文件夹 / 形状 / 评分 / 格式"
+        title={trashMode ? "筛选：格式" : "筛选：类型 / 标签 / 文件夹 / 形状 / 评分 / 格式"}
         aria-label={`按类型筛选：${kind.label}`}
         aria-pressed={kindKey !== "all"}
       >
@@ -387,13 +435,14 @@ export function TopBar({
         <button
           className="ctl"
           onClick={(e) => openMenu(e, "sort")}
-          title={`排序：${SORT_LABEL[sort]}`}
+          title={`排序：${sortLabel}`}
         >
           <Icon name="sort" size={13} stroke={1.5} className="ctl-ico" />
-          {SORT_LABEL[sort]}
+          {sortLabel}
           <Icon name="chevron" size={10} stroke={2} className="rot90" />
         </button>
 
+        {!trashMode && (
         <div className="view-toggle">
           <span
             className="view-pill"
@@ -415,6 +464,7 @@ export function TopBar({
             <Icon name="waterfall" size={13} stroke={1.5} />
           </button>
         </div>
+        )}
       </div>
 
       {menu && (
@@ -426,7 +476,7 @@ export function TopBar({
           onClose={() => setMenu(null)}
           items={
             menu.kind === "sort"
-              ? (Object.keys(SORT_LABEL) as SortKey[]).map((k) => ({
+              ? sortKeys.map((k) => ({
                   label: SORT_LABEL[k],
                   on: sort === k,
                   check: sort === k,
@@ -454,7 +504,9 @@ export function TopBar({
                       }))
                     : [{ label: "还没有主色数据，滚一遍缩略图就会算出来", on: false, onPick: () => {} }]),
                 ]
-              : filterItems
+              : trashMode
+                ? trashFilterItems
+                : filterItems
           }
         />
       )}
