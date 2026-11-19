@@ -697,10 +697,21 @@
   line-height: 1;
   padding: 3px 5px;
   border-radius: var(--r-4);
-  color: var(--text-1);
-  background: color-mix(in srgb, var(--ui-panel) 92%, transparent);
-  border: 1px solid var(--hairline);
+  /* 实色底 + 白/黑两套墨色：不跟着底图走。
+     以前是 `color-mix(--ui-panel 92%, transparent)`，在深色设计图（深蓝/深紫）上
+     那 8% 透明会把底色透出来，看着像"选中后徽标变宝蓝"（owner 2026-11-19）。 */
+  color: var(--badge-ink);
+  background: var(--badge-bg);
+  border: 1px solid var(--badge-line);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
   z-index: 2;
+}
+/* 悬停 / 选中都保持同一套配色：徽标是"信息"，不该随交互换色 */
+.tile:hover .tile-badge,
+.tile.sel .tile-badge {
+  color: var(--badge-ink);
+  background: var(--badge-bg);
+  border-color: var(--badge-line);
 }
 .tile-name {
   position: absolute;
@@ -7060,6 +7071,28 @@ body.am-dragging * {
 }
 .tile:hover .tile-scrollbar {
   opacity: 0.9;
+}
+
+/* 「Ctrl + 滚轮」提示：只在悬停时出现，压在瓦片右上角。
+   藏起来的话用户会先尝试普通滚轮（那时界面在滚），然后得出"这张滚不动"的结论。 */
+.tile-scroll-hint {
+  position: absolute;
+  right: 9px;
+  top: 7px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  line-height: 16px;
+  letter-spacing: 0.2px;
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(0, 0, 0, 0.56);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 5;
+}
+.tile:hover .tile-scroll-hint {
+  opacity: 1;
 }
 
 /* ---- 目录树：可折叠子树的高度过渡 -----------------------------------------

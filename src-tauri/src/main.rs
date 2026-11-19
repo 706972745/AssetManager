@@ -2101,6 +2101,20 @@ fn open_app(data: &Path) -> Result<App, String> {
 
 #[cfg(windows)]
 fn peek_square_corners(win: &tauri::WebviewWindow) {
+    if let Ok(h) = win.hwnd() {
+        peek_square_corners_hwnd(h.0 as isize);
+    }
+}
+
+/// 真正干活的那一半：只认 HWND，`WebviewWindow` / `Window` 都能喂进来。
+///
+/// 为什么要把 HWND 单独拆出来：**DWM 的属性会被窗口几何变化冲掉**。
+/// 截图贴图那条路（`rec.place` 有值）在 `build()` 之后还要 `set_size` + `set_position`
+/// 做"原位原尺寸"，系统在重排窗口时把 `BORDER_COLOR=NONE` 重置回默认描边 ——
+/// 表现就是「右键菜单贴图没有蓝边，截图后中键贴图有蓝边」（owner 2026-11-19）。
+/// 所以凡是会改几何 / show 的地方，都要再刷一次这个属性。
+#[cfg(windows)]
+fn peek_square_corners_hwnd(hwnd: isize) {
     #[link(name = "dwmapi")]
     extern "system" {
         fn DwmSetWindowAttribute(
@@ -2114,8 +2128,6 @@ fn peek_square_corners(win: &tauri::WebviewWindow) {
     const DWMWA_BORDER_COLOR: u32 = 34;
     const DWMWCP_DONOTROUND: i32 = 1;
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
-    let Ok(h) = win.hwnd() else { return };
-    let hwnd = h.0 as isize;
     unsafe {
         let round = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
@@ -2136,6 +2148,9 @@ fn peek_square_corners(win: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn peek_square_corners(_win: &tauri::WebviewWindow) {}
+
+#[cfg(not(windows))]
+fn peek_square_corners_hwnd(_hwnd: isize) {}
 
 /// 开一扇贴图窗口（三种来源 + 重启恢复共用这一条路）
 async fn spawn_peek(
@@ -2233,6 +2248,10 @@ async fn spawn_peek(
     } else {
         peek_center_on_cursor(&win);
     }
+    /* 三条分支都可能刚改过窗口几何（原位原尺寸 / 恢复位置 / 居中到光标），
+       而 DWM 的系统描边会跟着重排重新出现 —— 所以几何定下来之后**再刷一次**。
+       这一行就是「截图贴图有蓝边、素材贴图没有」的修复点（owner 2026-11-19）。 */
+    peek_square_corners(&win);
     /* 拖动/缩放要记进存档，否则重启后全都回到屏幕正中（用户摆的位置白摆了）。
        拖动事件 ~60/s，所以走 `peek_touch` 的 350ms 节流。
        注意：这是 `WebviewWindow` 上的方法，`WebviewWindowBuilder` 没有 `on_window_event`。 */
@@ -2328,6 +2347,11 @@ async fn am_peek_open(
 async fn am_peek_ready(win: Window) -> Result<(), String> {
     win.show().map_err(|e| e.to_string())?;
     let _ = win.set_focus();
+    /* show / 拿焦点同样会让系统把窗口描边再画一遍，这里补最后一刀。 */
+    #[cfg(windows)]
+    if let Ok(h) = win.hwnd() {
+        peek_square_corners_hwnd(h.0 as isize);
+    }
     Ok(())
 }
 

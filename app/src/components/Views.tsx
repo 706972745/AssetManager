@@ -541,9 +541,12 @@ const Tile = memo(function Tile({
 
   /* ---- 瀑布流里"超高图就地滚动"（owner 2026-11-19）-------------------------
      布局把单格高度封顶在 `waterfallTileH`（2.4×列宽 与 720px 取小的那个），
-     图片 `object-fit: cover` 铺满宽度、纵向溢出。这里让它在**悬停时用滚轮滚**：
-     改 `object-position` 的纵向百分比（cover 下等价于在溢出的那一段里上下移动），
-     到顶/到底就把滚轮还给列表 —— 和详情面板顶部预览是同一套手感。
+     图片 `object-fit: cover` 铺满宽度、纵向溢出，改 `object-position` 的纵向百分比
+     就等于在溢出的那一段里上下移动 —— 和详情面板顶部预览是同一套手感。
+
+     **只有 Ctrl（或 ⌘）+ 滚轮才滚这张图**：普通滚轮一律还给列表。
+     理由（owner 2026-11-19 明确要求）：鼠标偶然压在一张长图上时列表滚不动，
+     用户会以为"滚动卡了"；把"看全图"绑到一个显式组合键上，两边都不打架。
      为什么手动 addEventListener：React 的 onWheel 挂在 root 上是 passive，preventDefault 无效。 */
   const rootRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -574,11 +577,15 @@ const Tile = memo(function Tile({
     }
 
     const onWheel = (e: WheelEvent) => {
-      const cur = scrollPos.current;
-      const next = Math.min(overflow, Math.max(0, cur + e.deltaY));
-      /* 到顶 / 到底就不拦：再滚一下交给列表（否则用户想滚列表时被这张图吃掉一次） */
-      if (next === cur) return;
+      /* 没按 Ctrl = 用户在滚列表，这里一个字节都不拦 */
+      if (!e.ctrlKey && !e.metaKey) return;
+      /* 按了 Ctrl 就整段吃掉（连到顶/到底也吃）：否则界面会在边界处跟着抖一下。
+         触控板捏合会送来很大的 deltaY，钳到 ±120 免得一下跳到图尾。 */
       e.preventDefault();
+      const dy = Math.max(-120, Math.min(120, e.deltaY));
+      const cur = scrollPos.current;
+      const next = Math.min(overflow, Math.max(0, cur + dy));
+      if (next === cur) return;
       scrollPos.current = next;
       img.style.objectPosition = `50% ${(next / overflow) * 100}%`;
       if (bar) bar.style.transform = `translateY(${(next / overflow) * (track - barH)}px)`;
@@ -633,8 +640,14 @@ const Tile = memo(function Tile({
               }}
             />
           )}
-          {/* 能滚的长图在悬停时露一条细滚动条：不然用户不知道"这张能滚" */}
-          {scrollable && <span className="tile-scrollbar" ref={barRef} aria-hidden="true" />}
+          {/* 能滚的长图：一条细指示条 + 悬停时一句「Ctrl+滚轮」——
+              不标出来的话，用户猜不到"这张能滚"，更猜不到要按 Ctrl */}
+          {scrollable && (
+            <>
+              <span className="tile-scrollbar" ref={barRef} aria-hidden="true" />
+              <span className="tile-scroll-hint">Ctrl + 滚轮</span>
+            </>
+          )}
           {!loadedSrc && !failed && <div className="tile-skel" />}
           {failed && (
             <div className="tile-fail">

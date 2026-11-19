@@ -20,6 +20,11 @@
   --canvas: #111110;
   --ui-bg: #111110;
   --ui-panel: #171715;
+  /* 瓦片格式徽标（JPG/PNG…）：实色，不用 color-mix —— 半透明底叠在深色设计图上
+     会被读成"选中就变宝蓝"（owner 2026-11-19）。 */
+  --badge-bg: rgba(18, 18, 18, 0.86);
+  --badge-ink: #f2f2ef;
+  --badge-line: rgba(255, 255, 255, 0.16);
   --ui-menu: #1c1c1a;
   --ui-fg: #f2f2ef;
   --ui-fg-2: #9a9a94;
@@ -125,6 +130,9 @@ html[data-theme="light"] {
   --canvas: #fafaf8;
   --ui-bg: #fafaf8;
   --ui-panel: #ffffff;
+  --badge-bg: rgba(255, 255, 255, 0.92);
+  --badge-ink: #141412;
+  --badge-line: rgba(20, 20, 18, 0.1);
   --ui-menu: #ffffff;
   --ui-fg: #141412;
   --ui-fg-2: #6b6b66;

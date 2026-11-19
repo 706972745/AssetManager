@@ -11,10 +11,10 @@
 <br>
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.3.22-blue?style=flat-square)](../../releases)
+[![Version](https://img.shields.io/badge/Version-0.3.24-blue?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
-[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.22)-blue?style=flat-square)](#已知限制)
+[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.24)-blue?style=flat-square)](#已知限制)
 
 <br>
 
