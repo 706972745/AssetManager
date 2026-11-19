@@ -644,8 +644,13 @@
   filter: blur(6px);
   transform: scale(1.03);
 }
+/* 瀑布流：**不能在 `.wf` 里把图改成 contain**。
+   以前这里写的是 `object-fit: contain`，为的是兜住 1px 取整误差；
+   但超高图（1:8 的长截图）在封顶后的格子里 contain 会缩成一条细线、两侧大片留白。
+   现在格子的高度已经按 `waterfallTileH` 封顶，宽度铺满 + 纵向溢出才是对的：
+   cover 保证左右不留白，溢出部分靠 `object-position` 滚（Views.tsx）。 */
 .wf .tile-img {
-  object-fit: contain;
+  object-fit: cover;
 }
 .tile-skel {
   position: absolute;
@@ -7036,24 +7041,25 @@ body.am-dragging * {
 }
 
 /* ---- 瀑布流：能就地滚动的长图 --------------------------------------------
-   布局把宽高比 clamp 在 1:5，再长的图会被 cover 截掉一截。这种瓦片悬停时
-   用滚轮可以上下滚图（Views 里改 object-position），这里给一条细指示条：
-   不露出来的话，用户不知道"这张能滚"，只会以为图被裁了。 */
+   单格高度封顶在 `waterfallTileH`（2.4×列宽 / 720px 取小的），图宽铺满、纵向溢出，
+   悬停滚轮在格子里滚（Views 里改 object-position）—— 和详情面板顶部预览同一套。
+   指示条**平时就淡淡地露着**：全隐藏的话用户根本不知道"这张能滚"，
+   只会以为图被裁了（owner 2026-11-19）。 */
 .tile-scrollbar {
   position: absolute;
-  right: 4px;
+  right: 3px;
   top: 0;
   width: 3px;
   border-radius: 2px;
   background: var(--accent);
   box-shadow: 0 0 3px rgba(0, 0, 0, 0.45);
-  opacity: 0;
+  opacity: 0.3;
   transition: opacity 120ms ease;
   pointer-events: none;
   z-index: 4;
 }
 .tile:hover .tile-scrollbar {
-  opacity: 0.85;
+  opacity: 0.9;
 }
 
 /* ---- 目录树：可折叠子树的高度过渡 -----------------------------------------

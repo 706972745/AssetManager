@@ -540,10 +540,10 @@ const Tile = memo(function Tile({
   const noPreview = !PREVIEWABLE_KINDS.has(a.kind);
 
   /* ---- 瀑布流里"超高图就地滚动"（owner 2026-11-19）-------------------------
-     布局把宽高比 clamp 在 0.2~5（`aspectOf`），1:8 的长图只按 1:5 出格子，
-     `object-fit: cover` 于是把上下截掉 —— 用户得开灯箱才看得到全貌。
-     这里让它在**悬停时用滚轮滚**：改 `object-position` 的纵向百分比（cover 下等价于
-     在溢出的那一段里上下移动），到顶/到底就把滚轮还给列表。
+     布局把单格高度封顶在 `waterfallTileH`（2.4×列宽 与 720px 取小的那个），
+     图片 `object-fit: cover` 铺满宽度、纵向溢出。这里让它在**悬停时用滚轮滚**：
+     改 `object-position` 的纵向百分比（cover 下等价于在溢出的那一段里上下移动），
+     到顶/到底就把滚轮还给列表 —— 和详情面板顶部预览是同一套手感。
      为什么手动 addEventListener：React 的 onWheel 挂在 root 上是 passive，preventDefault 无效。 */
   const rootRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
