@@ -5403,6 +5403,26 @@ fn main() {
                 return not_found();
             }
 
+            /* `px=0` = 要**原图**（不是缩略图）。
+               长截图 / 全景图铺满一屏时，1600 档的缩略图也才一百多像素宽，放大就是一坨；
+               原文件本来就是 1080×11942，直接给原图更小更快。这条不占解码配额。
+               超过 48 MB 的（巨型 PNG / PSD 导出）退回 1600 档 —— 一次读几十上百兆不值当。 */
+            if px == 0 {
+                let big = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 48 * 1024 * 1024;
+                if !big {
+                    return match std::fs::read(&path) {
+                        Ok(bytes) => Response::builder()
+                            .status(200)
+                            .header(header::CONTENT_TYPE, mime_of(&path))
+                            .header(header::CACHE_CONTROL, "no-store")
+                            .body(bytes)
+                            .unwrap(),
+                        Err(_) => not_found(),
+                    };
+                }
+            }
+            let px = if px == 0 { 1600 } else { px };
+
             let _slot = acquire_decode(decode_cost(&path, px, db_px));
 
             // ② 不持锁：这里可能是几十到几百毫秒

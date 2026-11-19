@@ -54,9 +54,15 @@ const invoke: Invoke | null =
  * `r` 是文件 mtime：它让 URL 随内容变化 ——
  * 文件改了 URL 就变，WebView 的磁盘缓存自动失效；文件没改就一直命中。
  * 踩过的坑：早期 URL 里没有 `r`，一次 404 被缓存成 immutable，之后这张图永远空白。
+ *
+ * `v` 是**出图口径版本**：URL 里只有 mtime 时，改了出图规则（比如 0.3.12 起极端比例改按短边）
+ * 会因为 WebView 里那份 `immutable` 缓存继续吐老图 —— 用户看到的就是"改完还是糊"。
+ * 每次动缩略图口径就把这个数 +1，等于一次性把全库的 HTTP 缓存作废（本地文件仍是命中）。
  */
+const THUMB_VER = 2;
+
 function thumbUrl(a: { id: number; mtime: number }, px: number): string {
-  return `http://thumb.localhost/${a.id}?px=${px}&r=${a.mtime}`;
+  return `http://thumb.localhost/${a.id}?px=${px}&r=${a.mtime}&v=${THUMB_VER}`;
 }
 
 export const tauriSource: Source = {

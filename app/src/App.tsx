@@ -3172,6 +3172,7 @@ export default function App() {
           tags={selected ? tagMap.get(selected.id) ?? [] : []}
           colors={tagColorMap}
           autoTags={prefs.autoTags ? selectedAuto.filter((a) => !denied.has(a.tag)) : []}
+          allAutoTags={prefs.autoTags ? autoTagCounts : []}
           allTags={tags.map((t) => t.name)}
           onAddTag={(t) => {
             if (selected) void applyTag(t, [selected.id]);
@@ -3400,12 +3401,14 @@ function Lightbox({
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  const hi = thumbSrc(asset, 1600);
-  const lo = thumbSrc(asset, 512);
   /* 超长图（长截图 / 详情页）：contain 缩完只剩一条几十像素宽的细线，等于看不见。
      这类图改「宽度锁成舞台宽 + 纵向滚动」——看清内容比一屏装下更重要（owner 2026-11-19）。
-     阈值 3 = 高是宽的三倍以上，普通手机截图（约 2.2）仍走 contain。 */
+     阈值 3 = 高是宽的三倍以上，普通手机截图（约 2.2）仍走 contain。
+     这类图的高清源直接要**原图**（`px=0`）：1600 档缩略图对 1:11 的长图只有一百多像素宽，
+     铺满一屏跟没加载区别不大。 */
   const tall = !!asset.width && !!asset.height && asset.height / asset.width >= 3;
+  const hi = thumbSrc(asset, tall ? 0 : 1600);
+  const lo = thumbSrc(asset, 512);
 
   // 换图 → 缩放与位移复位（否则下一张会以 4 倍放大出现在角落里）
   useEffect(() => {

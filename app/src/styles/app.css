@@ -5631,6 +5631,12 @@ body.board-body #root {
   background: transparent;
   color: var(--text-2);
 }
+/* 自动标签行右侧的使用数：让人知道这条标签全库有多少命中，别只看到一个名字 */
+.tag-picker-count {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-3);
+}
 .tag-picker-foot {
   padding: 6px;
   border-top: 1px solid rgba(var(--ink-rgb), 0.07);

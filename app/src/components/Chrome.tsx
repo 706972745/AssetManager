@@ -810,6 +810,7 @@ export function Detail({
   tags,
   colors,
   autoTags,
+  allAutoTags,
   allTags,
   onAddTag,
   onRemoveTag,
@@ -854,6 +855,8 @@ export function Detail({
   autoTags: AutoTag[];
   /** 已有手工标签（做候选） */
   allTags: string[];
+  /** 全库的自动标签（带使用数）：选择面板要列出**所有**标签，不只是这张图推导出来的那几个 */
+  allAutoTags: TagCount[];
   onAddTag: (tag: string) => void;
   onRemoveTag: (tag: string) => void;
   /** 点标签 = 按它筛列表 */
@@ -1321,6 +1324,7 @@ export function Detail({
                   colors={colors}
                   auto={autoTags}
                   all={allTags}
+                  allAuto={allAutoTags}
                   onAdd={onAddTag}
                   onRemove={onRemoveTag}
                   onPick={onPickTag}
@@ -1405,13 +1409,15 @@ export function Detail({
  * 三处**不能改**的约定（用户明确"和 FontManager 一模一样"）：
  * 1. 手工标签点名字 = 按它筛列表，右键 = 改颜色/分组，× = 从这张素材上移除；
  * 2. 自动标签是虚线 chip + 魔棒图标，点也可以筛，右键 = 不再建议；
- * 3. "从已有标签选"的候选里**排除已在这张素材上的**，别让用户看到自己已经有的。
+ * 3. "从已有标签选"列出库里的**全部**标签（手工 + 自动），已在这张素材上的勾着不可点 ——
+ *    过滤掉它们会让面板只剩「没有匹配的标签」（owner 2026-11-19 两轮反馈）。
  */
 function TagSection({
   manual,
   colors,
   auto,
   all,
+  allAuto,
   onAdd,
   onRemove,
   onPick,
@@ -1422,6 +1428,8 @@ function TagSection({
   colors: Record<string, string>;
   auto: AutoTag[];
   all: string[];
+  /** 全库自动标签（带使用数）：面板要列全，不能只列这张图推导出来的那几条 */
+  allAuto: TagCount[];
   onAdd: (tag: string) => void;
   onRemove: (tag: string) => void;
   onPick: (tag: string) => void;
@@ -1434,21 +1442,27 @@ function TagSection({
   const [picked, setPicked] = useState<string[]>([]);
 
   /**
-   * 候选 = 库里**全部**手工标签 + 这张素材身上推出来的自动标签。
+   * 候选 = 库里**全部**手工标签 + 库里**全部**自动标签。
    *
-   * 以前把「已经在这张素材上的」过滤掉了，于是库里的标签全在这一张上时，
-   * 面板就只剩一句「没有匹配的标签」—— 侧栏明明有标签，这里却是空的（owner 2026-11-19）。
-   * 现在已在本素材上的照样列出来、勾着、不可点，比让它凭空消失好理解。
-   * 自动标签也列：点它 = 把软件推的这条**固定成自己的标签**（名字用显示名，如 PNG）。
+   * 两条教训（owner 2026-11-19，两轮反馈）：
+   * 1. 以前把「已经在这张素材上的」过滤掉了 —— 库里的标签全在这一张上时，面板只剩
+   *    「没有匹配的标签」。现在照样列出来、勾着、不可点。
+   * 2. 自动标签原来只列**这张图**推导出来的那几条，用户看到的还是"不全"；
+   *    现在列全库的（与侧栏「自动标签」同一份口径，带使用数）。
+   * 点自动标签 = 把软件推的这条**固定成自己的标签**（名字用显示名，如 PNG）。
    */
   const needle = pq.trim().toLowerCase();
   const hitName = (...names: string[]) => !needle || names.some((n) => n.toLowerCase().includes(needle));
   const manualRows = all.filter((t) => hitName(t));
-  const autoRows = auto.filter((a) => hitName(a.tag, isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag));
-  /** 按钮角标只数「还能加的」：已在素材上的不算 */
+  /** 这张图**本来就有**的自动标签名：列出来但不能再"固定"一次 */
+  const onAssetAuto = new Set(auto.map((a) => (isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag)));
+  const autoRows = allAuto
+    .map((t) => ({ tag: t.name, label: isAutoTag(t.name) ? autoTagLabel(t.name) : t.name, count: t.count }))
+    .filter((a) => hitName(a.tag, a.label));
+  /** 按钮角标只数「还能加的」：已在素材上的、本来就是自动标签的不算 */
   const addable =
     manualRows.filter((t) => !manual.includes(t)).length +
-    autoRows.filter((a) => !manual.includes(autoTagLabel(a.tag))).length;
+    autoRows.filter((a) => !manual.includes(a.label) && !onAssetAuto.has(a.label)).length;
 
   /* 换素材就把草稿收掉：上一条打的半截字不该跟着到下一张 */
   const firstId = manual.join("\u0000");
@@ -1625,22 +1639,26 @@ function TagSection({
                   <li className="tag-picker-sec">自动标签 · 点一下固定成你的标签</li>
                 )}
                 {autoRows.map((a) => {
-                  const label = isAutoTag(a.tag) ? autoTagLabel(a.tag) : a.tag;
-                  const on = manual.includes(label);
-                  const pickedNow = picked.includes(label);
+                  const on = manual.includes(a.label) || onAssetAuto.has(a.label);
+                  const pickedNow = picked.includes(a.label);
                   return (
                     <li key={`auto-${a.tag}`}>
                       <button
                         className={`tag-picker-item ${pickedNow ? "on" : ""}`}
                         disabled={on}
-                        title={on ? "这张素材已经有同名标签了" : `${a.reason}｜点一下固定成「${label}」`}
-                        onClick={() => togglePick(label)}
+                        title={
+                          on
+                            ? "这张素材已经有这条标签了"
+                            : `全库 ${a.count} 项命中｜点一下固定成「${a.label}」`
+                        }
+                        onClick={() => togglePick(a.label)}
                       >
                         <span className="tag-picker-mark">
                           {(pickedNow || on) && <Check size={11} strokeWidth={2} />}
                         </span>
                         <Sparkles size={10} strokeWidth={1.6} className="tag-auto-spark" />
-                        <span className="tag-picker-name">{label}</span>
+                        <span className="tag-picker-name">{a.label}</span>
+                        <span className="tag-picker-count tabular">{a.count}</span>
                       </button>
                     </li>
                   );

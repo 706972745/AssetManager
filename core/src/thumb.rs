@@ -120,7 +120,16 @@ impl ThumbStore {
 
     /// 生成（或复用）缩略图。
     pub fn ensure(&self, path: &Path, px: u32) -> Result<ThumbOut, String> {
-        let key = Self::key_for(path, px);
+        /* 超长 / 超宽图必须**按短边**出图，否则瓦片只会得到一条几十像素宽的细线
+           （1080×11942 走"长边 = 384" 之后是 34×384，铺进 176px 的方格里就是 5 倍马赛克）。
+           口径变了就得换 key，不然会命中老缓存 —— 这就是 `-s` 后缀的来历。 */
+        let dims = header_dims(path);
+        let fit_short = dims.map_or(false, |(w, h)| extreme_aspect(w, h));
+        let key = if fit_short {
+            format!("{}-s", Self::key_for(path, px))
+        } else {
+            Self::key_for(path, px)
+        };
         let out = self.file_for(&key);
         if out.is_file() {
             let (w, h) = image::ImageReader::open(&out)
@@ -148,16 +157,27 @@ impl ThumbStore {
             let _ = std::fs::remove_file(&legacy);
         }
 
-        let (rgb, src) = load_source(path, px)?;
+        /* 解码目标：普通图就是档位；极端比例图要给**长边**的像素数当目标，
+           否则 JPEG 的 DCT 降采样会按"长边 384"把 1080×11942 直接解成 135×1493，
+           后面再怎么算都补不回来（2026-11-19 实测：135×1493，仍然糊）。 */
+        let decode_px = match (fit_short, dims) {
+            (true, Some((w, h))) => {
+                let (nw, nh) = fit_dims(w, h, px, true);
+                nw.max(nh).max(px)
+            }
+            _ => px,
+        };
+        let (rgb, src) = load_source(path, decode_px)?;
         let (ow, oh) = (rgb.width(), rgb.height());
         let longest = ow.max(oh).max(1);
         // R1：不放大。原图（或嵌入预览）本身就比档位小 → 标记 upscaled，界面如实说
-        let upscaled = longest < px * 3 / 4;
-        let target = px.min(longest).max(1);
-        let scale = target as f32 / longest as f32;
-        let nw = ((ow as f32 * scale).round() as u32).max(1);
-        let nh = ((oh as f32 * scale).round() as u32).max(1);
-        let thumb: image::RgbImage = if longest <= target {
+        let upscaled = if fit_short {
+            ow.min(oh).max(1) < px * 3 / 4
+        } else {
+            longest < px * 3 / 4
+        };
+        let (nw, nh) = fit_dims(ow, oh, px, fit_short);
+        let thumb: image::RgbImage = if nw >= ow && nh >= oh {
             rgb
         } else {
             // Triangle（双线性）而不是盒式采样：WebP 省下来的 30–40% 体积换成清晰度，
@@ -204,6 +224,43 @@ impl ThumbStore {
             upscaled,
         })
     }
+}
+
+/// 长短边比 ≥ 3 视为「极端比例」（长截图 / 全景图）。前端灯箱的 `tall` 用的是同一个门槛。
+fn extreme_aspect(w: u32, h: u32) -> bool {
+    let long = w.max(h).max(1) as f64;
+    let short = w.min(h).max(1) as f64;
+    long / short >= 3.0
+}
+
+/// 只读文件头拿尺寸（不解像素）：决定走哪种出图口径，比解码便宜两个数量级。
+fn header_dims(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path).ok()?.into_dimensions().ok()
+}
+
+/// 缩略图的目标尺寸。
+///
+/// 普通图：**长边** = px（一张图占大半屏，看全最重要）。
+/// 极端比例：**短边** = px —— 瓦片/瀑布流是固定宽度的，能看出细节靠的是短边像素；
+/// 长边按比例放大，封顶 16×px（1:50 那种极端图不该生成上亿像素）。
+/// 16 这个数是从真实长截图来的：1:11 的长图在 384 档刚好出满 384 宽 / 4246 高。
+fn fit_dims(ow: u32, oh: u32, px: u32, fit_short: bool) -> (u32, u32) {
+    let short = ow.min(oh).max(1);
+    let long = ow.max(oh).max(1);
+    let mut scale = if fit_short {
+        px as f32 / short as f32
+    } else {
+        px as f32 / long as f32
+    };
+    scale = scale.min(1.0); // 不放大
+    let cap = px.saturating_mul(16) as f32;
+    if long as f32 * scale > cap {
+        scale = cap / long as f32;
+    }
+    (
+        ((ow as f32 * scale).round() as u32).max(1),
+        ((oh as f32 * scale).round() as u32).max(1),
+    )
 }
 
 /// 取缩略图的**源像素**。
@@ -502,5 +559,24 @@ mod tests {
     fn jpeg_scaled_decode_survives_garbage() {
         assert!(decode_jpeg_scaled(b"not a jpeg at all", 256).is_none());
         assert!(decode_jpeg_scaled(&[], 256).is_none());
+    }
+
+    /// 极端比例的图按**短边**出图：长截图 1080×11942 在 384 档要出 384×4246，
+    /// 而不是 35×384 —— 后者铺进方形瓦片就是 5 倍马赛克（2026-11-19 owner 报的「长图还是模糊」）。
+    #[test]
+    fn extreme_ratio_fits_the_short_side() {
+        // 同一张图两种口径：老口径只剩 35px 宽，新口径 384px 宽
+        assert_eq!(fit_dims(1080, 11942, 384, false), (35, 384));
+        assert_eq!(fit_dims(1080, 11942, 384, true), (384, 4246));
+
+        // 不放大：短边本来就小于档位
+        assert_eq!(fit_dims(100, 2000, 384, true), (100, 2000));
+
+        // 封顶 16×：1:50 的极端图不该生成上亿像素
+        assert_eq!(fit_dims(200, 10000, 384, true), (123, 6144));
+
+        assert!(extreme_aspect(1080, 11942), "长截图必须认成极端比例");
+        assert!(extreme_aspect(8000, 600), "全景图同理");
+        assert!(!extreme_aspect(1080, 1920), "手机竖屏截图不算极端");
     }
 }
