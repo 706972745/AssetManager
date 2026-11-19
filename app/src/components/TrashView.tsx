@@ -4,6 +4,7 @@
  * 数据在后端 `core/src/trash.rs`：删除 = 把文件搬进 `<数据目录>/trash/` 并写一份
  * `.amtrash` 账本；这里只负责列出、还原、彻底删除、清空。**彻底删除**才送系统回收站。
  */
+import { source } from "../data/source";
 import type { TrashEntry } from "../types";
 import { fmtSize, fmtTime } from "../types";
 import { Icon } from "./ui";
@@ -16,7 +17,7 @@ export function TrashView({
   onClose,
 }: {
   items: TrashEntry[];
-  onRestore: (ids: string[]) => void;
+  onRestore: (ids: string[], to?: string) => void;
   onPurge: (ids: string[]) => void;
   onEmpty: () => void;
   onClose: () => void;
@@ -57,8 +58,22 @@ export function TrashView({
               <span className="trash-meta mono">
                 {fmtSize(t.size)} · {fmtTime(t.deletedAt)}
               </span>
-              <button className="btn" onClick={() => onRestore([t.id])}>
+              <button className="btn" onClick={() => onRestore([t.id])} title="还原到原来的位置">
                 还原
+              </button>
+              <button
+                className="btn"
+                title="还原到指定文件夹（截图贴图默认进回收站，想留底就存到自己挑的地方）"
+                onClick={() => {
+                  void source
+                    .pickFolder("还原到哪个文件夹")
+                    .then((dir) => {
+                      if (dir) onRestore([t.id], dir);
+                    })
+                    .catch(() => {});
+                }}
+              >
+                还原到…
               </button>
               <button className="btn btn-danger" onClick={() => onPurge([t.id])}>
                 彻底删除

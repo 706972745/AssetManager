@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -1321,9 +1321,16 @@ fn am_trash_list(state: State<AppState>) -> Vec<am_core::trash::TrashEntry> {
 }
 
 #[tauri::command]
-fn am_trash_restore(ids: Vec<String>, state: State<AppState>) -> Result<usize, String> {
+fn am_trash_restore(
+    ids: Vec<String>,
+    /* 还原到哪儿：`None` = 回原位置（截图贴图就是回 screenshots）。
+       传了目录就落到那里 —— 贴图默认进回收站，用户想留底时说一句"存到我的素材夹"就行。 */
+    to: Option<String>,
+    state: State<AppState>,
+) -> Result<usize, String> {
     let mut app = lock(&state);
-    let back = am_core::trash::restore(&app.data_dir, &ids)?;
+    let dest = to.map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    let back = am_core::trash::restore_to(&app.data_dir, &ids, dest.as_deref())?;
     // 还原 = 磁盘上又出现了文件 → 把落点所在目录重新索引一遍
     let dirty: HashSet<PathBuf> = back
         .iter()
@@ -1750,12 +1757,17 @@ const PEEK_LONG_EDGE: f64 = 342.0;
 /// 建贴图窗口时注入 boot —— 贴图是独立 webview，读不到主窗那侧的偏好。
 static UI_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// 贴图「蓝色边框」的全局开关，**默认关**（owner 2026-11-18 连报两次"关不掉"）。
+/// 贴图「蓝色边框」的全局开关，**默认开**（owner 2026-11-19：白底网页/文档上贴图
+/// 需要一圈轮廓才看得出边界）。右键菜单里随时可关，关掉后连那 10px 发光 padding
+/// 一起没有视觉痕迹。
 ///
 /// 为什么必须放后端而不是 localStorage：每个贴图是一个独立 webview，
 /// 前端各自记状态的话，关掉当前这张不影响已经贴着的其他张，新贴的还会按默认值再开 ——
-/// 用户看到的就是"明明关过了，还有蓝边"。放这里 + 事件广播，一次点击对所有贴图生效。
-static PEEK_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 用户看到的就是"明明关过了，还有蓝边"（owner 2026-11-18 连报两次）。放这里 + 事件广播，一次点击对所有贴图生效。
+///
+/// 注意：这是**进程内**的全局值，重启软件回到"开"。owner 要的是出厂默认，不是记忆上次选择；
+/// 真要记住用户选择，得进 `prefs` 落盘，别在前端另存一份。
+static PEEK_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
 /// 贴图窗口四周的透明边距（**CSS px**，逻辑单位；前端 `.peek-root` 的 `--peek-glow` 必须同值）。
@@ -1885,15 +1897,9 @@ fn is_builtin_root(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn clip_cache_dir() -> PathBuf {
-    exe_dir().join("clipboard-cache")
-}
-
-/// 中键「贴图」用的落盘位置。**不能放截图目录**（会污染素材库），
-/// 也不能放剪贴板缓存（那边按 10 张剪枝，贴图重启要能还原，不能被剪掉）。
-fn peek_cache_dir() -> PathBuf {
-    exe_dir().join("peek-cache")
-}
+/* 0.3.28 起没有 `clipboard-cache` / `peek-cache` 了：
+   剪贴板图与截图贴图统一落 `screenshots` 再进软件回收站（见 `trash_png`）。
+   老用户安装目录里那两个旧文件夹不会被删（里面可能有他要的图），只是不再被读。 */
 
 fn mime_of(p: &Path) -> &'static str {
     match p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
@@ -2159,7 +2165,9 @@ async fn spawn_peek(
     rec: PeekRecall,
     restore: bool,
 ) -> Result<(), String> {
-    /* 「截图 → 贴图」要 1:1 摆在原位（`place` 有值），这时**不许**按长边等比缩放：
+    /* 新贴一张 = 回到"全部可见"：否则 Alt+F3 藏起来的那批会一直藏着，
+       下一次按 Alt+F3 又走「隐藏」分支，用户唤不回来（见 release_peek_hide）。 */
+    release_peek_hide(app);    /* 「截图 → 贴图」要 1:1 摆在原位（`place` 有值），这时**不许**按长边等比缩放：
        先按目标物理尺寸 / 屏幕 scale 给个接近的逻辑初值，`build()` 之后再用
        `set_size(Physical)` 精确对齐（多显示器 DPI 不同也不会偏）。 */
     let app_scale = app
@@ -3407,64 +3415,188 @@ async fn am_save_as(
     Ok(Some(to.to_string_lossy().to_string()))
 }
 
-/* ---------------- 剪贴板图片（F3，带 10 张历史） ---------------- */
+/* ---------------- 剪贴板图片（F3，带 10 张历史） ----------------
 
-fn clip_history() -> Vec<PathBuf> {
-    let dir = clip_cache_dir();
-    let mut out: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
-                .filter_map(|e| {
-                    let t = e.metadata().ok()?.modified().ok()?;
-                    Some((t, e.path()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    out.sort_by(|a, b| b.0.cmp(&a.0));
-    out.into_iter().map(|(_, p)| p).collect()
+   历史**不再**是"剪贴板缓存里最近 10 个 PNG"，而是 `peek_history()`：
+   截图目录 + 软件回收站里最新的 10 张图。理由见 `peek_history` 的注释。 */
+
+/// 从 AppHandle 取数据目录（贴图落盘 / 回收站都要用）。**不持锁外传**：
+
+/// 从 AppHandle 取数据目录（贴图落盘 / 回收站都要用）。**不持锁外传**：
+/// 调用方拿到的是一个 PathBuf，锁在花括号里就释放了。
+fn data_dir_of(app: &AppHandle) -> PathBuf {
+    use tauri::Manager;
+    let st = app.state::<AppState>();
+    let g = lock(&st);
+    g.data_dir.clone()
 }
 
-fn prune_clip_history() {
-    for p in clip_history().into_iter().skip(CLIP_HISTORY) {
-        let _ = std::fs::remove_file(p);
+/// 把一个刚写出来的 PNG 收进**软件回收站**，返回它现在的位置。
+///
+/// 为什么默认进回收站（owner 2026-11-19）：贴图是"临时摆到屏幕上"的动作，
+/// 用户并不一定想留底；但完全不存又没法"再贴一次"。放回收站正好——
+/// 不占截图目录、回收站里看得见、想留就还原（还能还原到指定目录）。
+/// 收不进去（磁盘/权限问题）就留在原处：**图不能丢**。
+fn trash_png(app: &AppHandle, path: &Path) -> PathBuf {
+    let data = data_dir_of(app);
+    match am_core::trash::put(&data, &[path.to_path_buf()]) {
+        Ok(v) if !v.is_empty() => PathBuf::from(&v[0].trashed_path),
+        Ok(_) => path.to_path_buf(),
+        Err(e) => {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("trash put FAIL {}：{e}", path.display()));
+            }
+            path.to_path_buf()
+        }
     }
 }
 
-async fn clip_peek_begin(app: AppHandle) -> Result<(), String> {
-    let (_w, _h, png) = clipimg::get_png()?;
-    let dir = clip_cache_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了剪贴板缓存目录：{e}"))?;
-    let (stamp, _) = screen::local_stamp();
-    let path = dir.join(format!("clip-{}.png", stamp.replace(' ', "_").replace(':', "-")));
-    std::fs::write(&path, &png).map_err(|e| format!("写剪贴板缓存失败：{e}"))?;
-    prune_clip_history();
+/// 能拿来"再贴一次"的历史：**截图目录 + 软件回收站**里的图片，最新在前，最多 10 张。
+///
+/// owner 2026-11-19 明确范围：只认这两个地方。以前是 `clipboard-cache` 里按 10 张
+/// 轮转，和用户的"我截的那张图"完全脱节 —— 他在回收站里看得见，F3 却翻不到。
+///
+/// **按（文件名 + 字节数）去重**：贴图窗口右键「以原始尺寸存到截图库」是**复制**，
+/// 同一张图会同时存在于 screenshots 和回收站里，不去重的话连按 F3 会看到同一张图两次。
+fn peek_history(app: &AppHandle) -> Vec<PathBuf> {
+    const IMG: [&str; 8] = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "jfif", "jpe"];
+    let is_img = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| IMG.contains(&e.to_ascii_lowercase().as_str()))
+            .unwrap_or(false)
+    };
+    /* (时间, 路径, 文件名, 字节数) —— 后两项只用来去重 */
+    let mut out: Vec<(std::time::SystemTime, PathBuf, String, u64)> = Vec::new();
+    let name_of = |p: &Path| p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    // ① 安装目录下的 screenshots
+    if let Ok(rd) = std::fs::read_dir(shot_dir()) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !is_img(&p) {
+                continue;
+            }
+            if let Ok(m) = e.metadata() {
+                if let Ok(t) = m.modified() {
+                    out.push((t, p.clone(), name_of(&p), m.len()));
+                }
+            }
+        }
+    }
+    // ② 软件回收站（贴图默认就落这儿）
+    let data = data_dir_of(app);
+    for t in am_core::trash::list(&data) {
+        let p = PathBuf::from(&t.trashed_path);
+        if !is_img(&p) {
+            continue;
+        }
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.deleted_at);
+        out.push((when, p.clone(), t.name.clone(), t.size));
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen: HashSet<(String, u64)> = HashSet::new();
+    out.into_iter()
+        .filter(|(_, _, n, sz)| seen.insert((n.clone(), *sz)))
+        .map(|(_, p, _, _)| p)
+        .take(CLIP_HISTORY)
+        .collect()
+}
 
-    // 历史一起带过去：在这扇窗里按 ←/→ 就能翻之前 10 张
+/// 把一张磁盘上的图贴到屏幕上（历史一起带过去，窗内 ←/→ 能翻）。
+async fn peek_from_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
     let mut items: Vec<PeekItem> = Vec::new();
     let mut idx = 0usize;
-    for p in clip_history() {
+    let want = path.to_string_lossy().to_string();
+    for p in peek_history(app) {
         if let Some(it) = item_of_file(&p) {
-            if it.path == path.to_string_lossy() {
+            if it.path == want {
                 idx = items.len();
             }
             items.push(it);
         }
     }
     if items.is_empty() {
-        return Err("剪贴板图片存不下来".into());
+        return Err("这张图已经不在了".into());
     }
     let rec = PeekRecall {
         label: next_label(),
         kind: "file".into(),
-        path: path.to_string_lossy().to_string(),
+        path: items[idx].path.clone(),
         long_edge: PEEK_LONG_EDGE,
         ..Default::default()
     };
     peeks().lock().unwrap_or_else(|e| e.into_inner()).push(rec.clone());
     save_peeks();
-    spawn_peek(&app, items[idx].clone(), rec, false).await
+    spawn_peek(app, items[idx].clone(), rec, false).await
+}
+
+/* 剪贴板连按翻历史：`CLIP_SIG` 记住上一次贴的剪贴板内容指纹，`CLIP_CURSOR` 是翻到第几张。
+   指纹一样 = 用户没换剪贴板、只是想再贴一张 → 往后翻；不一样 = 新图，存下来贴它。 */
+static CLIP_SIG: AtomicU64 = AtomicU64::new(0);
+static CLIP_CURSOR: AtomicUsize = AtomicUsize::new(0);
+
+fn sig_of(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 连着按 F3 时"往后翻一张"。
+///
+/// `skip_newest`：刚从剪贴板贴出来那一张就是历史里的第 0 条（它现在在屏幕上），
+/// 再翻就不该把它又贴一遍 —— 那是"没反应"。剪贴板里没有图时没有这张，从最新开始翻。
+async fn paste_from_history(app: &AppHandle, skip_newest: bool) -> Result<(), String> {
+    let hist = peek_history(app);
+    if hist.is_empty() {
+        return Err("还没有可以再贴的图片（截图目录与回收站都是空的）".into());
+    }
+    let step = CLIP_CURSOR.fetch_add(1, Ordering::SeqCst);
+    let mut i = step % hist.len();
+    if skip_newest {
+        i = (i + 1) % hist.len();
+    }
+    log_runtime_opt(&format!(
+        "clip peek history {}/{} {}",
+        i + 1,
+        hist.len(),
+        hist[i].display()
+    ));
+    peek_from_file(app, hist[i].clone()).await
+}
+
+async fn clip_peek_begin(app: AppHandle) -> Result<(), String> {
+    let png = match clipimg::get_png() {
+        Ok((_w, _h, png)) => png,
+        Err(e) => {
+            /* 剪贴板里不是图（文字 / 文件 / 空）：**仍然翻历史**。
+               owner 要的是"连按 F3 依次把历史贴出来"，不该因为剪贴板恰好是文字就整条路死掉。 */
+            log_runtime_opt(&format!("clip peek：剪贴板无图（{e}），改为翻历史"));
+            return paste_from_history(&app, false).await;
+        }
+    };
+    let sig = sig_of(&png);
+    let prev = CLIP_SIG.swap(sig, Ordering::SeqCst);
+
+    /* 连按：剪贴板内容没变 = 用户想再看一张 → 沿历史往后翻。
+       owner 2026-11-19 要的"多次点击可以把历史图片贴出来"
+       （以前每按一次都是把**同一张**剪贴板图再贴一遍，等于没反应）。 */
+    if prev == sig && sig != 0 {
+        return paste_from_history(&app, true).await;
+    }
+
+    /* 新图：落盘到截图目录 → 收进软件回收站 → 贴。
+       回收站是"临时区"：不占截图目录、看得见、想留就还原（可还原到指定目录）。 */
+    CLIP_CURSOR.store(0, Ordering::SeqCst);
+    let dir = shot_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录：{e}"))?;
+    let (stamp, _) = screen::local_stamp();
+    let path = dir.join(format!("剪贴板 {}.png", stamp.replace(':', "-")));
+    std::fs::write(&path, &png).map_err(|e| format!("写剪贴板图片失败：{e}"))?;
+    let trashed = trash_png(&app, &path);
+    peek_from_file(&app, trashed).await
 }
 
 /// F3：把剪贴板里的图片贴到屏幕上（并进历史）
@@ -3475,8 +3607,8 @@ async fn am_clip_peek(app: AppHandle) -> Result<(), String> {
 
 /// 剪贴板历史：`(路径, 宽, 高)`，最新在前
 #[tauri::command]
-fn am_clip_history() -> Result<Vec<(String, u32, u32)>, String> {
-    Ok(clip_history()
+fn am_clip_history(app: AppHandle) -> Result<Vec<(String, u32, u32)>, String> {
+    Ok(peek_history(&app)
         .into_iter()
         .map(|p| {
             let (w, h) = screen::dims(&p);
@@ -3498,8 +3630,6 @@ struct SnipState {
     shot: screen::Shot,
     /// 截图临时文件（裁剪完就没人要了，取消/完成时删掉）
     tmp: PathBuf,
-    /// 截屏前被藏起来的贴图窗口（截完原样显示回来）
-    hidden: Vec<String>,
 }
 
 static SNIP: OnceLock<Mutex<Option<SnipState>>> = OnceLock::new();
@@ -3508,33 +3638,12 @@ fn snip_slot() -> &'static Mutex<Option<SnipState>> {
     SNIP.get_or_init(|| Mutex::new(None))
 }
 
-/// 截屏前把所有无边框看图藏起来。
-///
-/// 不藏的话它们会被**截进下一张截图**：用户按 F1 是想截背后的东西，
-/// 结果贴图糊在上面，还得手动避开（0.10.x 就是这样）。
-fn hide_peeks(app: &AppHandle) -> Vec<String> {
-    let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
-    let mut out = Vec::new();
-    for l in labels {
-        if !l.starts_with("peek") {
-            continue;
-        }
-        if let Some(w) = app.get_webview_window(&l) {
-            if w.hide().is_ok() {
-                out.push(l);
-            }
-        }
-    }
-    out
-}
-
-fn show_peeks(app: &AppHandle, labels: &[String]) {
-    for l in labels {
-        if let Some(w) = app.get_webview_window(l) {
-            let _ = w.show();
-        }
-    }
-}
+/* 截图**不再隐藏贴图**（owner 2026-11-19：「截图的时候原本贴图的不该消失」）。
+   0.10.x ~ 0.3.27 的做法是 hide → 截冻结图 → 截完 show：用户在按下 F1 的瞬间看到
+   贴图闪一下不见、画面塌一块。现在贴图全程不透明度 100% 留在屏幕上，
+   覆盖层显示的就是**含贴图**的那一帧 —— 代价是框选范围里有贴图时会被截进去，
+   这是 owner 明确要的取舍（他要"看到什么截什么"）。
+   所以这里不再有 hide_peeks / show_peeks，也没有 `SnipState.hidden` 要恢复。 */
 
 /* ---------------- 原生底图层（splash） ----------------
 
@@ -4394,7 +4503,6 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
                 return Err("上一次截图还没结束".into());
             }
             if let Some(s) = g.take() {
-                show_peeks(&app, &s.hidden);
                 let _ = std::fs::remove_file(&s.tmp);
             }
         }
@@ -4417,19 +4525,14 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        只在 rust 端口径里量，不含前端 thumb 解码 —— 那部分看 `snip ready`。 */
     let t_all = std::time::Instant::now();
     *SNIP_T0.lock().unwrap_or_else(|e| e.into_inner()) = Some(t_all);
-    let hidden = hide_peeks(&app);
-    /* 藏完要等 DWM 交一帧：hide() 立刻 BitBlt 有时还能抓到贴图残影。
-       90 → 50ms（0.1.29 提速）：实测 50ms 已经够合成器把这批窗口移出画面，
-       这 40ms 直接省在"按下 F1 到能框选"的路径上。 */
-    std::thread::sleep(Duration::from_millis(50));
+    /* 不再有"藏贴图 → 等 DWM 交一帧"那 50ms：贴图本来就要留在画面里
+       （见上方 3640 那段说明），没有窗口要从屏幕上撤下来，也就没有残影要等。
+       顺带把 F1 → 能框选的路径又省掉 50ms。 */
 
     // 截屏要在开覆盖窗**之前**：覆盖窗一开，截到的就是它自己
     let shot = match screen::capture_virtual() {
         Ok(s) => s,
-        Err(e) => {
-            show_peeks(&app, &hidden);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
     /* 0.3.0「A 方案」：默认不再走 WebView，整块覆盖层由 `snip_native` 用 GDI 画
        （冻结图 / 拖框 / 工具栏 / 标注 / 撤销全在里面），交付仍复用 `am_snip_finish`。
@@ -4464,7 +4567,6 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
                     }
                 }
             }
-            show_peeks(&app2, &hidden);
             std::thread::spawn(keywatch::uninstall);
             if let Some(dir) = LOG_DIR.get() {
                 log_runtime(
@@ -4487,17 +4589,13 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
     }
     let png = match shot.png() {
         Ok(p) => p,
-        Err(e) => {
-            show_peeks(&app, &hidden);
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
     let tmp = std::env::temp_dir().join(format!(
         "am-snip-{}.png",
         std::process::id() as u64 * 1000 + (db::now_ts() as u64 % 1000)
     ));
     if let Err(e) = std::fs::write(&tmp, &png) {
-        show_peeks(&app, &hidden);
         return Err(format!("写截图临时文件失败：{e}"));
     }
 
@@ -4526,7 +4624,7 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        铺成截图的平均色之后，那一段看起来就是"屏幕压暗了一下"。 */
     let avg = shot.avg_rgb();
     *snip_slot().lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(SnipState { shot, tmp: tmp.clone(), hidden });
+        Some(SnipState { shot, tmp: tmp.clone() });
 
     if let Some(old) = app.get_webview_window("snip") {
         let _ = old.close();
@@ -4581,7 +4679,6 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
             }
             let mut g = snip_slot().lock().unwrap_or_else(|x| x.into_inner());
             if let Some(s) = g.take() {
-                show_peeks(&app, &s.hidden);
                 let _ = std::fs::remove_file(&s.tmp);
             }
             format!("截图窗口创建失败：{e}")
@@ -5048,14 +5145,10 @@ async fn am_snip_finish(
         if let Some(w) = app.get_webview_window("snip") {
             let _ = w.close();
         }
-        let (hidden, tmp) = {
+        let tmp = {
             let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
-            match g.take() {
-                Some(s) => (s.hidden, s.tmp),
-                None => (Vec::new(), PathBuf::new()),
-            }
+            g.take().map(|s| s.tmp).unwrap_or_default()
         };
-        show_peeks(&app, &hidden);
         if !tmp.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -5076,11 +5169,15 @@ async fn am_snip_finish(
             Ok(None)
         }
         "peek" => {
-            let dir = peek_cache_dir();
-            std::fs::create_dir_all(&dir).map_err(|e| format!("建不了贴图缓存目录：{e}"))?;
+            /* 截图贴图：先落到**截图目录**，再收进软件回收站（owner 2026-11-19）。
+               "贴图"是临时摆上屏幕的动作，不该在截图目录里堆一堆；
+               想留底就从回收站还原（默认回 screenshots，也可以还到指定目录）。 */
+            let dir = shot_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录：{e}"))?;
             let (stamp, _) = screen::local_stamp();
-            let path = dir.join(format!("peek-{}.png", stamp.replace(' ', "_").replace(':', "-")));
-            std::fs::write(&path, &bytes).map_err(|e| format!("写贴图失败：{e}"))?;
+            let raw = dir.join(format!("截图 {}.png", stamp.replace(':', "-")));
+            std::fs::write(&raw, &bytes).map_err(|e| format!("写贴图失败：{e}"))?;
+            let path = trash_png(&app, &raw);
             let Some(item) = item_of_file(&path) else {
                 return Err("贴图生成失败".into());
             };
@@ -5194,12 +5291,9 @@ fn snip_abort(app: &AppHandle) {
     SNIP_GEN.fetch_add(1, Ordering::SeqCst);
     /* 会话结束：卸掉「真人按键」监视钩子（扔后台，不挡取消） */
     std::thread::spawn(keywatch::uninstall);
-    let (hidden, tmp) = {
+    let tmp = {
         let mut g = snip_slot().lock().unwrap_or_else(|e| e.into_inner());
-        match g.take() {
-            Some(s) => (s.hidden, s.tmp),
-            None => (Vec::new(), PathBuf::new()),
-        }
+        g.take().map(|s| s.tmp).unwrap_or_default()
     };
     /* 顺序：先撤原生底图 → 再把覆盖层藏起来（用户这一刻就回到桌面了）→
        最后才真关窗。关窗放到独立线程里：这条命令本身还在这个 webview 的 IPC 里跑，
@@ -5214,7 +5308,6 @@ fn snip_abort(app: &AppHandle) {
         if let Some(w) = app2.get_webview_window("snip") {
             let _ = w.close();
         }
-        show_peeks(&app2, &hidden);
         if !tmp.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -5240,6 +5333,48 @@ fn hotkey_slot() -> &'static Mutex<Vec<(String, String)>> {
     HOTKEYS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// 贴图是否被"一键隐起来"了（Alt+F3 的开关状态）
+static PEEK_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Alt+F3：把屏幕上所有贴图**整体**隐起来 / 放出来。
+///
+/// 为什么是"全局一键"而不是逐张：贴图常常是临时挡在文档上的，需要对一下底下的东西时
+/// 一下全收走、看完再一下全放回 —— 逐张点太慢，而且中途忘了哪张没收。
+fn toggle_peeks(app: &AppHandle) {
+    let hide = !PEEK_HIDDEN.load(Ordering::SeqCst);
+    let mut n = 0usize;
+    for (l, w) in app.webview_windows() {
+        if !l.starts_with("peek") {
+            continue;
+        }
+        let ok = if hide { w.hide().is_ok() } else { w.show().is_ok() };
+        if ok {
+            n += 1;
+        }
+    }
+    PEEK_HIDDEN.store(hide, Ordering::SeqCst);
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(d, &format!("peek toggle hide={hide} n={n}"));
+    }
+}
+
+/// 新贴一张之前，先解除"整批隐藏"状态。
+///
+/// 场景（owner 2026-11-19）：用 Alt+F3 把贴图全收走了，接着按 F3 又贴一张新的。
+/// 新窗照常出现（用户刚要求看到的），但旧的那批还藏着 —— 此时 `PEEK_HIDDEN` 仍是 true，
+/// 下一次 Alt+F3 会走「隐藏」分支，用户按半天也唤不回旧的（看着就是"键坏了"）。
+/// 所以贴新图 = 回到"全部可见"，把状态清掉；调用点拿到的是**创建新窗之前**的窗口集合。
+fn release_peek_hide(app: &AppHandle) {
+    if !PEEK_HIDDEN.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    for (l, w) in app.webview_windows() {
+        if l.starts_with("peek") {
+            let _ = w.show();
+        }
+    }
+}
+
 fn dispatch_hotkey(app: &AppHandle, accel: &str) {
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("hotkey fired {accel}"));
@@ -5262,6 +5397,10 @@ fn dispatch_hotkey(app: &AppHandle, accel: &str) {
         let r = match action.as_str() {
             "snip" => snip_begin(app).await,
             "clip_peek" => clip_peek_begin(app).await,
+            "peek_toggle" => {
+                toggle_peeks(&app);
+                Ok(())
+            }
             _ => Ok(()),
         };
         if let Err(e) = r {

@@ -127,6 +127,7 @@ export function Settings({
         const failed = await source.hotkeysSet([
           [next.snip, "snip"],
           [next.clip, "clip_peek"],
+          [next.toggle, "peek_toggle"],
         ]);
         if (failed.length) {
           onToast(`这些组合被别的软件占了：${failed.join("、")}`, true);
@@ -639,10 +640,22 @@ export function Settings({
           {
             id: "hk-clip",
             label: "把剪贴板里的图用贴图打开",
-            hint: "最近 10 张会留在历史里，窗内按 ← → 翻",
-            kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局",
+            hint: "连按可以依次贴出最近 10 张（来自截图目录与回收站），窗内 ← → 也能翻",
+            kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局 历史",
             node: (
               <HotkeyField value={hotkeys.clip} onChange={(v) => void applyHotkey("clip", v)} />
+            ),
+          },
+          {
+            id: "hk-toggle",
+            label: "显示 / 隐藏屏幕上所有贴图",
+            hint: "系统级：对一下底下的内容时一下全收走，再按一下全放回来",
+            kw: "隐藏 显示 贴图 全部 收起 alt f3 toggle 系统 全局",
+            node: (
+              <HotkeyField
+                value={hotkeys.toggle}
+                onChange={(v) => void applyHotkey("toggle", v)}
+              />
             ),
           },
           { id: "k1", label: "全屏预览选中的素材", kw: "空格 预览", node: <Kbd keys={["Space"]} /> },

@@ -630,7 +630,8 @@ export interface Source {
   openRecycle(): Promise<void>;
   /* 应用内回收站（0.1.6）：删除=搬进 <data>/trash，下面四个管列表与清账 */
   trashList(): Promise<TrashEntry[]>;
-  trashRestore(ids: string[]): Promise<number>;
+  /** 还原（`to` 给了就还原到那个目录，不给回原位置） */
+  trashRestore(ids: string[], to?: string): Promise<number>;
   trashPurge(ids: string[]): Promise<number>;
   trashEmpty(): Promise<number>;
 

@@ -181,15 +181,29 @@ pub fn list(data_dir: &Path) -> Vec<TrashEntry> {
 /// 还原：搬回原路径（父目录不在就建）。原位置已有同名文件时**改用不冲突的名字**。
 /// 返回实际落盘的新路径（调用方拿它刷新索引）。
 pub fn restore(data_dir: &Path, ids: &[String]) -> Res<Vec<String>> {
+    restore_to(data_dir, ids, None)
+}
+
+/// 还原到**指定目录**（`to = None` 就是回原位置）。
+///
+/// 为什么需要它（owner 2026-11-19）：截图贴图默认进回收站，用户觉得这张值得留，
+/// 应该能一句话"存到我的素材文件夹"，而不是先还原到 screenshots 再手动搬一次。
+pub fn restore_to(data_dir: &Path, ids: &[String], to: Option<&Path>) -> Res<Vec<String>> {
     let all = list(data_dir);
     let mut restored = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    if let Some(d) = to {
+        fs::create_dir_all(d).map_err(|e| format!("建目标目录失败：{e}"))?;
+    }
     for id in ids {
         let Some(entry) = all.iter().find(|t| &t.id == id) else {
             errors.push(format!("找不到回收站记录：{id}"));
             continue;
         };
-        let orig = PathBuf::from(&entry.original_path);
+        let orig = match to {
+            Some(d) => d.join(&entry.name),
+            None => PathBuf::from(&entry.original_path),
+        };
         let target = if orig.exists() {
             let parent = orig.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
             unique_dest(&parent, &entry.name)
@@ -304,6 +318,25 @@ mod tests {
         assert_ne!(back[0], file.to_string_lossy(), "不能占用原路径");
         assert_eq!(fs::read(&file).unwrap(), b"new", "用户文件不能被覆盖");
         assert_eq!(fs::read(Path::new(&back[0])).unwrap(), b"old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_to_custom_dir() {
+        let root = tmp("to-dir");
+        let data = root.join("data");
+        let lib = root.join("lib");
+        let out = root.join("out");
+        fs::create_dir_all(&lib).unwrap();
+        let file = lib.join("shot.png");
+        fs::write(&file, b"png").unwrap();
+        let entries = put(&data, &[file.clone()]).unwrap();
+
+        let back = restore_to(&data, &[entries[0].id.clone()], Some(&out)).expect("restore_to");
+        assert_eq!(back.len(), 1);
+        assert_eq!(Path::new(&back[0]).parent(), Some(out.as_path()));
+        assert_eq!(fs::read(&back[0]).unwrap(), b"png");
+        assert!(!file.exists(), "不能再回原位置");
         let _ = fs::remove_dir_all(&root);
     }
 

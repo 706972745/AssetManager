@@ -11,10 +11,10 @@
 <br>
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-gray?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.3.27-blue?style=flat-square)](../../releases)
+[![Version](https://img.shields.io/badge/Version-0.3.28-blue?style=flat-square)](../../releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-gray?style=flat-square)](#平台与构建)
 [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%20v2-gray?style=flat-square)](https://tauri.app)
-[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.27)-blue?style=flat-square)](#已知限制)
+[![Status](https://img.shields.io/badge/Status-正式版%20(0.3.28)-blue?style=flat-square)](#已知限制)
 
 <br>
 
@@ -63,8 +63,9 @@
 
 | 键 | 作用 |
 |---|---|
-| `F1` | 选区截图（松手进标注态，**不会自动复制、不会自动关闭**） |
-| `F3` | 贴图板（剪贴板贴图 / 多开 / 重启还原） |
+| `F1` | 选区截图（松手进标注态，**不会自动复制、不会自动关闭**；截图时屏幕上的贴图不会被藏起来） |
+| `F3` | 贴图：把剪贴板里的图贴到屏幕上；**连按依次贴出最近 10 张**（来自 `screenshots` 与软件回收站），窗内 `←` `→` 也能翻 |
+| `Alt+F3` | **显示 / 隐藏屏幕上所有贴图**（对一下底下的内容时一下全收走，再按一下全放回来；可在设置里改键） |
 | `Ctrl+K` | 命令面板 |
 | `Space` | 预览当前素材 |
 | `Ctrl+C` / `Ctrl+V` | 复制原文件 / 在灵感板里粘贴入库 |
@@ -84,6 +85,14 @@ cd .. && ./app/node_modules/.bin/tauri dev
 # 打包（产出 src-tauri/target/release/bundle/nsis/AssetManager_<ver>_x64-setup.exe）
 ./app/node_modules/.bin/tauri build
 ```
+
+## 0.3.28 更新了什么
+
+- **贴图默认带一圈蓝色边框**：白底网页/文档上贴图不再"糊成一片看不出边界"。右键菜单「蓝色边框」可关，关掉就是干净的图。
+- **按 `F1` 截图时贴图不消失**：以前会把贴图藏起来再冻结屏幕（贴图闪一下不见），现在全程留在画面上 —— 框选范围内有贴图会被一起截进去，这是刻意的。
+- **截图后中键贴图，图片默认进软件回收站**：想留底就在回收站里「还原」（回 `screenshots`）或「还原到…」（存到自己挑的文件夹）。
+- **`F3` 连按翻历史**：最近 10 张，来源只有 `screenshots` 与软件回收站两个地方（不再用内部剪贴板缓存），剪贴板里没有图时按 `F3` 也会翻历史。
+- **`Alt+F3` 一键收起 / 放回所有贴图**（设置里可改键）。
 
 ## 0.2.3 更新了什么
 

@@ -690,13 +690,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* 系统级快捷键（F1 截图 / F3 贴剪贴板）。
+  /* 系统级快捷键（F1 截图 / F3 贴剪贴板 / Alt+F3 显示隐藏贴图）。
      启动时按用户存的组合注册一次；设置里改完由设置面板自己再调一次。 */
   useEffect(() => {
     const saved = loadHotkeys();
     const list: [string, string][] = [
       [saved.snip, "snip"],
       [saved.clip, "clip_peek"],
+      [saved.toggle, "peek_toggle"],
     ];
     void source
       .hotkeysSet(list)
@@ -2368,10 +2369,10 @@ export default function App() {
     if (page === "trash") void loadTrash();
   }, [page, refreshKey, loadTrash]);
 
-  const restoreTrash = async (ids: string[]) => {
+  const restoreTrash = async (ids: string[], to?: string) => {
     try {
-      const n = await source.trashRestore(ids);
-      toast(`已还原 ${n} 项`);
+      const n = await source.trashRestore(ids, to);
+      toast(to ? `已还原 ${n} 项到 ${to}` : `已还原 ${n} 项`);
       await loadTrash();
       setRefreshKey((k) => k + 1);
     } catch (e) {
