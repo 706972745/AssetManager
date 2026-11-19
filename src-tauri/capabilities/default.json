@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗 + 截图覆盖层 + 所有无边框看图窗 + 灵感板窗。注意 `peek-*` / `board-*`：两者都是多开窗口（label 是 peek-1 / board-3…），只写单个名字匹配不上 —— 曾经因此拖不动窗口（拖拽要 core:window:allow-start-dragging）。",
+  "description": "主窗 + 截图覆盖层 + 所有无边框看图窗 + 灵感板窗。注意 `peek-*` / `board-*`：两者都是多开窗口（label 是 peek-1 / board-3…），只写单个名字匹配不上 —— 曾经因此拖不动窗口（拖拽要 core:window:allow-start-dragging）。`allow-set-position` 是灵感板「Shift+滚轮挪窗口」用的（读位置/读显示器本来就在 core:default 里）。",
   "windows": ["main", "snip", "peek", "peek-*", "board-*"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position"
   ]
 }

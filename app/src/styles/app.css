@@ -217,7 +217,13 @@
   color: var(--accent);
 }
 
-/* 缩略图尺寸滑杆：3 档吸附，视觉照 FontManager 字号滑杆（2px 轨道 + 8px 蓝点） */
+/* 缩略图尺寸滑杆：3 档吸附。外观照 FontManager 的字号滑杆（`app.css:629-670`，P0-3 2026-11-19）：
+   轨道 4px + 渐变填充、滑块 15px 近白 + 光晕、hover 放大。
+   与 FM 唯一刻意的差别是**填充色**：FM 的 `--accent-a` / `--accent-b` 是"实色浅灰"
+   （刻意的无色语义），而 AM 的 `--accent-a` 是 16% 蓝 —— 同名不同义（见
+   docs/FontManager-视觉与体验对齐规范 §2.1 的告警）。照抄 var(--accent-a) 在 AM 里
+   会渲染成一条几乎透明的蓝，所以渐变改用 AM 自己的两个蓝：柔和光晕 → 主色。
+   两套主题都取变量，不硬编码深色。 */
 .topbar-size {
   display: flex;
   align-items: center;
@@ -229,30 +235,61 @@
   appearance: none;
   -webkit-appearance: none;
   width: clamp(72px, 9vw, 110px);
-  height: 16px;
-  background: transparent;
+  /* 轨道就是输入框自己（FM 的做法，不再画 ::-webkit-slider-runnable-track），
+     所以高度 = 轨道高度，15px 的滑块靠缩略图溢出显示。
+     `--fill` 由 Chrome.tsx 按当前档位塞进来（0% / 50% / 100%）；
+     给个 0% 兜底，万一哪天忘了传，也只是"没有进度色"，不会连轨道一起消失。 */
+  height: 4px;
+  border-radius: 2px;
+  background:
+    linear-gradient(90deg, var(--accent-glow), var(--ui-accent)) 0 0 / var(--fill, 0%) 100%
+      no-repeat,
+    var(--e2);
   outline: none;
   cursor: pointer;
-}
-.topbar-size input[type="range"]::-webkit-slider-runnable-track {
-  height: 2px;
-  border-radius: 1px;
-  background: var(--ui-line);
 }
 .topbar-size input[type="range"]::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 8px;
-  height: 8px;
-  margin-top: -3px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: none;
+  /* 与 FM 同值：近白滑块 + 1px 暗环。两套主题都用它 —— 浅色下靠这圈暗环和投影立住 */
+  background: #f5f5f7;
+  border: none;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 0 10px var(--accent-glow-soft),
+    var(--shadow-ground);
+  transition: transform var(--t-micro) var(--ease-std), box-shadow var(--t-quick) var(--ease-std);
 }
+.topbar-size input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 0 16px var(--accent-glow),
+    var(--shadow-ground);
+}
+.topbar-size input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(1.05);
+}
+/* 焦点靠 **thumb ring** 而不是轨道 outline（与 FontManager `app.css:667-672` 一致）：
+   轨道只有 4px 高，套 outline 会变成一条贴着轨道的细长条，既难看也说不清焦点在哪。
+   所以 input 自己不出框，把环画在滑块上。
+   `outline: none` 之后**必须**保证键盘 Tab 过来仍然看得出焦点 —— 下面那条 5px 环
+   就是唯一的焦点指示，不许删。颜色沿用 `var(--accent-a)`：它本来就是 AM 的
+   focus-ring 色（原来那条 outline 用的也是它），只是位置从轨道挪到滑块、从 2px 加到 5px。 */
 .topbar-size input[type="range"]:focus-visible {
-  outline: 2px solid var(--accent-a);
-  outline-offset: 2px;
-  border-radius: 2px;
+  outline: none;
+}
+.topbar-size input[type="range"]:focus-visible::-webkit-slider-thumb {
+  /* 叠加在滑块原有的三层（1px 暗环 / 光晕 / 投影）之上，**不覆盖**它们：
+     否则聚焦时滑块会突然"掉"一层阴影，看着像缩小了一圈。 */
+  box-shadow:
+    0 0 0 5px var(--accent-a),
+    0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 0 10px var(--accent-glow-soft),
+    var(--shadow-ground);
 }
 .size-value {
   /* 与 FontManager 一样只报像素值，等宽、11px、次弱色（「小/中/大」进 title） */
@@ -1601,11 +1638,13 @@
   padding: 22px;
   z-index: 96;
   /* 入场：遮罩 0.18s 淡入 + 面板从下方 32px 滑上来（与 FontManager 的设置层同一节奏）。
-     纯 CSS 而不是 motion —— 见 Settings.tsx 里那段注释。 */
-  animation: set-scrim-in var(--t-quick) ease-out;
+     纯 CSS 而不是 motion —— 见 Settings.tsx 里那段注释。
+     曲线用 `--ease-out`（P0-5）：原来写死的 `cubic-bezier(.32,.72,0,1)` 不在 FM 的三条
+     曲线里，起手太"软"，和 FM 的进场不是一个味。 */
+  animation: set-scrim-in var(--t-quick) var(--ease-out);
 }
 .set-sheet {
-  animation: set-sheet-in var(--t-state) cubic-bezier(0.32, 0.72, 0, 1);
+  animation: set-sheet-in var(--t-state) var(--ease-out);
 }
 @keyframes set-scrim-in {
   from {
@@ -1627,9 +1666,15 @@
   display: flex;
   min-height: 0;
   border: 1px solid var(--ui-line);
-  border-radius: 10px;
-  background: var(--canvas);
-  box-shadow: var(--shadow-mass);
+  /* P0-6（2026-11-19）：照 FM `.settings-panel`（app.css:8556-8567）——
+     底板 `--e3`（深色 #242422，比卡片 `--e1` #1a1a18 亮一级，FM 就是"面板比卡片亮"）、
+     圆角 12px、环境阴影。
+     只动面板这一层：里面的 `.set-card` 等卡片底色（`--ui-panel` / `--e1`）**不动**，
+     否则面板和卡片会糊成一片。
+     阴影用 `--shadow-ambient`（FM 面板就是 ambient，而不是更实的 mass）。 */
+  border-radius: 12px;
+  background: var(--e3);
+  box-shadow: var(--shadow-ambient);
   overflow: hidden;
 }
 
@@ -4873,12 +4918,15 @@ body.board-body #root {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  /* 深灰底 + 极淡的网格，让"没有边界"这件事看得见（PureRef 也是这么暗示的） */
+  /* 深灰底 + 极淡的**点阵**，让"没有边界"这件事看得见（PureRef 也是这么暗示的）。
+     owner 2026-11-19：原来画的是网格线（两条 linear-gradient 交叉），改成点。
+     间距 48px 沿用原网格的值；颜色走 `--board-dot`（tokens.css 里两套主题各一份）。
+     位置和原来一样画在窗口层（`.board-root`）而不是画布层（`.board-canvas`）——
+     原网格本来就不跟 transform 缩放，点阵保持同一种做法，缩放时底板不跟着晃。 */
   background-color: #101013;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-image: radial-gradient(circle, var(--board-dot) 1px, transparent 1.6px);
   background-size: 48px 48px;
+  background-position: 0 0;
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
@@ -7215,7 +7263,8 @@ body.am-dragging * {
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
   max-height: 320px;
   overflow: auto;
-  animation: suggest-in 120ms ease;
+  /* 进场曲线换成令牌（P0-5）：下拉是"进场"，用 `--ease-out` 而非浏览器默认 ease */
+  animation: suggest-in 120ms var(--ease-out);
 }
 @keyframes suggest-in {
   from {
@@ -7341,7 +7390,7 @@ body.am-dragging * {
   font: inherit;
   font-size: var(--fs-11);
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 120ms var(--ease-std), background 120ms var(--ease-std);
 }
 .lang-trigger:hover,
 .lang-trigger.on {
@@ -7369,7 +7418,9 @@ body.am-dragging * {
   border-radius: var(--r-4);
   background: var(--e1);
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
-  animation: suggest-in 110ms ease;
+  /* 和 `.lang-trigger` 是一对（触发按钮 + 它的下拉），曲线必须同一套，
+     所以跟着换成 `--ease-out`（P0-5）；时长 110ms 保持原值不动 */
+  animation: suggest-in 110ms var(--ease-out);
 }
 .lang-item {
   position: relative;
@@ -7411,4 +7462,16 @@ body.am-dragging * {
   display: grid;
   place-items: center;
   color: var(--accent);
+}
+
+/* ============================================================================
+   浅色主题：设置面板里卡片的底色（P0-6 的收尾，2026-11-19）
+   `--e3`（面板）和 `--ui-panel`（卡片）在浅色下都是 #ffffff，卡片只剩 1px 发丝线
+   分界，看着像"没有卡片"。FontManager 的做法是卡片走 `--e1`（浅色 `#f2f2ee`），
+   比面板低一档，靠底色分层而不是靠描边 —— 这里跟它一致。
+   **只覆盖 `.set-card`**：`tokens.css` 里的 `--e3` / `--ui-panel` 别的地方也在用，
+   改令牌会连带动到别处的配色。
+   ============================================================================ */
+html[data-theme="light"] .set-card {
+  background: var(--e1);
 }

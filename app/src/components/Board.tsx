@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardPaste, Maximize2, Minus, Plus, X } from "lucide-react";
 import { source } from "../data/source";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
+import { createShiftWheelPan } from "../lib/windowShiftPan";
 
 /**
  * 灵感板（照 PureRef）：把一个标签下的所有素材铺在一块**无边界画布**上。
@@ -117,6 +118,20 @@ export function Board() {
   const [active, setActive] = useState<number | null>(null); // 悬停/拖动中的那张：显示缩放手柄
   /* 操作反馈（粘贴成功/失败）：画布上没有 toast，横幅也不该常驻，就一条两秒半的提示 */
   const [hint, setHint] = useState<{ text: string; bad: boolean } | null>(null);
+
+  /* Shift + 滚轮 = 挪**窗口**在屏幕上的位置（owner 2026-11-19）。
+     它自己管 rAF 合帧与窗口几何缓存，所以整块板只建一次；挂载/卸载跟着组件走。 */
+  const winPan = useMemo(
+    () =>
+      createShiftWheelPan({
+        onUnavailable: () =>
+          setHint({ text: "Shift+滚轮 移动窗口不可用（当前窗口缺少窗口权限）", bad: true }),
+      }),
+    []
+  );
+  /* StrictMode 会「挂载→清理→再挂载」：这里只取消挂起的一帧，控制器本身仍然可用
+     （详见 windowShiftPan 里 `cancel` 的注释）。 */
+  useEffect(() => () => winPan.cancel(), [winPan]);
 
   const at = (id: number): Box => pos.current.get(id) ?? boxById.get(id) ?? { x: 0, y: 0, w: CW, h: CW };
 
@@ -269,13 +284,25 @@ export function Board() {
 
   /* ---------------- 平移 / 拖图 / 缩放单张 ---------------- */
 
-  const pan = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  /**
+   * 平移画布的手势。`mask` 是**按下时那个键的 `MouseEvent.buttons` 位**（左键 1、中键 4）：
+   * 中键拖也是平移（见文件头的三条手感约定），所以不能一律按"左键还在不在"判断。
+   */
+  const pan = useRef<{
+    sx: number;
+    sy: number;
+    ox: number;
+    oy: number;
+    mask: number;
+  } | null>(null);
   const drag = useRef<{
     kind: "move" | "size";
     id: number;
     sx: number;
     sy: number;
     box: Box;
+    /** 拖图只认左键（下面的 `e.button === 0` 已限定），所以恒为 1 —— 见 onDown 里的说明 */
+    mask: number;
   } | null>(null);
   const tick = useRef(0);
   /** Alt+滚轮改大小的落库定时器（停止滚动 400ms 后写一次） */
@@ -287,6 +314,16 @@ export function Board() {
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      /* Shift + 滚轮 = **把这个窗口挪到屏幕上别的位置**（owner 原话："按住 shift 滚轮
+         不松，可以随意拖动窗口到任意位置"）。它既不是缩放画布、也不是平移画布内容，
+         所以必须在最前面截住 —— 不按 Shift 的滚轮继续走下面的缩放，两个行为不许混。
+         一次滚一格窗口移动约 60px，连续滚就连续移；边界由 `windowShiftPan` 夹在
+         当前显示器工作区内（不会推到任务栏底下抓不回来）。 */
+      if (e.shiftKey) {
+        winPan.handle(e);
+        return;
+      }
+
       const rect = root.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
@@ -328,10 +365,49 @@ export function Board() {
     };
     root.addEventListener("wheel", onWheel, { passive: false });
     return () => root.removeEventListener("wheel", onWheel);
-  }, [applyVp, recompute, remember]);
+  }, [applyVp, recompute, remember, winPan]);
 
   useEffect(() => {
+    /* 一次指针交互的**收尾**（松手 / 事件丢了 / 窗口失焦都走这里）。
+       拖图收尾要把最终位置写回 `pos` 并落库；平移收尾只要清状态重算可见集。 */
+    const settle = () => {
+      if (pan.current) {
+        pan.current = null;
+        rootRef.current?.classList.remove("panning");
+        recompute();
+      }
+      const d = drag.current;
+      if (!d) return;
+      const el = canvasRef.current?.querySelector<HTMLElement>(`[data-img="${d.id}"]`);
+      if (el) {
+        pos.current.set(d.id, {
+          x: Math.round(parseFloat(el.style.left) || d.box.x),
+          y: Math.round(parseFloat(el.style.top) || d.box.y),
+          w: Math.round(parseFloat(el.style.width) || d.box.w),
+          h: Math.round(parseFloat(el.style.height) || d.box.h),
+        });
+      }
+      remember(d.id);
+      drag.current = null;
+      rootRef.current?.classList.remove("dragging-img");
+      recompute();
+    };
+
     const onMove = (e: MouseEvent) => {
+      /* **按下的那个键已经不在了 = 这次交互其实早结束了。**
+         mouseup 不一定落到我们手里：拖标题栏移动窗口时，Tauri v2 内置的 drag-region 会把
+         mousedown 交给系统走标题栏拖动（Windows 上是 caption 的模态循环，结尾的
+         WM_LBUTTONUP 归标题栏，不进 WebView），WebView 收不到那个 mouseup；
+         拖到窗口外松手同理。以前这里不看 `e.buttons`，于是 pan/drag 永远留着 ——
+         松手后指针一动，画布就被"多出来的这段位移"推着继续跑。
+         其余拖拽（Tree / Views / Chrome / App 的拖放）全都守了这一条，只有这里漏了。
+         比的是**按下时那个键的位**（中键拖也在其中），不是硬写 `!== 1`。 */
+      const pend = pan.current;
+      const dend = drag.current;
+      if ((pend && (e.buttons & pend.mask) === 0) || (dend && (e.buttons & dend.mask) === 0)) {
+        settle();
+        return;
+      }
       const p = pan.current;
       if (p) {
         vp.current.x = p.ox + (e.clientX - p.sx);
@@ -359,39 +435,31 @@ export function Board() {
         el.style.height = `${h}px`;
       }
     };
-    const onUp = () => {
-      if (pan.current) {
-        pan.current = null;
-        recompute();
-      }
-      const d = drag.current;
-      if (d) {
-        const el = canvasRef.current?.querySelector<HTMLElement>(`[data-img="${d.id}"]`);
-        if (el) {
-          pos.current.set(d.id, {
-            x: Math.round(parseFloat(el.style.left) || d.box.x),
-            y: Math.round(parseFloat(el.style.top) || d.box.y),
-            w: Math.round(parseFloat(el.style.width) || d.box.w),
-            h: Math.round(parseFloat(el.style.height) || d.box.h),
-          });
-        }
-        remember(d.id);
-        drag.current = null;
-        rootRef.current?.classList.remove("dragging-img");
-        recompute();
-      }
-    };
     window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("mouseup", settle);
+    /* 窗口失焦（Alt+Tab、点别的窗口、系统接管鼠标）也当作松手：
+       否则回来之后那次"按下的状态"还挂着。 */
+    window.addEventListener("blur", settle);
     return () => {
       window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("mouseup", settle);
+      window.removeEventListener("blur", settle);
     };
   }, [applyVp, recompute, boxById, remember]);
 
   const onDown = (e: React.MouseEvent) => {
     if (e.button === 2) return; // 右键交给菜单
     const t = e.target as HTMLElement;
+    /* **拖窗口的把手不参与画布平移**：顶栏是 `data-tauri-drag-region`，按下去由 Tauri
+       内置的 drag-region 处理（`start_dragging`，Windows 上走标题栏 caption 循环）整个挪窗口。
+       这里如果再起一个 pan，同一份位移会被用两次 —— 窗口在动、画布也在动
+       （owner 看到的"图片跟着窗口一起滑"），而且松手时 mouseup 被系统吃掉
+       （见下面 onMove 的注释），pan 清不掉，指针一动画面就继续跑。
+       换句话说：两个 handler 都想要这次 mousedown，谁也别指望另一个"会拦下来"，
+       各让一步最省事 —— 让窗口拖动拿到这次按下，画布不参与。 */
+    if (t.closest("[data-tauri-drag-region]")) return;
+    // 顶栏/缩放条上的按钮同理：按下按钮不该顺手把画布平移起来
+    if (t.closest("button")) return;
     const handle = t.closest<HTMLElement>("[data-handle]");
     const cell = t.closest<HTMLElement>("[data-img]");
     if (cell && e.button === 0) {
@@ -403,15 +471,33 @@ export function Board() {
         sx: e.clientX,
         sy: e.clientY,
         box: b,
+        /* 恒为 1：拖图只认左键（上面的 `e.button === 0` 已经限定），收尾判断只需问
+           "左键还在不在"。这里**不能**照 pan 那样写 `e.buttons` —— 中键+左键和弦时
+           会记成 5，之后只松开左键（buttons=4）时 `4 & 5 = 4 ≠ 0`，"还在按着"，
+           拖图状态就结束不了。pan 那处要覆盖中键/侧键，所以必须用 `e.buttons`。 */
+        mask: 1,
       };
       rootRef.current?.classList.add("dragging-img");
       e.preventDefault();
       return;
     }
-    pan.current = { sx: e.clientX, sy: e.clientY, ox: vp.current.x, oy: vp.current.y };
+    /* 中键按下去 WebView2 会在指针处插一个"自动滚动"锚点（那个四向箭头），
+       画布跟着它滚会和我们的平移打架 —— 主流做法是直接吃掉默认行为
+       （仓库里 `Snip.tsx:537` 就是同一条惯例）。只对中键做，左键不动。 */
+    if (e.button === 1) e.preventDefault();
+    pan.current = {
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: vp.current.x,
+      oy: vp.current.y,
+      /* 按下那一刻的位掩码原样记下来：左键=1、中键=4，鼠标侧键是 8/16。
+         以前写死 `e.button === 1 ? 4 : 1`，侧键起手会拿到 1 → 下一帧
+         `buttons & 1` 为 0 就被判成"已松手"，光标闪一下。 */
+      mask: e.buttons || (e.button === 1 ? 4 : 1),
+    };
     rootRef.current?.classList.add("panning");
-    const stop = () => rootRef.current?.classList.remove("panning");
-    window.addEventListener("mouseup", stop, { once: true });
+    /* `.panning` 的清除统一交给上面那个 effect 的 `settle`（mouseup / 丢事件 / 失焦
+       三种收尾都经它），这里不再另挂一个 once 监听 —— 两条路清同一个状态容易不同步。 */
   };
 
   /* ---------------- 粘贴（Ctrl+V）：落盘截图目录 + 入库 + 打上这块板的标签 ---------------- */
@@ -655,7 +741,11 @@ export function Board() {
       className="board-root"
       onMouseDown={onDown}
       onDoubleClick={(e) => {
-        const cell = (e.target as HTMLElement).closest<HTMLElement>("[data-img]");
+        const t = e.target as HTMLElement;
+        /* 双击顶栏是「最大化/还原窗口」（Tauri 内置的 drag-region 行为），
+           不该顺带把画布 fit 一遍 —— 和 onMouseDown 用同一条排除规则。 */
+        if (t.closest("[data-tauri-drag-region]")) return;
+        const cell = t.closest<HTMLElement>("[data-img]");
         if (cell) {
           void source.peekOpen([Number(cell.dataset.img)], 0).catch(() => {});
         } else {
