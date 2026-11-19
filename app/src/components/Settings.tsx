@@ -7,6 +7,7 @@ import { DataFolderCard } from "./DataFolderCard";
 import { LibraryCard } from "./LibraryCard";
 import { UpdateSection } from "./UpdateSection";
 import { onAppEvent } from "../data/source";
+import { LangSelect } from "./LangSelect";
 import {
   LOCALES,
   setLocalePref,
@@ -40,7 +41,7 @@ export type SettingsKey =
  * 界面上显示的是 `tk` 翻出来的文字。
  */
 const NAV: { key: SettingsKey; label: string; tk: TKey; icon: string }[] = [
-  { key: "general", label: "常用", tk: "nav.general", icon: "sliders" },
+  { key: "general", label: "通用", tk: "nav.general", icon: "sliders" },
   { key: "libs", label: "素材库", tk: "nav.libs", icon: "folder" },
   { key: "appearance", label: "外观", tk: "nav.appearance", icon: "image" },
   { key: "cache", label: "缓存与索引", tk: "nav.cache", icon: "database" },
@@ -279,23 +280,13 @@ export function Settings({
             hint: "立即生效；下次启动也保持",
             kw: "语言 language locale 中文 English 繁體 日本語 Deutsch Español Français Русский Português",
             node: (
-              <select
-                className="set-select"
+              <LangSelect
                 value={localePref}
-                onChange={(e) => {
-                  const v = e.target.value as LocalePref;
+                onChange={(v) => {
                   setLocalePref(v);
                   patch({ locale: v });
                 }}
-                aria-label="界面语言"
-              >
-                <option value="system">跟随系统</option>
-                {LOCALES.map((l) => (
-                  <option key={l.code} value={l.code}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
+              />
             ),
           },
           {
@@ -377,7 +368,7 @@ export function Settings({
       },
       {
         key: "general",
-        title: "常用",
+        title: "通用",
         tk: "nav.general",
         rows: [
           {
@@ -993,8 +984,11 @@ export function Settings({
             {shown.length === 0 ? (
               <p className="set-empty">没有匹配「{q.trim()}」的设置项。</p>
             ) : (
+              /* key 用 `section:标题`：语言 / 系统 / 通用 三张卡片的 section 都是 "general"，
+                 同 key 的兄弟节点会被 React 复用 —— 表现是「点快捷键，内容却是语言/系统，
+                 还重复一遍」。0.3.30 装上去当天就被 owner 抓到，这里必须唯一。 */
               shown.map((g) => (
-                <div className="set-card" key={g.key}>
+                <div className="set-card" key={`${g.key}:${g.title}`}>
                   <div className="set-card-head">
                     {t(g.tk)}
                     <span className="set-card-count">{g.rows.length}</span>

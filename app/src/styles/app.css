@@ -7209,8 +7209,10 @@ body.am-dragging * {
   list-style: none;
   border: 1px solid var(--hairline);
   border-radius: var(--r-4);
-  background: var(--e2);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.3);
+  /* 底色跟设置卡片同一个 `--e1`：下拉是浮层，但观感要和软件其它面板一套，
+     `--e2` 在浅色主题下偏亮（几乎纯白），放在深色侧栏旁边像贴了块纸 */
+  background: var(--e1);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
   max-height: 320px;
   overflow: auto;
   animation: suggest-in 120ms ease;
@@ -7319,4 +7321,94 @@ body.am-dragging * {
 .set-zoom-hint {
   font-size: var(--fs-10);
   color: var(--text-3);
+}
+
+/* ---- 语言选择器（0.3.30，照 FontManager 的外观）----
+   触发按钮就是个「当前语言 + 小箭头」，菜单是 fixed 弹层（设置面板内部会滚动，
+   absolute 会被 .set-body 的 overflow 裁掉）。 */
+.lang-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h);
+  min-width: 132px;
+  max-width: 200px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--e1);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-11);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.lang-trigger:hover,
+.lang-trigger.on {
+  border-color: var(--accent);
+}
+.lang-trigger-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.lang-trigger-caret {
+  flex: none;
+  color: var(--text-3);
+}
+.lang-menu {
+  position: fixed;
+  z-index: 3000;
+  max-height: 344px;
+  overflow: auto;
+  padding: 5px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-4);
+  background: var(--e1);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+  animation: suggest-in 110ms ease;
+}
+.lang-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  padding: 0 22px 0 9px;
+  border: 0;
+  border-radius: var(--r-4);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-11);
+  text-align: left;
+  cursor: default;
+}
+.lang-item.on {
+  background: var(--accent-a);
+  color: var(--text-1);
+}
+.lang-item-name {
+  flex: none;
+  color: inherit;
+}
+.lang-item-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-10);
+  color: var(--text-3);
+}
+.lang-item-tick {
+  position: absolute;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
 }
