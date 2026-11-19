@@ -706,12 +706,20 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
   z-index: 2;
 }
-/* 悬停 / 选中都保持同一套配色：徽标是"信息"，不该随交互换色 */
-.tile:hover .tile-badge,
-.tile.sel .tile-badge {
+/* 悬停不换色（徽标是信息，不该跟着鼠标闪） */
+.tile:hover .tile-badge {
   color: var(--badge-ink);
   background: var(--badge-bg);
   border-color: var(--badge-line);
+}
+/* **选中**翻成强调色：瓦片顶部那条 2px 蓝线在长图/深色图上很容易被忽略，
+   而右下角这块小方块是最好的"我看的是哪一张"的锚点（owner 2026-11-19 要求）。
+   写在这条之后是为了压住上面的 hover 规则（两次特异性相同，后写的赢）。 */
+.tile.sel .tile-badge {
+  color: #fff;
+  background: var(--accent);
+  border-color: transparent;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 .tile-name {
   position: absolute;

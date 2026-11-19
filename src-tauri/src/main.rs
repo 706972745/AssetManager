@@ -2257,8 +2257,19 @@ async fn spawn_peek(
        注意：这是 `WebviewWindow` 上的方法，`WebviewWindowBuilder` 没有 `on_window_event`。 */
     let lbl = rec.label.clone();
     let sc0 = win.scale_factor().unwrap_or(1.0);
+    /* HWND 先取出来（`isize` 是 Copy），下面的事件闭包里还要用。
+       DWM 的"不要圆角 / 不要描边"会被**任何一次几何变化**重置 ——
+       拖动、缩放、摆回选区原位都会，所以事件里每次都要补一刀；
+       否则用户拖一下贴图，蓝边就又回来了。 */
+    #[cfg(windows)]
+    let hwnd0 = win.hwnd().ok().map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let hwnd0: Option<isize> = None;
     win.on_window_event(move |event| match event {
         tauri::WindowEvent::Moved(p) => {
+            if let Some(h) = hwnd0 {
+                peek_square_corners_hwnd(h);
+            }
             peek_touch(&lbl, |r| {
                 r.x = p.x;
                 r.y = p.y;
@@ -2271,6 +2282,9 @@ async fn spawn_peek(
             });
         }
         tauri::WindowEvent::Resized(s) => {
+            if let Some(h) = hwnd0 {
+                peek_square_corners_hwnd(h);
+            }
             if s.width > 0 && s.height > 0 {
                 let long = (s.width.max(s.height) as f64 / sc0).round();
                 peek_touch(&lbl, |r| {
