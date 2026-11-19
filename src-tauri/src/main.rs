@@ -6114,4 +6114,51 @@ mod tests {
         assert_eq!(super::parse_query(Some("px=8")), 64, "小档位仍按 64 兜底");
         assert_eq!(super::parse_query(None), 256, "没有参数时的默认档");
     }
+
+    /// 贴图**内容盒**的比例必须等于图片比例：窗口 = 图 + 2×发光边（`spawn_peek` 里的
+    /// `(iw + pad, ih + pad)`），去掉边之后的内容盒就是 `(iw, ih)`。
+    ///
+    /// 为什么值得一条测试：owner 2026-11-19 报「长图转贴图被压扁」。根因是 `.peek-img`
+    /// 用了 `object-fit: fill` —— 窗口比例只要和图差一点点，图就被拉伸。CSS 已改成
+    /// `contain`，但 contain 只有在「内容盒比例 == 图比例」时才**正好铺满**（否则四周留透明缝）。
+    /// 这条测试钉的就是那个前提：别有人在 `spawn_peek` 里把 pad 只加一边、或者给内容盒
+    /// 单独加最小宽 —— 那样长图立刻回到"要么变形要么留缝"的老路上。
+    #[test]
+    fn peek_box_keeps_image_aspect() {
+        let pad = super::PEEK_GLOW * 2.0;
+        for (w, h) in [
+            (200u32, 1600u32), // 验证用的探针：1:8 竖长图
+            (1844, 9797),      // owner 实测报"压扁"的那张
+            (1920, 1080),      // 普通横图
+            (1080, 1920),      // 普通竖图
+            (800, 800),        // 方图
+        ] {
+            let (iw, ih) = super::peek_size_for(w, h, 342.0);
+            let want = w as f64 / h as f64;
+            let got = iw / ih;
+            assert!(
+                (got - want).abs() / want < 1e-9,
+                "{w}×{h} 的内容盒 {iw:.2}×{ih:.2} 比例 {got:.6} ≠ 图 {want:.6}"
+            );
+            // 长边落在默认 342 上（没被 min/max 夹走），窗口正向尺寸也不为 0
+            assert!(
+                (iw.max(ih) - 342.0).abs() < 1e-9,
+                "{w}×{h} 长边不是 342，实际 {iw:.2}×{ih:.2}"
+            );
+            assert!(iw + pad > 0.0 && ih + pad > 0.0);
+        }
+    }
+
+    /// 极窄长图（短边会被 `_ .max(24)` 抬起来）：**只允许留透明缝，不允许变形**。
+    /// 尺寸层已经尽力等比，剩下由 CSS `contain` 保证图本身不被拉伸。
+    #[test]
+    fn extreme_tall_peek_pads_not_stretches() {
+        let (iw, ih) = super::peek_size_for(100, 20000, 342.0);
+        assert_eq!(ih, 342.0, "长边仍是 342");
+        assert_eq!(iw, 24.0, "短边按 24 兜底（再窄就没法拖了）");
+        assert!(
+            iw / ih > 100.0 / 20000.0,
+            "兜底只会让盒子更宽（左右留透明缝），绝不会比图更窄"
+        );
+    }
 }
