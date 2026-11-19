@@ -894,6 +894,11 @@
   background: rgba(var(--ink-rgb), 0.02);
   z-index: 3;
 }
+/* 没选中素材：宽度收到 0（JS 里给），连左边那条分隔线一起收掉。
+   不然空着一条 348px 的灰边，看起来像"详情坏了"（owner 2026-11-19）。 */
+.detail.is-empty {
+  border-left-color: transparent;
+}
 /* 拖宽握把压在左边缘 10px 里，静止不画东西，靠近才出一条竖线 */
 .detail-resize {
   position: absolute;

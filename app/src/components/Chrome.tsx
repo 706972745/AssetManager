@@ -991,8 +991,14 @@ export function Detail({
     onToast(ok ? `已复制${what}` : `复制失败，可以手动选中`, !ok);
   };
 
+  /* 没选中素材时**整块收起来**（owner 2026-11-19：空着一条大灰边没有意义）。
+     宽度走 0，内容和左边那条分隔线一起被裁掉，网格自然占满。 */
   return (
-    <aside className="detail" style={{ width }} aria-label="详情">
+    <aside
+      className={`detail ${asset ? "" : "is-empty"}`}
+      style={{ width: asset ? width : 0 }}
+      aria-label="详情"
+    >
       <div
         className="detail-resize"
         role="separator"
@@ -1388,9 +1394,7 @@ export function Detail({
               </section>
             </div>
           </>
-        ) : (
-          <p className="muted">选一个素材看详情。空格全屏预览，Esc 关闭。</p>
-        )}
+        ) : null}
       </div>
     </aside>
   );
