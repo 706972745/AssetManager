@@ -5,7 +5,7 @@
  * 新东西必须落进对应分节，不要在文件末尾追加。
  * 本文件不持全局状态（状态在 `App.tsx`），文件操作一律走 `source.xxx`，不直接 invoke。
  */
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { SearchSuggest, useSuggest } from "./SearchSuggest";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
@@ -453,14 +453,6 @@ export function TopBar({
           value={sizeIndex}
           onChange={(e) => onSize(Number(e.target.value))}
           aria-label="缩略图大小"
-          /* 滑杆的"已填充"比例（P0-3）：照 FontManager 的做法，CSS 用
-             `var(--fill)` 决定渐变填充铺多宽。档位只有 0/1/2，所以是 0% / 50% / 100%。
-             纯展示属性，不参与取值（onChange 与 value 一个字没动）。 */
-          style={
-            {
-              "--fill": `${(sizeIndex / Math.max(1, SIZE_PX.length - 1)) * 100}%`,
-            } as CSSProperties
-          }
         />
         <span className="size-value">{SIZE_PX[sizeIndex]}px</span>
       </div>

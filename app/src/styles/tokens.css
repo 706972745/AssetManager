@@ -74,8 +74,18 @@
   --board-dot: rgba(255, 255, 255, 0.12);
   --accent: var(--ui-accent);
   --accent-a: rgba(91, 140, 255, 0.16);
-  --accent-glow: rgba(91, 140, 255, 0.35);
-  --accent-glow-soft: rgba(91, 140, 255, 0.18);
+  /* 强调色的第三、四档 + 渐变（FM 最终生效值 `app.css:8494-8495`，2026-11-19 补）。
+     注意 `--accent-a` 在 AM 与 FM **同名不同义**：FM 是实色 #5b8cff（当圆点/文字色），
+     AM 是 16% 淡蓝（被 20 多处当"选中态背景"用，行、瓦片、菜单 hover）。
+     所以这里**刻意不改 `--accent-a`** —— 一改全站的选中背景会变实心蓝、上面的字全看不清；
+     需要实色强调的地方一律用 `--ui-accent`（AM 已经是 #5b8cff）。
+     **预置令牌，本轮没有消费点，别当死代码删**：下一批「D 组」用来把 `.switch.on`
+     换成 `--accent-gradient`（FM `app.css:1379-1386` 的 `.pill-on`：渐变 + 顶部内高光
+     + `0 0 14px var(--accent-glow-soft)`），主按钮同理。 */
+  --accent-b: #2f6bff;
+  --accent-gradient: linear-gradient(135deg, #5b8cff, #2f6bff);
+  --accent-glow: rgba(91, 140, 255, 0.42);
+  --accent-glow-soft: rgba(91, 140, 255, 0.2);
   --danger: #e05a4a;
   /* 唯一允许的真红/真蓝（FontManager 设计统一 §1.3）：仅自绘光标用 */
   --caret-blue: #4c8dff;
@@ -83,11 +93,17 @@
   --scrim: rgba(0, 0, 0, 0.6);
 
   --glass-border: #2a2a27;
-  --glass-top-highlight: rgba(255, 255, 255, 0.1);
-  --glass-top-highlight-strong: rgba(255, 255, 255, 0.16);
-  --shadow-ground: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-ambient: 0 12px 36px rgba(0, 0, 0, 0.45);
-  --shadow-mass: 0 12px 36px rgba(0, 0, 0, 0.55);
+  /* 纸墨体系里"玻璃顶部高光"没有意义：留着会在卡片上缘画一道假亮边
+     （app.css 里 4 处拿它做 inset 阴影：342 / 925 / 1314 / 2609）。
+     FM `app.css:8518-8519` 直接置为 transparent —— 那 4 处假亮边会一并消失，这是预期的，
+     **不要为了补回高光再加别的 box-shadow**。 */
+  --glass-top-highlight: transparent;
+  --glass-top-highlight-strong: transparent;
+  /* 阴影三级：FM `app.css:8520-8522`。纸墨体系靠 1px 发丝线分界、不靠投影堆叠，
+     所以三档都比原来的 AM 值浅（原来 .4/.45/.55，且 mass/ambient 都用 12px 36px）。 */
+  --shadow-ground: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-ambient: 0 12px 32px rgba(0, 0, 0, 0.34);
+  --shadow-mass: 0 4px 12px rgba(0, 0, 0, 0.3);
 
   /* 字阶：新增代码只用 9 / 11 / 13；16 以上是标题 */
   --fs-9: 9px;
@@ -185,6 +201,9 @@ html[data-theme="light"] {
   /* 灵感板点阵色：板底始终是深灰（见 `:root` 里的说明），浅色主题同样用白点 */
   --board-dot: rgba(255, 255, 255, 0.12);
   --accent-a: rgba(27, 79, 224, 0.12);
+  /* 浅色的强调色第 3/4 档 + 渐变：FM `app.css:8498-8500`（浅色是另一套深蓝，别照抄深色值） */
+  --accent-b: #1a42b8;
+  --accent-gradient: linear-gradient(135deg, #1b4fe0, #1a42b8);
   --accent-glow: rgba(27, 79, 224, 0.3);
   --accent-glow-soft: rgba(27, 79, 224, 0.14);
   --danger: #c0392b;
@@ -193,11 +212,13 @@ html[data-theme="light"] {
   --scrim: rgba(20, 20, 18, 0.24);
 
   --glass-border: #e2e2dd;
-  --glass-top-highlight: rgba(255, 255, 255, 0.65);
-  --glass-top-highlight-strong: rgba(255, 255, 255, 0.9);
-  --shadow-ground: 0 1px 2px rgba(30, 30, 55, 0.12);
-  --shadow-ambient: 0 8px 24px rgba(20, 20, 18, 0.1);
-  --shadow-mass: 0 12px 36px rgba(20, 20, 18, 0.16);
+  /* 浅色同样置 transparent（FM 的 light 段不覆盖这两条，等于继承深色的 transparent） */
+  --glass-top-highlight: transparent;
+  --glass-top-highlight-strong: transparent;
+  /* 浅色阴影三级：FM `app.css:8531-8533` */
+  --shadow-ground: 0 1px 2px rgba(20, 20, 18, 0.06);
+  --shadow-ambient: 0 12px 32px rgba(20, 20, 18, 0.1);
+  --shadow-mass: 0 4px 12px rgba(20, 20, 18, 0.08);
 }
 
 /* ─── 基础 ────────────────────────────────────────────────────────────── */

@@ -150,7 +150,9 @@
   width: 100%;
   height: var(--control-h);
   padding: 0 12px 0 34px;
-  border: 1px solid var(--hairline);
+  /* 描边走 `--ui-line`（#2a2a27）而不是发丝线：发丝线是 5% 白，深色下输入框几乎
+     没有边界，看着不像一个能点的输入框。FM `app.css:8299-8301` 就是 --ui-line。 */
+  border: 1px solid var(--ui-line);
   border-radius: var(--r-4);
   /* 输入框在 FontManager 里是**白底**（#fff + 1px 发丝线），按钮才是 #f2f2ee 的浅灰；
      反过来会显得输入框「凹进去」。实测参照截图搜索框内是 (252,252,252)。 */
@@ -165,9 +167,12 @@
   border-color: var(--ui-line-hover);
 }
 .topbar-field:focus {
-  border-color: var(--accent);
+  /* FM `app.css:8304-8307`：聚焦只把描边换成强调色，**不加光晕**（纸墨体系不堆投影，
+     而且 3px 蓝雾会让输入框在浅色下显脏）。`--accent` 与 `--ui-accent` 同值，
+     这里写 `--ui-accent` 与 FM 的字面用法对齐。 */
+  border-color: var(--ui-accent);
   background: var(--ui-panel);
-  box-shadow: 0 0 0 3px var(--accent-a);
+  box-shadow: none;
 }
 .topbar-field::placeholder {
   color: var(--text-3);
@@ -217,13 +222,13 @@
   color: var(--accent);
 }
 
-/* 缩略图尺寸滑杆：3 档吸附。外观照 FontManager 的字号滑杆（`app.css:629-670`，P0-3 2026-11-19）：
-   轨道 4px + 渐变填充、滑块 15px 近白 + 光晕、hover 放大。
-   与 FM 唯一刻意的差别是**填充色**：FM 的 `--accent-a` / `--accent-b` 是"实色浅灰"
-   （刻意的无色语义），而 AM 的 `--accent-a` 是 16% 蓝 —— 同名不同义（见
-   docs/FontManager-视觉与体验对齐规范 §2.1 的告警）。照抄 var(--accent-a) 在 AM 里
-   会渲染成一条几乎透明的蓝，所以渐变改用 AM 自己的两个蓝：柔和光晕 → 主色。
-   两套主题都取变量，不硬编码深色。 */
+/* 缩略图尺寸滑杆：3 档吸附。外观照 FontManager **最终生效值**（`app.css:8755-8796`，
+   R8 §C-④ `9560` 明令「轨道类 2px 原样不动」）= 一条 2px 细线 + 一颗 8px 实心蓝点。
+   ⚠️ 2026-11-19 回退记录：上一版按规范里的 `app.css:629-670` 做成了「4px 轨道 + 渐变填充 +
+   15px 白旋钮 + 光晕 + hover 放大」，而 629-670 是**玻璃拟物时代的旧段**，已被 8755 覆盖。
+   FM 那边对手柄有一整段告警：白旋钮时代的 1px 暗环会让蓝点发脏、外圈光晕像"没聚焦"，
+   所以 `box-shadow: none` / `transform: none` 必须显式写死（连 :hover 一起），
+   否则一悬停光晕又回来了。 */
 .topbar-size {
   display: flex;
   align-items: center;
@@ -235,61 +240,48 @@
   appearance: none;
   -webkit-appearance: none;
   width: clamp(72px, 9vw, 110px);
-  /* 轨道就是输入框自己（FM 的做法，不再画 ::-webkit-slider-runnable-track），
-     所以高度 = 轨道高度，15px 的滑块靠缩略图溢出显示。
-     `--fill` 由 Chrome.tsx 按当前档位塞进来（0% / 50% / 100%）；
-     给个 0% 兜底，万一哪天忘了传，也只是"没有进度色"，不会连轨道一起消失。 */
-  height: 4px;
-  border-radius: 2px;
-  background:
-    linear-gradient(90deg, var(--accent-glow), var(--ui-accent)) 0 0 / var(--fill, 0%) 100%
-      no-repeat,
-    var(--e2);
+  height: 16px;
+  background: transparent;
   outline: none;
   cursor: pointer;
+}
+.topbar-size input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ui-line);
 }
 .topbar-size input[type="range"]::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 15px;
-  height: 15px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  /* 与 FM 同值：近白滑块 + 1px 暗环。两套主题都用它 —— 浅色下靠这圈暗环和投影立住 */
-  background: #f5f5f7;
-  border: none;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.25),
-    0 0 10px var(--accent-glow-soft),
-    var(--shadow-ground);
-  transition: transform var(--t-micro) var(--ease-std), box-shadow var(--t-quick) var(--ease-std);
+  background: var(--ui-accent);
+  border: 0;
+  box-shadow: none;
+  cursor: pointer;
+  /* 垂直居中补偿：Chromium 把 thumb 的**顶边**对齐 2px 轨道的顶边，
+     8px 的点会整体沉下去 (8-2)/2 = 3px。改轨道高度时这里要跟着重算。 */
+  margin-top: -3px;
 }
 .topbar-size input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.15);
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.25),
-    0 0 16px var(--accent-glow),
-    var(--shadow-ground);
+  /* 不缩放、不加光晕：8px 的点放大看不出来，只会让两个滑条手感各漂 */
+  transform: none;
+  box-shadow: none;
 }
-.topbar-size input[type="range"]::-webkit-slider-thumb:active {
-  transform: scale(1.05);
-}
-/* 焦点靠 **thumb ring** 而不是轨道 outline（与 FontManager `app.css:667-672` 一致）：
-   轨道只有 4px 高，套 outline 会变成一条贴着轨道的细长条，既难看也说不清焦点在哪。
-   所以 input 自己不出框，把环画在滑块上。
-   `outline: none` 之后**必须**保证键盘 Tab 过来仍然看得出焦点 —— 下面那条 5px 环
-   就是唯一的焦点指示，不许删。颜色沿用 `var(--accent-a)`：它本来就是 AM 的
-   focus-ring 色（原来那条 outline 用的也是它），只是位置从轨道挪到滑块、从 2px 加到 5px。 */
-.topbar-size input[type="range"]:focus-visible {
-  outline: none;
-}
+.topbar-size input[type="range"]::-webkit-slider-thumb:active,
 .topbar-size input[type="range"]:focus-visible::-webkit-slider-thumb {
-  /* 叠加在滑块原有的三层（1px 暗环 / 光晕 / 投影）之上，**不覆盖**它们：
-     否则聚焦时滑块会突然"掉"一层阴影，看着像缩小了一圈。 */
-  box-shadow:
-    0 0 0 5px var(--accent-a),
-    0 0 0 1px rgba(0, 0, 0, 0.25),
-    0 0 10px var(--accent-glow-soft),
-    var(--shadow-ground);
+  transform: none;
+  box-shadow: none;
+}
+/* 聚焦不靠光晕，改用滑块外一圈 2px 的间隙环（FM `app.css:8803-8805` 是同一个思路）——
+   键盘用户必须看得出焦点在哪，`input` 自己的 outline 已关掉，这一条是**唯一的焦点指示，不许删**。
+   环色用 `var(--accent-glow)`（.42 / 浅色 .3）：它比 `--accent-a`（16% 淡蓝）更实，5% 的
+   「淡蓝圈」在深色工具条上等于没画焦点，而可访问性要求焦点必须看得出来。
+   `--focus-ring-offset` 在 AM 还没建（规范 §2.1 记为 P2），用 2px 兜底 —— 令牌补上会自动接管。 */
+.topbar-size input[type="range"]:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent-glow);
+  outline-offset: var(--focus-ring-offset, 2px);
 }
 .size-value {
   /* 与 FontManager 一样只报像素值，等宽、11px、次弱色（「小/中/大」进 title） */
@@ -336,8 +328,9 @@
   width: 34px;
   border-radius: var(--r-2);
   background: var(--e3);
-  /* 与 FontManager .view-pill 同一组：内高光 + 一圈极淡强调光 + 落影。
-     深色下 e3 是 10% 白，靠这三层把它「托」起来，才不会糊在 e1 底上。 */
+  /* 与 FontManager .view-pill 同一组：一圈极淡强调光 + 落影（2026-11-19 起
+     `--glass-top-highlight` 置 transparent，原来的「内高光」那一层自然消失，
+     滑块靠 e3 底 + 这两层「托」起来，别再补回 inset 亮边）。 */
   box-shadow:
     inset 0 1px 0 var(--glass-top-highlight),
     0 0 10px var(--accent-glow-soft),
@@ -991,6 +984,11 @@
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  /* ⚠️ 这四行的间距**不生效**：0.1.2 的「详情面板重排」段在后面用
+     `.detail-inner { padding: 0; gap: 0 }` 覆盖了它（内距交给吸顶的 `.detail-head` 和
+     `.detail-body`），而 `.detail-body` 现在正是 FM `app.css:3080-3083` 的
+     `padding: 20px 18px 24px; gap: 20px`。所以要调详情内距去改 `.detail-body`，
+     改这里不会有任何视觉效果（2026-11-19 核对时确认过）。 */
   padding: 18px 16px 22px;
   display: flex;
   flex-direction: column;
@@ -1100,8 +1098,8 @@
   font-size: var(--fs-10);
   color: var(--text-3);
 }
-/* 与预览卡的间距：原来用 -8px 负 margin 想抵消 .detail-inner 的 16px gap，
-   但图片一高就会压住这一行。改成 0，靠 gap 走。 */
+/* 与预览卡的间距：原来用 -8px 负 margin 想抵消 .detail-inner 的块间距（现为 20px，
+   2026-11-19 由 16 调宽），但图片一高就会压住这一行。改成 0，靠 gap 走。 */
 .detail-artmeta {
   display: flex;
   justify-content: space-between;
@@ -2597,7 +2595,9 @@
 .tag-chip {
   /* 逐值照 FontManager `.tag-chip`（owner 2026-11-17：两边标签必须一模一样）：
      不是胶囊而是 4px 圆角的小方块，13 号字里排 11px / 500，
-     内距 4 7 4 10（左边宽一点，留给图标），e2 实底 + ink .08 发丝线 + 顶部高光。
+     内距 4 7 4 10（左边宽一点，留给图标），e2 实底 + ink .08 发丝线。
+     原来还有一层「顶部高光」，2026-11-19 随 `--glass-top-highlight` 置 transparent 一起去掉，
+     纸墨体系靠描边分层，不靠 inset 亮边。
      以前这里是 21 高胶囊 + 10px 字，看起来像"筛选标签"，不像"这张图有哪些标签"。 */
   display: inline-flex;
   align-items: center;
