@@ -24,6 +24,7 @@ import {
 } from "../types";
 import { BrandMark, BlinkCaretInput, Icon, Menu, type MenuItem } from "./ui";
 import { COLOR_LABEL, autoTagLabel, colorClass, isAutoTag } from "../lib/tags";
+import { useT, type TKey } from "../lib/i18n";
 import type { ViewMode } from "./Views";
 import type { DirNode, RefItem, TagCount } from "../types";
 
@@ -106,23 +107,42 @@ export function TitleBar({
 
 /* ---------------------------------------------------------------- 顶栏 */
 
-const SORT_LABEL: Record<SortKey, string> = {
-  mtime_desc: "最近修改",
-  name_asc: "名称",
-  size_desc: "大小",
-  rating_desc: "评分",
+/** 排序项 → 文案 key（`t` 只能在渲染期取，所以这里只存 key） */
+const SORT_LABEL_KEY: Record<SortKey, TKey> = {
+  mtime_desc: "topbar.sort_mtime_desc",
+  name_asc: "topbar.sort_name",
+  size_desc: "topbar.sort_size",
+  rating_desc: "topbar.sort_rating",
 };
 
-export const KINDS: { key: string; label: string; kinds: number[] | null }[] = [
-  { key: "all", label: "全部类型", kinds: null },
-  { key: "image", label: "图片", kinds: [0] },
-  { key: "3d", label: "3D", kinds: [3] },
-  { key: "video", label: "视频", kinds: [1] },
-  { key: "doc", label: "文档", kinds: [4] },
+export const KINDS: { key: string; labelKey: TKey; kinds: number[] | null }[] = [
+  { key: "all", labelKey: "topbar.kind_all", kinds: null },
+  { key: "image", labelKey: "topbar.kind_image", kinds: [0] },
+  { key: "3d", labelKey: "topbar.kind_3d", kinds: [3] },
+  { key: "video", labelKey: "topbar.kind_video", kinds: [1] },
+  { key: "doc", labelKey: "topbar.kind_doc", kinds: [4] },
 ];
 
-const SIZE_LABEL = ["小", "中", "大"];
+const SIZE_LABEL_KEY: TKey[] = ["topbar.size_small", "topbar.size_medium", "topbar.size_large"];
 const SIZE_PX = [120, 176, 260];
+
+/** 色桶键 → 文案 key（`COLOR_LABEL` 是 `lib/tags` 里的中文表，这里只补翻译层） */
+const COLOR_LABEL_KEY: Record<string, TKey> = {
+  gray: "topbar.color_gray",
+  red: "topbar.color_red",
+  orange: "topbar.color_orange",
+  amber: "topbar.color_amber",
+  yellow: "topbar.color_yellow",
+  green: "topbar.color_green",
+  teal: "topbar.color_teal",
+  blue: "topbar.color_blue",
+  indigo: "topbar.color_indigo",
+  violet: "topbar.color_violet",
+  pink: "topbar.color_pink",
+  brown: "topbar.color_brown",
+  black: "topbar.color_black",
+  white: "topbar.color_white",
+};
 
 export function TopBar({
   text,
@@ -189,6 +209,7 @@ export function TopBar({
   trashFormat?: string | null;
   onTrashFormat?: (ext: string | null) => void;
 }) {
+  const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "sort" | "filter" | "color" } | null>(
     null
   );
@@ -209,9 +230,9 @@ export function TopBar({
   }, [menu, source]);
 
   const ORIENT_LABEL: Record<string, string> = {
-    landscape: "横向",
-    portrait: "纵向",
-    square: "方形",
+    landscape: t("topbar.orient_landscape"),
+    portrait: t("topbar.orient_portrait"),
+    square: t("topbar.orient_square"),
   };
   /* ---- 搜索联想（0.3.30，照 FontManager）----
      `sugOpen` 管面板开合，`sugActive` 是键盘选中项（-1 = 还没用方向键选过）。
@@ -253,10 +274,14 @@ export function TopBar({
   /* 回收站的"最近修改"其实是"最近删除"（条目只有删除时间这一个时间戳），
      文案必须跟着换，否则用户以为在按原文件的修改时间排。 */
   const sortLabel =
-    trashMode && sort === "mtime_desc" ? "最近删除" : SORT_LABEL[sort];
+    trashMode && sort === "mtime_desc" ? t("topbar.sort_deleted") : t(SORT_LABEL_KEY[sort]);
   const sortKeys: SortKey[] = trashMode
     ? ["mtime_desc", "name_asc", "size_desc"]
-    : (Object.keys(SORT_LABEL) as SortKey[]);
+    : (Object.keys(SORT_LABEL_KEY) as SortKey[]);
+
+  /** 颜色名（`COLOR_LABEL` 里没有的键原样显示，别让筛选按钮出现空白） */
+  const colorLabel = (c: string) =>
+    COLOR_LABEL_KEY[c] ? t(COLOR_LABEL_KEY[c]) : (COLOR_LABEL[c] ?? c);
 
   const openMenu = (e: React.MouseEvent<HTMLElement>, k: "sort" | "filter" | "color") => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -280,9 +305,9 @@ export function TopBar({
      **颜色不做** —— 顶栏那颗彩色按钮已经是颜色筛选，再放一遍就是两套入口）。
      Shape / 格式复用 `orient:*` / `fmt:*` 自动标签，评分走后端 `minRating`。 */
   const filterItems: MenuItem[] = [
-    { label: "类型", heading: true },
+    { label: t("topbar.type"), heading: true },
     ...KINDS.map((k) => ({
-      label: k.label,
+      label: t(k.labelKey),
       on: kindKey === k.key,
       check: kindKey === k.key,
       onPick: () => onKind(k.key),
@@ -292,21 +317,21 @@ export function TopBar({
     /* 下面几段像 FontManager 那样收进**二级菜单**：
        主菜单只留入口行，内容在左边的浮层里选 —— 一屏就能看全所有维度，
        不必在一个长列表里滚半天（owner 2026-11-17 指定）。 */
-    { label: "范围", heading: true },
+    { label: t("topbar.scope"), heading: true },
     {
-      label: "标签",
+      label: t("topbar.tags"),
       meta: activeTag ? "1" : undefined,
       on: !!activeTag,
       sub: [
-        { label: "全部标签", icon: ICO_TAG, on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
-        ...tags.map((t) => ({
-          label: t.name,
+        { label: t("topbar.all_tags"), icon: ICO_TAG, on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
+        ...tags.map((tag) => ({
+          label: tag.name,
           /* 标签行的图标口径和 FontManager 一致：手工标签 = 标签图标（不再是色点） */
-          icon: isAutoTag(t.name) ? ICO_AUTO : ICO_TAG,
-          meta: String(t.count),
-          on: activeTag === t.name,
-          check: activeTag === t.name,
-          onPick: () => pickTag(t.name),
+          icon: isAutoTag(tag.name) ? ICO_AUTO : ICO_TAG,
+          meta: String(tag.count),
+          on: activeTag === tag.name,
+          check: activeTag === tag.name,
+          onPick: () => pickTag(tag.name),
         })),
         /* 自动标签也要在这里出现（owner 2026-11-17：「筛选下、标签下自动标签没显示出来」）。
            FontManager 的筛选菜单是**手工 + 自动**混在同一列（按名字排序），
@@ -315,22 +340,22 @@ export function TopBar({
            排在手后面：手工是用户的，自动是软件推的，主次不能反。 */
         ...[...autoTags]
           .sort((a, b) => a.name.localeCompare(b.name))
-          .map((t) => ({
-            label: autoTagLabel(t.name),
+          .map((tag) => ({
+            label: autoTagLabel(tag.name),
             icon: ICO_AUTO,
-            meta: String(t.count),
-            on: activeTag === t.name,
-            check: activeTag === t.name,
-            onPick: () => pickTag(t.name),
+            meta: String(tag.count),
+            on: activeTag === tag.name,
+            check: activeTag === tag.name,
+            onPick: () => pickTag(tag.name),
           })),
       ],
     },
     {
-      label: "文件夹",
+      label: t("topbar.folders"),
       meta: dirNode ? "1" : undefined,
       on: !!dirNode,
       sub: [
-        { label: "全部文件夹", icon: ICO_DIR, on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
+        { label: t("topbar.all_folders"), icon: ICO_DIR, on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
         ...folders.map((d) => ({
           label: d.name,
           icon: ICO_DIR,
@@ -342,29 +367,29 @@ export function TopBar({
       ],
     },
     {
-      label: "形状",
+      label: t("topbar.shape"),
       meta: activeTag?.startsWith("orient:") ? "1" : undefined,
       on: !!activeTag?.startsWith("orient:"),
       sub: [
-        { label: "全部形状", icon: ICO_AUTO, on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
-        ...autoOf("orient").map((t) => ({
-          label: ORIENT_LABEL[t.name.slice("orient:".length)] ?? t.name,
+        { label: t("topbar.all_shapes"), icon: ICO_AUTO, on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
+        ...autoOf("orient").map((tag) => ({
+          label: ORIENT_LABEL[tag.name.slice("orient:".length)] ?? tag.name,
           icon: ICO_AUTO,
-          meta: String(t.count),
-          on: activeTag === t.name,
-          check: activeTag === t.name,
-          onPick: () => pickTag(t.name),
+          meta: String(tag.count),
+          on: activeTag === tag.name,
+          check: activeTag === tag.name,
+          onPick: () => pickTag(tag.name),
         })),
       ],
     },
     {
-      label: "评分",
+      label: t("topbar.rating"),
       meta: rating !== null ? `${rating}★` : undefined,
       on: rating !== null,
       sub: [
-        { label: "全部评分", icon: ICO_STAR, on: rating === null, check: rating === null, onPick: () => onRating(null) },
+        { label: t("topbar.all_ratings"), icon: ICO_STAR, on: rating === null, check: rating === null, onPick: () => onRating(null) },
         ...[5, 4, 3, 2, 1].map((n) => ({
-          label: `${n} 星及以上`,
+          label: t("topbar.rating_at_least", { n }),
           icon: ICO_STAR,
           on: rating === n,
           check: rating === n,
@@ -373,18 +398,18 @@ export function TopBar({
       ],
     },
     {
-      label: "格式",
+      label: t("topbar.format"),
       meta: activeTag?.startsWith("fmt:") ? "1" : undefined,
       on: !!activeTag?.startsWith("fmt:"),
       sub: [
-        { label: "全部格式", icon: ICO_AUTO, on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
-        ...autoOf("fmt").map((t) => ({
-          label: t.name.slice("fmt:".length).toUpperCase(),
+        { label: t("topbar.all_formats"), icon: ICO_AUTO, on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
+        ...autoOf("fmt").map((tag) => ({
+          label: tag.name.slice("fmt:".length).toUpperCase(),
           icon: ICO_AUTO,
-          meta: String(t.count),
-          on: activeTag === t.name,
-          check: activeTag === t.name,
-          onPick: () => pickTag(t.name),
+          meta: String(tag.count),
+          on: activeTag === tag.name,
+          check: activeTag === tag.name,
+          onPick: () => pickTag(tag.name),
         })),
       ],
     },
@@ -394,7 +419,7 @@ export function TopBar({
      （它们已经不在库里了），列出来只会点出一片空。 */
   const trashFilterItems: MenuItem[] = [
     {
-      label: "全部格式",
+      label: t("topbar.all_formats"),
       on: !trashFormat,
       check: !trashFormat,
       onPick: () => onTrashFormat?.(null),
@@ -420,9 +445,9 @@ export function TopBar({
             setSugOpen(true);
             setSugActive(-1);
           }}
-          placeholder="搜索文件名 / 标签…"
+          placeholder={t("topbar.search_placeholder")}
           inputClassName="topbar-field"
-          ariaLabel="搜索文件名或标签"
+          ariaLabel={t("topbar.search_aria")}
           onFocus={() => setSugOpen(true)}
           /* 点建议项那一下已经 `preventDefault`，不会走到这里；
              键盘 Tab 走开时靠它收面板 */
@@ -444,7 +469,7 @@ export function TopBar({
       </div>
 
       {!trashMode && (
-      <div className="topbar-size" title={`缩略图大小：${SIZE_LABEL[sizeIndex]}`}>
+      <div className="topbar-size" title={t("topbar.thumb_size", { size: t(SIZE_LABEL_KEY[sizeIndex]) })}>
         <input
           type="range"
           min={0}
@@ -452,7 +477,7 @@ export function TopBar({
           step={1}
           value={sizeIndex}
           onChange={(e) => onSize(Number(e.target.value))}
-          aria-label="缩略图大小"
+          aria-label={t("topbar.thumb_size_label")}
         />
         <span className="size-value">{SIZE_PX[sizeIndex]}px</span>
       </div>
@@ -462,8 +487,8 @@ export function TopBar({
       <button
         className={`ctl ctl-icon ${color ? "on" : ""}`}
         onClick={(e) => openMenu(e, "color")}
-        title={color ? `按颜色筛选：${COLOR_LABEL[color] ?? color}` : "按主色筛选"}
-        aria-label="按主色筛选"
+        title={color ? t("topbar.filter_by_color", { color: colorLabel(color) }) : t("topbar.filter_by_dominant_color")}
+        aria-label={t("topbar.filter_by_dominant_color")}
       >
         <span
           className="ctl-color-dot"
@@ -483,8 +508,8 @@ export function TopBar({
               : ""
         }`}
         onClick={(e) => openMenu(e, "filter")}
-        title={trashMode ? "筛选：格式" : "筛选：类型 / 标签 / 文件夹 / 形状 / 评分 / 格式"}
-        aria-label={`按类型筛选：${kind.label}`}
+        title={trashMode ? t("topbar.filter_trash") : t("topbar.filter_all")}
+        aria-label={t("topbar.filter_by_type", { type: t(kind.labelKey) })}
         aria-pressed={kindKey !== "all"}
       >
         <Icon name="funnel" size={13} stroke={1.5} className="ctl-ico" />
@@ -494,7 +519,7 @@ export function TopBar({
         <button
           className="ctl"
           onClick={(e) => openMenu(e, "sort")}
-          title={`排序：${sortLabel}`}
+          title={t("topbar.sort_title", { sort: sortLabel })}
         >
           <Icon name="sort" size={13} stroke={1.5} className="ctl-ico" />
           {sortLabel}
@@ -510,14 +535,14 @@ export function TopBar({
           />
           <button
             className={`view-btn ${view === "grid" ? "on" : ""}`}
-            title="常规网格"
+            title={t("topbar.view_grid")}
             onClick={() => onView("grid")}
           >
             <Icon name="grid" size={13} stroke={1.5} />
           </button>
           <button
             className={`view-btn ${view === "waterfall" ? "on" : ""}`}
-            title="瀑布流"
+            title={t("topbar.view_waterfall")}
             onClick={() => onView("waterfall")}
           >
             <Icon name="waterfall" size={13} stroke={1.5} />
@@ -536,7 +561,7 @@ export function TopBar({
           items={
             menu.kind === "sort"
               ? sortKeys.map((k) => ({
-                  label: SORT_LABEL[k],
+                  label: t(SORT_LABEL_KEY[k]),
                   on: sort === k,
                   check: sort === k,
                   onPick: () => onSort(k),
@@ -544,7 +569,7 @@ export function TopBar({
               : menu.kind === "color"
               ? [
                   {
-                    label: "全部颜色",
+                    label: t("topbar.all_colors"),
                     on: color === null,
                     check: color === null,
                     onPick: () => onColor(null),
@@ -553,7 +578,7 @@ export function TopBar({
                   },
                   ...(colorCounts.length
                     ? colorCounts.map(([k, n]) => ({
-                        label: COLOR_LABEL[k] ?? k,
+                        label: colorLabel(k),
                         meta: String(n),
                         on: color === k,
                         check: color === k,
@@ -561,7 +586,7 @@ export function TopBar({
                         /* 行首圆点 = 这个颜色本身（与顶栏那颗、缩略图上的色点同一套变量） */
                         dot: `var(--c-${k}, #8b8b86)`,
                       }))
-                    : [{ label: "还没有主色数据，滚一遍缩略图就会算出来", on: false, onPick: () => {} }]),
+                    : [{ label: t("topbar.no_color_data"), on: false, onPick: () => {} }]),
                 ]
               : trashMode
                 ? trashFilterItems

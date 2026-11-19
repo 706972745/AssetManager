@@ -89,6 +89,12 @@
   --accent-gradient: linear-gradient(135deg, #5b8cff, #2f6bff);
   --accent-glow: rgba(91, 140, 255, 0.42);
   --accent-glow-soft: rgba(91, 140, 255, 0.2);
+  /* 焦点环三件套（值抄 FontManager `tokens.css:40/113-114`）：宽度、间隙、颜色分开，
+     组件只写 `outline: var(--focus-ring-w) solid var(--focus-ring)`。
+     浅色主题不用覆盖 —— --accent-a 本身已经在 light 段换过值了。 */
+  --focus-ring: var(--accent-a);
+  --focus-ring-w: 2px;
+  --focus-ring-offset: 2px;
   --danger: #e05a4a;
   /* 唯一允许的真红/真蓝（FontManager 设计统一 §1.3）：仅自绘光标用 */
   --caret-blue: #4c8dff;

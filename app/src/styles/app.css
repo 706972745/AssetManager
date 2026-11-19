@@ -276,12 +276,11 @@
 }
 /* 聚焦不靠光晕，改用滑块外一圈 2px 的间隙环（FM `app.css:8803-8805` 是同一个思路）——
    键盘用户必须看得出焦点在哪，`input` 自己的 outline 已关掉，这一条是**唯一的焦点指示，不许删**。
-   环色用 `var(--accent-glow)`（.42 / 浅色 .3）：它比 `--accent-a`（16% 淡蓝）更实，5% 的
-   「淡蓝圈」在深色工具条上等于没画焦点，而可访问性要求焦点必须看得出来。
-   `--focus-ring-offset` 在 AM 还没建（规范 §2.1 记为 P2），用 2px 兜底 —— 令牌补上会自动接管。 */
+   环色用 `var(--accent-glow)`（.42 / 浅色 .3）：它比 `--accent-a` 的实色柔和一档，
+   在满是图标的工具条上不至于跟"选中"混；宽度与间隙走令牌（0.3.35 补齐）。 */
 .topbar-size input[type="range"]:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid var(--accent-glow);
-  outline-offset: var(--focus-ring-offset, 2px);
+  outline: var(--focus-ring-w) solid var(--accent-glow);
+  outline-offset: var(--focus-ring-offset);
 }
 .size-value {
   /* 与 FontManager 一样只报像素值，等宽、11px、次弱色（「小/中/大」进 title） */
@@ -328,11 +327,9 @@
   width: 34px;
   border-radius: var(--r-2);
   background: var(--e3);
-  /* 与 FontManager .view-pill 同一组：一圈极淡强调光 + 落影（2026-11-19 起
-     `--glass-top-highlight` 置 transparent，原来的「内高光」那一层自然消失，
-     滑块靠 e3 底 + 这两层「托」起来，别再补回 inset 亮边）。 */
+  /* 与 FontManager .view-pill 同一组：一圈极淡强调光 + 落影。纸墨体系没有内高光，
+     滑块靠 e3 底 + 这两层「托」起来，别再补回 inset 亮边。 */
   box-shadow:
-    inset 0 1px 0 var(--glass-top-highlight),
     0 0 10px var(--accent-glow-soft),
     var(--shadow-ground);
   pointer-events: none;
@@ -915,7 +912,6 @@
     linear-gradient(180deg, rgba(var(--ink-rgb), 0.05), rgba(var(--ink-rgb), 0.02));
   border: 1px solid rgba(var(--ink-rgb), 0.08);
   box-shadow:
-    inset 0 1px 0 var(--glass-top-highlight),
     0 0 28px var(--accent-glow-soft),
     var(--shadow-ground);
 }
@@ -1248,12 +1244,16 @@
   right: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* FM `app.css:8671-8678` 的定版：卡片间距 14（原来 12，多条连发时挤） */
+  gap: 14px;
   pointer-events: none;
   z-index: 90;
 }
 .toast {
   max-width: 340px;
+  /* 单行提示也要有 52 高：只有标题时不至于缩成一条细药丸（FM 同值） */
+  min-height: 52px;
+  box-sizing: border-box;
   padding: 12px 15px;
   border-radius: var(--r-8);
   border: 1px solid var(--ui-line);
@@ -1309,7 +1309,6 @@
   border: 1px solid var(--ui-line);
   background: var(--ui-menu);
   box-shadow:
-    inset 0 1px 0 var(--glass-top-highlight-strong),
     0 1px 2px rgba(0, 0, 0, 0.5),
     0 12px 32px rgba(0, 0, 0, 0.45);
   z-index: 95;
@@ -2611,7 +2610,6 @@
   border: 1px solid rgba(var(--ink-rgb), 0.08);
   border-radius: 4px;
   background: var(--e2);
-  box-shadow: inset 0 1px 0 var(--glass-top-highlight);
   font-size: var(--fs-11);
   font-weight: 500;
   color: var(--text-1);
@@ -3303,7 +3301,9 @@
 }
 .tag-edit-input {
   height: 26px;
-  font-size: var(--fs-12);
+  /* 原来写 var(--fs-12)：AM 字阶只有 9/11/13（R8 并档），12 未定义 →
+     font-size 整条失效、实际继承 body 的 11px。显式写成 11，行为与修复前一致。 */
+  font-size: var(--fs-11);
 }
 .tag-edit-label {
   margin-top: 4px;
@@ -3319,7 +3319,7 @@
   border-radius: 5px;
   border: 1px solid var(--ui-line);
   background: var(--e1);
-  font-size: var(--fs-12);
+  font-size: var(--fs-11); /* 同 .tag-edit-input：--fs-12 不存在，实际一直是 11px */
   color: var(--text-2);
   opacity: 0.85;
 }
@@ -4126,7 +4126,9 @@
   transform: scale(1.12);
 }
 .color-dot.on {
-  box-shadow: 0 0 0 2px var(--panel, #111110), 0 0 0 3px var(--accent);
+  /* 间隙环垫的是下拉菜单的底色（这个色板就画在 .menu 里）；
+     原来写 var(--panel) 但那个令牌不存在，浅色主题会露出 #111110 的黑圈。 */
+  box-shadow: 0 0 0 2px var(--ui-menu), 0 0 0 3px var(--accent);
 }
 
 /* 顶栏颜色筛选按钮里的小圆点：颜色来自 --c-<色桶>（见下方色桶变量） */
@@ -4262,7 +4264,9 @@
   padding: 0 6px;
   border: 1px solid var(--ui-line);
   border-radius: 4px;
-  background: var(--panel, transparent);
+  /* 原来写 var(--panel)，令牌不存在 → 一直是 transparent（跟卡片底糊在一起）。
+     同页其它输入框（.rn-form input）都用 --e1，这里对齐。 */
+  background: var(--e1);
   color: var(--text-1);
   font-size: var(--fs-11);
 }
@@ -4279,7 +4283,7 @@
   inset: 0;
   border-radius: inherit;
   opacity: 0.9;
-  transition: opacity var(--t-base, 180ms) ease;
+  transition: opacity var(--t-quick) ease;
   pointer-events: none;
 }
 .tile.loaded .tile-pal {
@@ -5056,7 +5060,7 @@ body.board-body #root {
   backdrop-filter: blur(8px);
   z-index: 10;
   opacity: 0.5;
-  transition: opacity var(--t-base, 180ms) ease;
+  transition: opacity var(--t-quick) ease;
 }
 .board-zoombar:hover {
   opacity: 1;
@@ -5092,7 +5096,7 @@ body.board-body #root {
   background: linear-gradient(180deg, rgba(16, 16, 19, 0.94), rgba(16, 16, 19, 0.55));
   backdrop-filter: blur(8px);
   opacity: 0.35;
-  transition: opacity var(--t-base, 180ms) ease;
+  transition: opacity var(--t-quick) ease;
   z-index: 10;
 }
 .board-top:hover {
@@ -5455,7 +5459,9 @@ body.board-body #root {
   transition: color var(--t-quick) ease;
 }
 .rating-pop-clear:hover {
-  color: var(--error);
+  /* 原来写 var(--error)，但 AM 从来没有 --error 令牌 → 整条 color 被丢弃，
+     hover 只有光标变化、字色不动。危险动作统一用 --danger（AM 自己的语义色）。 */
+  color: var(--danger);
 }
 
 /* ---------------- 引用（折叠） ---------------- */
@@ -5522,7 +5528,7 @@ body.board-body #root {
   transition: color var(--t-quick) ease;
 }
 .tag-chip-iconed .tag-chip-x:hover {
-  color: var(--error);
+  color: var(--danger); /* 同上：--error 未定义，hover 一直不生效 */
 }
 
 .tag-chip.tag-chip-auto {
@@ -6325,7 +6331,7 @@ body.board-body #root {
   overflow: auto;
   display: grid;
   place-items: center;
-  border-radius: var(--r-6);
+  border-radius: var(--r-8); /* 原 var(--r-6)：6 不在 R8 的 0/4/8/12 体系里，令牌未定义 → 一直是直角 */
   background: var(--e1);
   color: var(--text-3);
   font-size: var(--fs-11);
@@ -7335,8 +7341,8 @@ body.am-dragging * {
   cursor: pointer;
 }
 .set-select:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: var(--focus-ring-w) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 /* 「没有你的语言？」那一块：虚线框 + 浅底，和真的能改东西的行区分开
    （它只是两个外链，不是设置项） */

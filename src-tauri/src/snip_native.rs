@@ -3348,7 +3348,7 @@ mod bar_preview {
             c.draw_keys(); // render 里已经画过，这里再画一次确保 keys 矩形是这一帧的
 
             let px = std::slice::from_raw_parts(c.bits, (c.w * c.h * 4) as usize);
-            let mut check = |r: [i32; 4], name: &str| {
+            let check = |r: [i32; 4], name: &str| {
                 let mut bad = 0;
                 for y in r[1].max(0)..(r[1] + r[3]).min(c.h) {
                     for x in r[0].max(0)..(r[0] + r[2]).min(c.w) {

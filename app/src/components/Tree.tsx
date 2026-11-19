@@ -2,6 +2,7 @@ import { useRef, useEffect, useState, type ReactNode } from "react";
 import { motion } from "motion/react";
 import type { DirNode, Source } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 /** 侧栏行：图标 15 + 文字，与 FontManager .nav-row 同一套内距（行内 11 起、文字 35 起）。 */
 const ROW_PAD = 11;
@@ -111,6 +112,7 @@ export function Tree({
   collDock,
   tagDock,
 }: Props) {
+  const t = useT();
   const [roots, setRoots] = useState<DirNode[]>([]);
   const [kids, setKids] = useState<Map<number, DirNode[]>>(new Map());
   /* 一次只开一个库：activePath 指的那个展开目录树，其余只留一行「切换」 */
@@ -198,7 +200,7 @@ export function Tree({
   const startCreate = () => {
     const root = activeRoot;
     if (!root) {
-      onToast("还没有素材库：先在「设置 → 素材库」里加一个文件夹", true);
+      onToast(t("tree.no_library"), true);
       return;
     }
     const sel = selected != null ? nodesRef.current.get(selected) : null;
@@ -208,7 +210,7 @@ export function Tree({
       if (r && r.path === root.path) parent = sel;
     }
     closedRef.current = false;
-    setNewName("新建文件夹");
+    setNewName(t("tree.new_folder"));
     setCreating({ id: parent.id, path: parent.path });
     /* 输入行画在父行下面：父目录没展开就先把展开/子目录准备好，否则输入框看不见 */
     void (async () => {
@@ -247,7 +249,7 @@ export function Tree({
       setKids((m) => new Map(m).set(target.id, ch));
       const created = ch.find((c) => c.path === made) ?? ch.find((c) => c.name === name);
       if (created) onSelect(created);
-      onToast("已创建文件夹", false, made);
+      onToast(t("tree.folder_created"), false, made);
     } catch (e) {
       onToast(String(e), true);
     }
@@ -439,9 +441,9 @@ export function Tree({
     bi ? (
       <span
         className={`lib-builtin${active ? " on" : ""}`}
-        title="软件自己的截图目录：不占素材库名额，也不能移除"
+        title={t("tree.builtin_tip")}
       >
-        内置
+        {t("tree.builtin_chip")}
       </span>
     ) : null;
 
@@ -463,18 +465,18 @@ export function Tree({
           if (eatClickAfterDrag()) return;
           void switchLib(r);
         }}
-        title={`${r.path}\n点一下切换到这个素材库${
-          bi ? "\n（软件自己的截图目录，不占素材库名额）" : ""
+        title={`${r.path}\n${t("tree.switch_to_lib")}${
+          bi ? `\n${t("tree.builtin_note")}` : ""
         }`}
       >
         <span className="nav-icon lib-off">
           <Icon name="folder" size={15} stroke={1.5} />
         </span>
         {/* 内置库显示成「截图」：目录名 screenshots 是英文，用户看不出这是软件自己的 */}
-        <span className="tree-name lib-off">{bi ? "截图" : r.name}</span>
+        <span className="tree-name lib-off">{bi ? t("tree.screenshots") : r.name}</span>
         {builtinChip(bi, false)}
         <span className="tree-count">{r.assetCnt > 0 ? r.assetCnt : 0}</span>
-        <span className="lib-switch">切换</span>
+        <span className="lib-switch">{t("tree.switch")}</span>
       </div>
     );
   };
@@ -490,9 +492,9 @@ export function Tree({
           autoFocus
           value={newName}
           onChange={setNewName}
-          placeholder="新文件夹名称（回车创建）"
+          placeholder={t("tree.new_folder_placeholder")}
           inputClassName="tree-input"
-          ariaLabel="新建文件夹名称"
+          ariaLabel={t("tree.new_folder_aria")}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -558,7 +560,7 @@ export function Tree({
         <span className="nav-icon">
           <Icon name="folder" size={15} stroke={1.5} />
         </span>
-        <span className="tree-name">{bi ? "截图" : n.name}</span>
+        <span className="tree-name">{bi ? t("tree.screenshots") : n.name}</span>
         {builtinChip(bi, true)}
         <span className="tree-count">{n.assetCnt > 0 ? n.assetCnt : 0}</span>
       </div>
@@ -629,19 +631,19 @@ export function Tree({
             >
               <Icon name="chevron" size={10} stroke={2} className="rot90" />
             </span>
-            <span className="grow">素材库</span>
+            <span className="grow">{t("tree.libraries")}</span>
             {/* 多库上限（最多 3 个）写在标题上：用户不用点开菜单就知道还能加几个。
                 **内置截图库不计入** —— 否则三个自己的库只能挂两个。 */}
             <span
               className="lib-quota mono"
-              title={`已加入 ${userLibCount} / ${MAX_LIBS} 个素材库（软件自己的截图目录不计入）`}
+              title={t("tree.lib_quota_tip", { used: userLibCount, max: MAX_LIBS })}
             >
               {userLibCount}/{MAX_LIBS}
             </span>
             <button
               className="side-add"
-              title="在当前素材库里新建文件夹（会真的建在磁盘上）"
-              aria-label="在当前素材库里新建文件夹"
+              title={t("tree.new_folder_tip")}
+              aria-label={t("tree.new_folder_short")}
               onClick={(e) => {
                 e.stopPropagation();
                 startCreate();
@@ -665,7 +667,7 @@ export function Tree({
               data-dir-name={shotRoot.name}
               data-dir-root="1"
               data-dir-builtin="1"
-              title={`${shotRoot.path}\n软件截图存放目录（内置，不占素材库名额）`}
+              title={`${shotRoot.path}\n${t("tree.shot_dir_tip")}`}
               onMouseDown={(e) => pressDir(shotRoot.path, e)}
               onClick={() => {
                 if (eatClickAfterDrag()) return;
@@ -687,11 +689,11 @@ export function Tree({
                   e.stopPropagation();
                   setShotOpen((v) => !v);
                 }}
-                title={shotOpen ? "收起" : "展开"}
+                title={shotOpen ? t("tree.collapse") : t("tree.expand")}
               >
                 <Icon name="image" size={15} stroke={1.5} />
               </span>
-              <span className="grow">截图</span>
+              <span className="grow">{t("tree.screenshots")}</span>
               <span className="tree-count">{shotRoot.assetCnt > 0 ? shotRoot.assetCnt : 0}</span>
             </div>
             {shotOpen && kids.get(shotRoot.id)?.map((c) => row(c, 0))}
@@ -713,30 +715,30 @@ export function Tree({
         <div
           className="tree-row"
           onClick={onOpenLibrary}
-          title="在资源管理器中打开库根目录"
+          title={t("tree.reveal_lib_tip")}
         >
           <span className="nav-icon">
             <Icon name="reveal" size={15} stroke={1.5} />
           </span>
-          <span className="tree-name">在资源管理器中打开库</span>
+          <span className="tree-name">{t("tree.reveal_lib")}</span>
         </div>
-        <div className="tree-row" onClick={onTrash} title="打开 Windows 回收站（删除就是进这里，可还原）">
+        <div className="tree-row" onClick={onTrash} title={t("tree.trash_tip")}>
           <span className="nav-icon">
             <Icon name="trash" size={15} stroke={1.5} />
           </span>
-          <span className="tree-name">回收站</span>
+          <span className="tree-name">{t("tree.trash")}</span>
         </div>
-        <div className="tree-row" onClick={onAbout} title="关于">
+        <div className="tree-row" onClick={onAbout} title={t("tree.about")}>
           <span className="nav-icon">
             <Icon name="info" size={15} stroke={1.5} />
           </span>
-          <span className="tree-name">关于</span>
+          <span className="tree-name">{t("tree.about")}</span>
         </div>
-        <div className="tree-row" onClick={onShortcuts} title="快捷键一览">
+        <div className="tree-row" onClick={onShortcuts} title={t("tree.shortcuts_tip")}>
           <span className="nav-icon">
             <Icon name="keyboard" size={15} stroke={1.5} />
           </span>
-          <span className="tree-name">快捷键</span>
+          <span className="tree-name">{t("tree.shortcuts")}</span>
           {/* 照 FontManager 的 `<kbd class="kbd nav-kbd">?</kbd>`：语义是键帽，不是按钮 */}
           <kbd className="side-kbd">?</kbd>
         </div>

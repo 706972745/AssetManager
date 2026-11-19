@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "assetmanager"
-version = "0.3.34"
+version = "0.3.35"
 dependencies = [
  "am-core",
  "base64 0.22.1",

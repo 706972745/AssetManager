@@ -94,7 +94,6 @@ mod imp {
     const WM_KEYDOWN: usize = 0x0100;
     const WM_SYSKEYDOWN: usize = 0x0104;
     const LLKHF_INJECTED: u32 = 0x10;
-    const PM_REMOVE: u32 = 0x0001;
     const WM_QUIT: u32 = 0x0012;
 
     #[repr(C)]
