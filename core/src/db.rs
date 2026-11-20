@@ -1988,6 +1988,39 @@ pub fn all_asset_tags(c: &Connection) -> Res<Vec<(i64, Vec<i64>)>> {
 /// 用户层字段导出行：(id, 目录, 名字, 扩展名, 体积, 修改时间, 评分, 备注, 来源 URL)
 pub type UserRow = (i64, String, String, String, i64, i64, i64, String, String);
 
+/// 资产包导出用的一行：(id, 目录, 名字, 体积, 修改时间, 宽, 高, 评分, 备注)。
+///
+/// 与 `user_rows` 的区别：**全部**素材都算（不只是有用户数据的）——
+/// 资产包的语义是"把整个库搬到新机器"，没有评分备注的图同样要进去。
+pub type PackRow = (i64, String, String, i64, i64, Option<i64>, Option<i64>, i64, String);
+
+pub fn pack_rows(c: &Connection) -> Res<Vec<PackRow>> {
+    let mut st = c
+        .prepare(
+            "SELECT a.id, d.path, a.name, a.size, a.mtime, a.width, a.height, a.rating, a.note
+             FROM assets a JOIN dirs d ON d.id = a.dir_id
+             WHERE a.missing = 0
+             ORDER BY a.id",
+        )
+        .map_err(e2s)?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            ))
+        })
+        .map_err(e2s)?;
+    Ok(rows.filter_map(|x| x.ok()).collect())
+}
+
 pub fn user_rows(c: &Connection) -> Res<Vec<UserRow>> {
     let mut st = c
         .prepare(

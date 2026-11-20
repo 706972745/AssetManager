@@ -10,10 +10,13 @@ import type {
   DirProbe,
   DupGroup,
   ExifInfo,
+  ImportFilesReport,
+  ImportReport,
   ItemStat,
   MoveOutcome,
   MovePlan,
   MovePolicy,
+  PackageOut,
   Query,
   RefItem,
   RenameItem,
@@ -215,6 +218,14 @@ export const tauriSource: Source = {
   snapshotImport: () =>
     invoke!<[number, string, number, number] | null>("am_snapshot_import"),
   snapshotExportZip: (id) => invoke!<SnapshotZip | null>("am_snapshot_export_zip", { snapshot: id }),
+  /* 双击导入（0.4.2）：路径由后端经 `am://open-file` 递进来，这里只负责调一次。 */
+  openImportFile: (path) => invoke!<ImportReport | null>("am_open_import_file", { path }),
+  /* 界面导入（0.4.2）：任意格式的文件复制进当前文件夹 */
+  importFiles: (paths, target) =>
+    invoke!<ImportFilesReport>("am_import_files", { paths, target }),
+  pickAndImport: (target) => invoke!<ImportFilesReport | null>("am_pick_and_import", { target }),
+  exportPackage: (path) =>
+    invoke!<PackageOut | null>("am_export_package", { path: path ?? null }),
   snapshotOpen: (id) => invoke!<number>("am_snapshot_open", { snapshot: id }),
   snapshotPaste: (id) => invoke!<BoardPastedItem>("am_snapshot_paste", { snapshot: id }),
   snapshotCombine: (ids, name, mode) =>

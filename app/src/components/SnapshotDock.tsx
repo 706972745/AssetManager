@@ -162,7 +162,7 @@ export function SnapshotDock({
         </button>
         <button
           className="snap-add"
-          data-hint-text="导入快照清单（.json，只含图片编号，不含图片本身）"
+          data-hint-text="导入快照清单（.S-AssetManager，只含图片编号，不含图片本身）"
           aria-label="导入快照"
           onClick={onImport}
         >

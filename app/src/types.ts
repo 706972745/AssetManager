@@ -197,6 +197,53 @@ export interface SnapshotZip {
   missing: number;
 }
 
+/**
+ * 双击导入的结果（0.4.2）。
+ *
+ * 三种导出文件共用一个形状：`kind` 说明它是哪一类，`message` 是后端拼好的一句话
+ * （已经带数量，前端直接 toast），其余计数按 `kind` 取——没用到的字段是 0。
+ */
+export interface ImportReport {
+  kind: "userdata" | "snapshot" | "package";
+  message: string;
+  /** 用户数据：新登记了几个库根 */
+  libsAdded: number;
+  /** 用户数据：回填了几张素材（评分 / 备注 / 来源 / 标签） */
+  assetsUpdated: number;
+  /** 用户数据：有几条在索引里找不到 */
+  assetsUnknown: number;
+  /** 资源包：解出来几个文件 */
+  files: number;
+  /** 快照：新增几条 / 跳过几条坏数据 */
+  added: number;
+  skipped: number;
+  /** 快照：落库后的 id 与最终名字（重名会自动加 (2)） */
+  snapshotId: number;
+  snapshotName: string;
+  /** 资产包清单回填：还原了几张的评分 / 标签 */
+  rated: number;
+  tagged: number;
+}
+
+/** 界面里「导入文件到当前文件夹」的结果（0.4.2） */
+export interface ImportFilesReport {
+  /** 真正复制进来的文件数 */
+  copied: number;
+  /** 整条跳过的源（源就在目标里） */
+  skipped: number;
+  /** 这次新入库的素材数 */
+  added: number;
+  /** 失败条目：`[源路径, 人话原因]` */
+  failed: [string, string][];
+}
+
+/** 导出资产包的结果（0.4.2）：路径 + 打包数 + 跳过数（文件不在原位） */
+export interface PackageOut {
+  path: string;
+  ok: number;
+  skipped: number;
+}
+
 /** 灵感板上一张图（板上看到的永远是缩略图，操作一律落到 path 的源文件） */
 export interface BoardItemDto {
   id: number;
@@ -435,7 +482,7 @@ export interface Source {
   dataDir(): Promise<string>;
   /** 重建索引：清索引 + 全量重扫所有库根（进度走 scan://progress） */
   rebuildIndex(): Promise<void>;
-  /** 导出 userdata-<ts>.json，返回落盘路径 */
+  /** 导出 userdata-<时间戳>.L-AssetManager，返回落盘路径 */
   exportUserdata(): Promise<string>;
   /** 原生文件夹选择器；取消返回 null */
   pickFolder(title?: string): Promise<string | null>;
@@ -551,12 +598,26 @@ export interface Source {
   /** 对账：按内容哈希在当前所有库里重新找一遍 */
   snapshotResolve(id: number): Promise<SnapshotResolve>;
   snapshotRemove(id: number, hashes: string[]): Promise<number>;
-  /** 导出清单（.json）。返回最终路径，取消 = null */
+  /** 导出清单（.S-AssetManager）。返回最终路径，取消 = null */
   snapshotExport(id: number): Promise<string | null>;
-  /** 导入清单。返回 `[id, 最终名字, 新增条数, 跳过条数]`，取消 = null */
+  /** 导入清单（选文件对话框那版）。返回 `[id, 最终名字, 新增条数, 跳过条数]`，取消 = null */
   snapshotImport(): Promise<[number, string, number, number] | null>;
-  /** 导出原始图片（.zip）。取消 = null */
+  /** 导出原始图片（.P-AssetManager）。取消 = null */
   snapshotExportZip(id: number): Promise<SnapshotZip | null>;
+  /**
+   * 双击 / 命令行传进来的导出文件：后端按**内容**判类型再导入。
+   * `.P` 包会先让用户选解压目录 —— 那一步取消返回 null（不算错误）。
+   */
+  openImportFile(path: string): Promise<ImportReport | null>;
+  /**
+   * 把一批**任意格式**的文件复制进 `target`（必须是库里的目录）并入库。
+   * `target` 后端会再校验一次，传库外路径会被拒绝。
+   */
+  importFiles(paths: string[], target: string): Promise<ImportFilesReport>;
+  /** 选文件（不限格式）→ 复制进 `target`。取消 = null */
+  pickAndImport(target: string): Promise<ImportFilesReport | null>;
+  /** 导出资产包（**整个当前素材库**）。`path` 用来定位库，取消 = null */
+  exportPackage(path?: string | null): Promise<PackageOut | null>;
   /** 开一块快照灵感板 */
   snapshotOpen(id: number): Promise<number>;
   /** 快照板里 Ctrl+V：存截图目录 + 入库 + 加进这个快照 */

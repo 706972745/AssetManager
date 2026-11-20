@@ -94,6 +94,17 @@ fn is_meta_dir(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 库根上的 `desktop.ini` 是**我们写的文件夹图标配置**（见 `libicon`），不是素材。
+///
+/// 不跳过它的后果很具体：桌面配置会以 `KIND_OTHER` 的身份进素材列表，
+/// 用户库里凭空多出一行 `desktop.ini`，而且删了还会被我们重新写回来。
+/// 只认这个确切的文件名（Windows 对文件名大小写不敏感，比较时也忽略大小写）。
+fn is_icon_ini(file: &Path) -> bool {
+    file.file_name()
+        .map(|n| n.to_string_lossy().eq_ignore_ascii_case("desktop.ini"))
+        .unwrap_or(false)
+}
+
 fn is_foreign_library(dir: &Path) -> bool {
     let name = dir
         .file_name()
@@ -220,6 +231,11 @@ where
                     .unwrap_or(0);
                 subdirs.push((path, dm));
             } else if meta.is_file() {
+                /* 库图标配置不是素材（见 `is_icon_ini`） */
+                if is_icon_ini(&path) {
+                    stats.skipped += 1;
+                    continue;
+                }
                 files.push(entry_of(&path, &meta, opts.read_dims));
                 if formats::kind_of(&formats::lower_ext(
                     &path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
@@ -287,6 +303,11 @@ pub fn scan_one_dir(conn: &mut Connection, dir_path: &str) -> Res<ScanStats> {
         for ent in rd.flatten() {
             if let Ok(meta) = ent.metadata() {
                 if meta.is_file() {
+                    /* 库图标配置不是素材（两条扫描路径都要一致，否则导入后它会冒出来） */
+                    if is_icon_ini(&ent.path()) {
+                        stats.skipped += 1;
+                        continue;
+                    }
                     files.push(entry_of(&ent.path(), &meta, true));
                 }
             }

@@ -49,6 +49,8 @@ interface Props {
   thumbSrc: (a: Asset, px: number) => string;
   /** 预取可视区上下各一屏的缩略图（滚动停下后触发，不阻塞渲染） */
   onPrefetch?: (ids: number[], px: number) => void;
+  /** 空状态里的「导入文件…」（0.4.2）：把外部文件复制进当前文件夹 */
+  onImport?: () => void;
   onToast: (msg: string, err?: boolean) => void;
 }
 
@@ -65,6 +67,7 @@ export function AssetView({
   onNearBottom,
   thumbSrc,
   onPrefetch,
+  onImport,
   onToast,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -407,7 +410,7 @@ export function AssetView({
   return (
     <div className="viewport scroll-hot" ref={scrollRef} onScroll={onScroll} onMouseDown={onBlankDown}>
       {items.length === 0 ? (
-        <Empty />
+        <Empty onImport={onImport} />
       ) : (
         <div
           className={`view-inner ${view === "waterfall" ? "wf" : ""}`}
@@ -464,7 +467,7 @@ export function AssetView({
   );
 }
 
-function Empty() {
+function Empty({ onImport }: { onImport?: () => void }) {
   return (
     <div className="empty-state">
       <div className="empty-inner">
@@ -473,6 +476,13 @@ function Empty() {
         </span>
         <h2>这里还没有素材</h2>
         <p>把文件夹加进库，或者换一个目录。AssetManager 只建索引，不会移动、复制你的原始文件。</p>
+        {/* 空目录最常见的下一步就是"我有图要放进来"，就地给一个按钮，
+            省得用户去翻右键菜单或命令面板 */}
+        {onImport && (
+          <button className="btn btn-accent" style={{ marginTop: 14 }} onClick={onImport}>
+            导入文件…
+          </button>
+        )}
       </div>
     </div>
   );

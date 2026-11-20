@@ -670,6 +670,119 @@ export default function App() {
     toast("已请求取消", false, "已经扫进来的部分会保留");
   }, [toast]);
 
+  /* ---------------- 双击导入（0.4.2） ----------------
+
+     用户在资源管理器双击 `.L/.S/.P-AssetManager` 时，后端已经按**内容**判定过
+     "这是我们的文件"，但那不等于"用户点的是他想导的那份"（可能是别人发来的、
+     可能点错了）。所以先问一句再动手 —— 尤其 `.P` 包会真的往磁盘上铺文件。
+
+     确认框里的类型提示**只看后缀**（认不出来就不猜）：真正的分派在后端按内容做，
+     所以后缀被人改过也照样能导，只是这句提示会退化成通用说法。 */
+  const openImportFile = useCallback(
+    async (path: string) => {
+      const name = path.split(/[\\/]/).pop() ?? path;
+      const lower = name.toLowerCase();
+      const hint = lower.endsWith(".l-assetmanager")
+        ? "用户数据：只合并不删除，已有素材不会被覆盖。"
+        : lower.endsWith(".s-assetmanager")
+          ? "快照清单：只含图片编号，不含原图。"
+          : lower.endsWith(".p-assetmanager")
+            ? "资产包：会解压到你选的文件夹，并按包里的清单还原评分/备注/标签。"
+            : "类型按文件内容自动判断：用户数据只合并不删除、快照新增一份清单、资产包会解压到你选的文件夹。";
+      const ok = await askRef.current({
+        title: "要导入这个文件吗？",
+        body: (
+          <>
+            <div style={{ wordBreak: "break-all" }}>{name}</div>
+            <div style={{ marginTop: 8 }}>{hint}</div>
+            <div style={{ marginTop: 8, opacity: 0.6, wordBreak: "break-all" }}>{path}</div>
+          </>
+        ),
+        buttons: [
+          { label: "取消", value: "cancel" },
+          { label: "导入", value: "ok", tone: "accent" },
+        ],
+      });
+      if (ok !== "ok") return;
+      try {
+        const r = await source.openImportFile(path);
+        if (!r) {
+          /* 只有 `.P` 包"选解压目录"这一步会走到这里 */
+          toast("已取消导入", false, "没有动任何文件");
+          return;
+        }
+        setRefreshKey((k) => k + 1);
+        toast(
+          r.message,
+          r.assetsUnknown > 0 || r.skipped > 0,
+          r.assetsUnknown > 0
+            ? `${r.assetsUnknown} 条在索引里找不到（图可能被移动、改名或删掉了）`
+            : r.skipped > 0
+              ? `${r.skipped} 条坏数据已跳过`
+              : undefined
+        );
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [toast]
+  );
+
+  /* ---------------- 界面导入（0.4.2）：任意格式复制进当前文件夹 ----------------
+
+     三个入口（侧栏目录右键 / 空文件夹按钮 / 命令面板）最后都走这里。
+     目标为空（回收站、关于页、还没选目录）时不猜 —— 直接让用户先选一个文件夹：
+     悄悄导进"第一个库"会让他事后一张张挪回来，那个代价比多说一句话大得多。 */
+  const importInto = useCallback(
+    async (target: string | null) => {
+      const dest = target ?? dir?.path ?? null;
+      if (!dest) {
+        toast("先在左侧选中一个文件夹，再导入", true);
+        return;
+      }
+      try {
+        const r = await source.pickAndImport(dest);
+        /* null = 用户在文件对话框里点了取消，不是错误 */
+        if (!r) return;
+        setRefreshKey((k) => k + 1);
+        const head = `已导入 ${r.copied} 个${r.skipped ? `（跳过 ${r.skipped}）` : ""}`;
+        if (r.failed.length) {
+          toast(head, true, `${r.failed.length} 个失败：${r.failed[0][1]}`);
+        } else {
+          /* 自动标签不落库，文件一进索引就有了 —— 这句提示说明"你不用再去打标签" */
+          toast(head, false, `新入库 ${r.added} 张 · 已自动带上格式/类型/尺寸等自动标签`);
+        }
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [dir?.path, toast]
+  );
+
+  /* 后端在「再点一次图标 / 双击了导出文件」时发这两个事件
+     （名字在 `src-tauri/src/single_instance.rs` 里，改一处必须改两处） */
+  useEffect(() => {
+    const offAct = onAppEvent<null>("am://activate", () => {
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const w = getCurrentWindow();
+          await w.show();
+          await w.setFocus();
+        } catch {
+          /* 浏览器预览下没有 Tauri：忽略 */
+        }
+      })();
+    });
+    const offFile = onAppEvent<string>("am://open-file", (p) => {
+      if (p) void openImportFile(p);
+    });
+    return () => {
+      offAct();
+      offFile();
+    };
+  }, [openImportFile]);
+
   /* 进度事件：只在扫描期间订阅，避免无谓的 JSON 解析 */
   useEffect(() => {
     const offP = onAppEvent<ScanProgress>("scan://progress", (p) => {
@@ -1528,12 +1641,12 @@ export default function App() {
             : [{ kind: "heading" as const, label: "只有一份快照，凑不齐" }]),
           { kind: "separator" },
           {
-            label: "导出快照（.json，只含编号）",
+            label: "导出快照（.S-AssetManager，只含编号）",
             icon: "file",
             action: () => void exportSnapshot(row),
           },
           {
-            label: "导出原始图片（.zip）",
+            label: "导出原始图片（.P-AssetManager）",
             icon: "file",
             action: () => void exportSnapshotZip(row),
           },
@@ -2730,6 +2843,13 @@ export default function App() {
             icon: "scan",
             action: () => void startScan(p, `重新扫描 ${name}`),
           },
+          /* 导入到**这个节点**（不是"当前目录"）：右键哪一行就导进哪一行，
+             用户点的是"这里"，就别把它导到别处去（0.4.2） */
+          {
+            label: "导入文件到此处…",
+            icon: "plus",
+            action: () => void importInto(p),
+          },
           {
             label: selPaths.length > 1 ? `把 ${selPaths.length} 项移到这里` : "把选中的素材移到这里",
             icon: "folder",
@@ -2824,6 +2944,8 @@ export default function App() {
     collFilter,
     colls,
     removeFromColl,
+    /* 「导入文件到此处」用到的动作（0.4.2） */
+    importInto,
   ]);
 
   // 键盘：空格预览、方向键切换、Esc、Ctrl+Z、Ctrl+,
@@ -2960,7 +3082,7 @@ export default function App() {
       },
       {
         id: "snap-import",
-        label: "导入快照（.json）",
+        label: "导入快照（.S-AssetManager）",
         icon: "file",
         keywords: "快照 snapshot 导入 import",
         run: () => void importSnapshot(),
@@ -3187,8 +3309,15 @@ export default function App() {
         run: () => void source.warmThumbs(THUMB_PX[prefs.size] ?? 384).catch((e) => toast(String(e), true)),
       },
       {
+        id: "import-files",
+        label: "导入文件到当前文件夹",
+        icon: "plus",
+        keywords: "导入 import 添加 拖入 复制 素材",
+        run: () => void importInto(dir?.path ?? null),
+      },
+      {
         id: "export",
-        label: "导出用户数据（JSON）",
+        label: "导出用户数据（.L-AssetManager）",
         icon: "copy",
         keywords: "导出 备份 export 用户数据",
         run: async () => {
@@ -3476,6 +3605,7 @@ export default function App() {
               onNearBottom={loadMore}
               thumbSrc={thumbSrc}
               onPrefetch={onPrefetchThumbs}
+              onImport={() => void importInto(null)}
               onToast={(m, e) => toast(m, e)}
             />
 
@@ -3811,6 +3941,7 @@ export default function App() {
         onAddFolder={onAddFolder}
         onAddPath={(p) => onAddPath(p)}
         onRemoveLib={onRemoveLib}
+        activePath={dir?.path ?? null}
         updateAvailable={updateAvailable}
       />
 

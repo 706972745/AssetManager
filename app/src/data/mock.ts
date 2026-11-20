@@ -252,6 +252,18 @@ export const mockSource: Source = {
   async exportUserdata() {
     throw new Error("浏览器预览模式不支持导出，请用桌面端");
   },
+  async openImportFile() {
+    throw new Error("浏览器预览模式下不能导入文件（双击导出文件要用桌面版）");
+  },
+  async importFiles() {
+    throw new Error("浏览器预览模式下不能把文件复制进素材库，请用桌面版");
+  },
+  async pickAndImport() {
+    throw new Error("浏览器预览模式下不能导入文件，请用桌面版");
+  },
+  async exportPackage() {
+    throw new Error("浏览器预览模式下不能导出资产包，请用桌面版");
+  },
   async pickFolder() {
     return null;
   },

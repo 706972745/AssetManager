@@ -18,6 +18,7 @@ pub mod dataroot;
 pub mod db;
 pub mod dupes;
 pub mod exif;
+pub mod file_kind;
 pub mod formats;
 pub mod fsops;
 pub mod ids;
@@ -25,6 +26,7 @@ pub mod imageinfo;
 pub mod imgops;
 pub mod keywatch;
 pub mod libhome;
+pub mod libicon;
 pub mod libs_migrate;
 pub mod model;
 pub mod palette;
@@ -173,6 +175,18 @@ impl App {
         app.migrate_thumbs_into_libs();
         app.migrate_snapshots_into_libs();
         app.current = app.libs.first().map(|l| l.id);
+
+        /* 库文件夹图标：每次启动给所有已登记的库对齐一遍。
+           系统清理（比如磁盘清理删了 desktop.ini）、换机、库搬家之后靠这一遍自愈。
+           失败只可能是"只读盘 / 没权限"——图标是装饰，不能因此阻断启动。 */
+        for l in &app.libs {
+            match crate::libicon::ensure(Path::new(&l.root)) {
+                crate::libicon::IconState::Failed(e) => {
+                    eprintln!("[AssetManager] 库图标没设上（{}）：{e}", l.root);
+                }
+                _ => {}
+            }
+        }
         Ok(app)
     }
 
@@ -309,7 +323,11 @@ impl App {
     pub fn ensure_lib(&mut self, root: &str) -> Result<i64, String> {
         let root = norm_keep_case(root);
         if let Some(l) = self.libs.iter().find(|l| norm_path(&l.root) == norm_path(&root)) {
-            return Ok(l.id);
+            let id = l.id;
+            /* 库已经开着也要对齐一次图标：用户可能刚把 desktop.ini 删了，
+               或者这是"移除后又加回来"——这条早退路径以前什么都不做 */
+            self.touch_lib_icon(&root);
+            return Ok(id);
         }
         let existing = reg::libs(&self.reg)?
             .into_iter()
@@ -375,7 +393,19 @@ impl App {
             /* 新库：标记"种子已处理"，免得以后用户清空标签又被老库的标签灌回来 */
             mark_tags_seeded(&l.conn);
         }
+        /* 新库（或"移除后又加回来"的那个）：图标立刻生效 */
+        self.touch_lib_icon(&root);
         Ok(id)
+    }
+
+    /// 给库根设文件夹图标（`desktop.ini` + `.AssetManager/folder.ico`）。
+    ///
+    /// **失败只记一行 stderr**：图标是装饰，只读盘 / 网络盘 / 权限不足时
+    /// 绝不能因为这个让"加库"失败 —— 那才是真正会让用户丢数据的操作。
+    fn touch_lib_icon(&self, root: &str) {
+        if let crate::libicon::IconState::Failed(e) = crate::libicon::ensure(Path::new(root)) {
+            eprintln!("[AssetManager] 库图标没设上（{root}）：{e}");
+        }
     }
 
     pub fn lib_count(&self) -> Result<i64, String> {
@@ -433,6 +463,12 @@ impl App {
             }
         }
         reg::remove_lib_row(&self.reg, &row.root)?;
+
+        /* 顺手摘掉**我们设的**库文件夹图标（用户自己改过的 desktop.ini 一律不动）。
+           失败只记一行：图标是装饰，不该让"移除库"失败。 */
+        if let Err(e) = crate::libicon::remove(Path::new(&row.root)) {
+            eprintln!("[AssetManager] 库图标没摘掉（{}）：{e}", row.root);
+        }
         Ok(n)
     }
 
@@ -1394,6 +1430,373 @@ impl App {
         serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
     }
 
+    /// 导入用户数据（`.L-AssetManager`，双击 / 命令行传进来的那条路）。
+    ///
+    /// 语义是**只合并不删**（owner 的期待："换了机器、重扫过索引，把评分和备注找回来"）：
+    /// - 库根：按规范化路径（斜杠统一、忽略大小写）比，已有的不动；**目录还在**才登记，
+    ///   目录不在就跳过（不给库里塞一个永远打不开的死根）；
+    /// - 素材：按「目录 + 文件名」在同一库里点查（`db::asset_id_by_path`，大小写不敏感）。
+    ///   找到就回填**非空**字段：评分（>0）、备注、来源 URL、标签（文件里有 tags 才动）；
+    ///   找不到只计数，绝不新建行（索引归扫描管，导入不越权）；
+    /// - 备注/来源/标签用空串覆盖等于"擦掉用户现在写的东西"，所以空值一律不写。
+    ///
+    /// 返回的计数给界面拼提示用：`libs_added` 新加了几个库、`assets_updated` 回填了几张、
+    /// `assets_unknown` 有几条在索引里找不到（多半是重扫前的旧路径）。
+    pub fn import_userdata(&mut self, text: &str) -> Result<ImportReport, String> {
+        let v: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| format!("这不是 AssetManager 的用户数据文件（解析失败：{e}）"))?;
+        let libs = v
+            .get("libs")
+            .and_then(|x| x.as_array())
+            .ok_or_else(|| "这不是 AssetManager 的用户数据文件（里面没有库清单）".to_string())?
+            .clone();
+        let assets = v
+            .get("assets")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut report = ImportReport::default();
+
+        /* ① 先登记库：素材要点查，得先有它的连接 */
+        for l in &libs {
+            let Some(root) = l.as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if !Path::new(root).is_dir() {
+                /* 盘没挂 / 目录被改名：不登记，但也不能报错打断整份文件的导入 */
+                continue;
+            }
+            let before = self.libs.len();
+            match self.ensure_lib(root) {
+                Ok(_) => {
+                    if self.libs.len() > before {
+                        report.libs_added += 1;
+                    }
+                }
+                Err(e) => eprintln!("导入用户数据：库 {root} 打不开，跳过（{e}）"),
+            }
+        }
+
+        /* ② 逐条回填 */
+        for a in &assets {
+            let dir = a.get("dir").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let name = a.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if dir.is_empty() || name.is_empty() {
+                continue;
+            }
+            let full = join_path(dir, name);
+            let lib_field = a.get("lib").and_then(|x| x.as_str()).unwrap_or("");
+            let lib_id = self
+                .libs
+                .iter()
+                .find(|l| !lib_field.is_empty() && norm_path(&l.root) == norm_path(lib_field))
+                .map(|l| l.id)
+                .or_else(|| self.lib_for_path(&full));
+            let Some(lib_id) = lib_id else {
+                report.assets_unknown += 1;
+                continue;
+            };
+
+            let rating = a.get("rating").and_then(|x| x.as_i64()).unwrap_or(0);
+            let note = a.get("note").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let src = a.get("sourceUrl").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let tags: Vec<String> = a
+                .get("tags")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let found = {
+                let l = self.lib(lib_id)?;
+                db::asset_id_by_path(&l.conn, &full)?
+            };
+            let Some(aid) = found else {
+                report.assets_unknown += 1;
+                continue;
+            };
+
+            let mut touched = false;
+            {
+                let l = self.lib(lib_id)?;
+                if rating > 0 {
+                    db::set_rating(&l.conn, &[aid], rating.clamp(0, 5) as i32)?;
+                    touched = true;
+                }
+                if !note.is_empty() {
+                    db::set_note(&l.conn, aid, note)?;
+                    touched = true;
+                }
+                if !src.is_empty() {
+                    db::set_source_url(&l.conn, aid, src)?;
+                    touched = true;
+                }
+                if !tags.is_empty() {
+                    /* 标签名走同一套校验：非法名字跳过，别让一条脏数据废掉整份导入 */
+                    let mut ids: Vec<i64> = Vec::new();
+                    for t in &tags {
+                        if let Ok(ok) = reg::validate_tag_name(t) {
+                            if let Ok(id) = reg::ensure_tag(&l.conn, &ok) {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                    if !ids.is_empty() {
+                        ids.sort_unstable();
+                        ids.dedup();
+                        db::set_asset_tags(&l.conn, aid, &ids)?;
+                        touched = true;
+                    }
+                }
+            }
+            if touched {
+                report.assets_updated += 1;
+            }
+        }
+        Ok(report)
+    }
+
+    /* ------------------------------------------- 导入素材文件 / 资产包（0.4.2） */
+
+    /// 拿**索引里那一行自己的路径写法**（斜杠风格 / 大小写可能和调用方给的不一样）。
+    ///
+    /// 为什么必须换算：`db::upsert_dir` 的 ON CONFLICT 是按 `path` 原样比的 ——
+    /// 调用方给 `C:/x/y`、库里存的是 `C:\x\y`（早期扫描的写法），
+    /// 直接拿调用方的字符串去扫就会**插入一行新的**（而且 parent_id = NULL，挂成树根），
+    /// 侧栏上于是多出一个孤儿目录，两个目录行指向同一个文件夹。
+    fn stored_dir_path(&self, lib_id: i64, path: &str) -> Result<String, String> {
+        let l = self.lib(lib_id)?;
+        if let Some(id) = db::find_dir_id_norm(&l.conn, path)? {
+            if let Some((p, _)) = db::dir_by_id(&l.conn, id)? {
+                return Ok(p);
+            }
+        }
+        /* 索引里还没有它（刚建出来的空目录）：用调用方的写法，随后 index_new_dir 会照它写 */
+        Ok(norm_keep_case(path))
+    }
+
+    /// 把一批**任意格式**的外部文件复制进 `dest_dir`（必须是某个库里的目录），然后入库。
+    ///
+    /// 三步：① 校验目标属于已注册的库（**不信任前端传的路径**）；
+    /// ② `fsops::copy_into` 复制（同名自动 `(2)`，同名目录合并，单条失败不影响其它）；
+    /// ③ 补索引：新建的子目录先 `index_new_dir` 挂上正确的父节点，再逐层 `scan_one_dir`。
+    ///
+    /// 为什么"新增数"用前后素材计数差、而不是扫描返回值：`scan_one_dir` 报的是
+    /// 「写入行数（含更新）」，重导同一个文件会被算成新增，用户看到的数字就虚高。
+    ///
+    /// 自动标签（`fmt:` / `kind:` / `orient:` / `size:` / `place:`）**不落库**：
+    /// `db::auto_tag_counts` 按素材列实时聚合，文件一进索引就自然有了，这里不用写一条标签。
+    pub fn import_files(
+        &mut self,
+        sources: &[PathBuf],
+        dest_dir: &Path,
+    ) -> Result<ImportFilesReport, String> {
+        if sources.is_empty() {
+            return Err("没有选中要导入的文件".into());
+        }
+        let dest = norm_keep_case(&dest_dir.to_string_lossy());
+        let lib_id = self
+            .lib_for_path(&dest)
+            .ok_or_else(|| "这个文件夹不在素材库里：先把它加进素材库，再导入文件".to_string())?;
+        if !dest_dir.is_dir() {
+            return Err(format!("目标文件夹不存在：{}", dest_dir.display()));
+        }
+
+        let outcome = fsops::copy_into(sources, dest_dir);
+
+        /* 新建的子目录先进索引（父在前：copy_into 自上而下推），
+           否则里面的文件会因为父目录没有行而挂不到树上 */
+        for d in &outcome.new_dirs {
+            let parent = d
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Err(e) = self.index_new_dir(&d.to_string_lossy(), &parent) {
+                eprintln!("导入：目录 {} 没能进索引（{e}）", d.display());
+            }
+        }
+
+        /* 扫描要用**索引里存的写法**（见 stored_dir_path）：
+           调用方给的 `C:/x/y` 和库里的 `C:\x\y` 在 upsert_dir 眼里是两个路径，
+           直接用调用方的字符串会多插一行、还挂成树根（侧栏上多一个孤儿目录）。 */
+        let mut scan_dirs: Vec<String> = vec![self.stored_dir_path(lib_id, &dest)?];
+        for d in &outcome.touched {
+            let p = d.to_string_lossy().to_string();
+            scan_dirs.push(self.stored_dir_path(lib_id, &p)?);
+        }
+
+        let before = db::count_assets(&self.lib(lib_id)?.conn)?;
+        {
+            let l = self.lib_mut(lib_id)?;
+            for p in &scan_dirs {
+                if let Err(e) = scan::scan_one_dir(&mut l.conn, p) {
+                    /* 文件已经落地了，索引晚一步补上也行（下次扫描会补） —— 不能因此判失败 */
+                    eprintln!("导入：{p} 入库失败（{e}）");
+                }
+            }
+        }
+        let after = db::count_assets(&self.lib(lib_id)?.conn)?;
+
+        Ok(ImportFilesReport {
+            copied: outcome.copied,
+            skipped: outcome.skipped,
+            added: (after - before).max(0) as usize,
+            failed: outcome.failed,
+        })
+    }
+
+    /// 打一个资产包（`.P-AssetManager`）：`manifest.json` + 整个库的原图。
+    ///
+    /// 返回 `(写进包里的文件数, 跳过数)`；跳过 = 索引里有、磁盘上找不到（文件被移走/删了）。
+    /// 空包直接报错：导出一个"什么都没有"的包，用户以为备份成功了，比报错更糟。
+    pub fn export_package(
+        &self,
+        lib_root: &str,
+        zip_path: &Path,
+    ) -> Result<(usize, usize), String> {
+        let lib_id = self
+            .libs
+            .iter()
+            .find(|l| norm_path(&l.root) == norm_path(lib_root))
+            .map(|l| l.id)
+            .ok_or_else(|| format!("这个素材库没有登记：{lib_root}"))?;
+        let l = self.lib(lib_id)?;
+        let lib_name = Path::new(&l.root)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| l.root.clone());
+
+        /* 手工标签：自动标签是实时派生的，写进包里等于把"当时的口径"钉死 */
+        let name_of: HashMap<i64, String> = reg::tags_meta(&l.conn)?
+            .into_iter()
+            .map(|t| (t.id, t.name))
+            .collect();
+        let mut manual: HashMap<i64, Vec<String>> = HashMap::new();
+        for (aid, tids) in db::all_asset_tags(&l.conn)? {
+            let names: Vec<String> = tids
+                .iter()
+                .filter_map(|t| name_of.get(t).cloned())
+                .filter(|n| !autotag::is_auto_tag(n))
+                .collect();
+            if !names.is_empty() {
+                manual.insert(aid, names);
+            }
+        }
+
+        let root = norm_keep_case(&l.root);
+        let mut items: Vec<snapshot::PackItem> = Vec::new();
+        let mut files: Vec<(PathBuf, String)> = Vec::new();
+        let mut skipped = 0usize;
+        for (id, dir, name, size, mtime, w, h, rating, note) in db::pack_rows(&l.conn)? {
+            let full = join_path(&dir, &name);
+            let p = PathBuf::from(&full);
+            if !p.is_file() {
+                skipped += 1;
+                continue;
+            }
+            let Some(rel) = rel_to(&root, &full) else {
+                skipped += 1;
+                continue;
+            };
+            items.push(snapshot::PackItem {
+                rel: rel.clone(),
+                rating,
+                note,
+                tags: manual.remove(&id).unwrap_or_default(),
+                size,
+                mtime,
+                w,
+                h,
+            });
+            files.push((p, rel));
+        }
+        if files.is_empty() {
+            return Err("这个素材库里没有能找到原图的素材（文件都不在原位）".into());
+        }
+        let manifest = snapshot::PackManifest::new(&lib_name, items);
+        let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        let mut z = snapshot::ZipWriter::create(zip_path)?;
+        /* 清单必须是第一个条目：读端只认顶层 manifest.json */
+        z.add_bytes(snapshot::PACK_MANIFEST, text.as_bytes())?;
+        let n = files.len();
+        for (p, rel) in &files {
+            z.add_file(p, rel)?;
+        }
+        z.finish()?;
+        Ok((n, skipped))
+    }
+
+    /// 按资产包清单回填「评分 / 备注 / 标签」——**只加不删**。
+    ///
+    /// - 评分：只在目标素材**还没有**评分时写（现有 3 分不会被包里的 5 分冲掉）；
+    /// - 备注：只在目标为空时写；
+    /// - 标签：**取并集**（包里有的加进来，已有的一个都不删）。
+    pub fn import_package_manifest(
+        &mut self,
+        text: &str,
+        dest_dir: &Path,
+    ) -> Result<PackageRestore, String> {
+        let manifest = snapshot::PackManifest::parse(text)?;
+        let dest = norm_keep_case(&dest_dir.to_string_lossy());
+        let mut out = PackageRestore::default();
+        for it in &manifest.items {
+            let rel = it.rel.trim().trim_start_matches('/').replace('/', "\\");
+            if rel.is_empty() {
+                continue;
+            }
+            let full = join_path(&dest, &rel);
+            let Some(lib_id) = self.lib_for_path(&full) else {
+                continue;
+            };
+            let aid = {
+                let l = self.lib(lib_id)?;
+                db::asset_id_by_path(&l.conn, &full)?
+            };
+            let Some(aid) = aid else { continue };
+            let l = self.lib(lib_id)?;
+            let Some(a) = db::asset_by_id(&l.conn, aid)? else {
+                continue;
+            };
+            if it.rating > 0 && a.rating == 0 {
+                db::set_rating(&l.conn, &[aid], it.rating.clamp(0, 5) as i32)?;
+                out.rated += 1;
+            }
+            let note = it.note.trim();
+            if !note.is_empty() && a.note.trim().is_empty() {
+                db::set_note(&l.conn, aid, note)?;
+            }
+            if !it.tags.is_empty() {
+                let existing: Vec<i64> = db::tag_ids_for_assets(&l.conn, &[aid])?
+                    .into_iter()
+                    .flat_map(|(_, v)| v)
+                    .collect();
+                let mut ids = existing.clone();
+                for t in &it.tags {
+                    if let Ok(ok) = reg::validate_tag_name(t) {
+                        if let Ok(id) = reg::ensure_tag(&l.conn, &ok) {
+                            if !ids.contains(&id) {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                }
+                if ids.len() != existing.len() {
+                    ids.sort_unstable();
+                    ids.dedup();
+                    db::set_asset_tags(&l.conn, aid, &ids)?;
+                    out.tagged += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// 把整套索引（注册库 + 每个库文件）复制到另一个数据目录（换「数据文件夹」时用）。
     ///
     /// 用 `VACUUM INTO` 而不是 `fs::copy`：拷文件会把 `-wal` 里还没落盘的事务丢掉，
@@ -1748,6 +2151,80 @@ fn norm_path(p: &str) -> String {
 fn norm_keep_case(p: &str) -> String {
     let s = p.replace('/', "\\");
     s.trim_end_matches('\\').to_string()
+}
+
+/// 目录 + 文件名 → 绝对路径（只在导入用户数据时用：导出文件里这两段是分开存的）。
+fn join_path(dir: &str, name: &str) -> String {
+    let d = norm_keep_case(dir);
+    if d.is_empty() {
+        name.to_string()
+    } else {
+        format!("{d}\\{name}")
+    }
+}
+
+/// 绝对路径 → 相对 `root` 的路径（分隔符统一 `/`，zip 的口径）。
+///
+/// 先按原样 `strip_prefix`；大小写对不上（老索引 / 用户在资源管理器里改过名字）
+/// 再按小写前缀试一次 —— 切点用**原串**的长度，并且先验 `is_char_boundary`，
+/// 免得在中文路径上切进字符中间 panic。
+fn rel_to(root: &str, full: &str) -> Option<String> {
+    let r = norm_keep_case(root);
+    let f = norm_keep_case(full);
+    if let Ok(p) = Path::new(&f).strip_prefix(Path::new(&r)) {
+        let s = p.to_string_lossy().replace('\\', "/");
+        if !s.is_empty() {
+            return Some(s);
+        }
+        return None;
+    }
+    let cut = r.len();
+    if cut == 0 || cut >= f.len() || !f.is_char_boundary(cut) {
+        return None;
+    }
+    if !f[..cut].eq_ignore_ascii_case(&r) {
+        return None;
+    }
+    let rest = f[cut..].trim_start_matches('\\');
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.replace('\\', "/"))
+    }
+}
+
+/// 导入用户数据的结果（界面拿它拼提示；字段名按前端习惯转 camelCase）。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    /// 这次新登记了几个库根（已存在的库不算）
+    pub libs_added: usize,
+    /// 回填了几张素材的评分 / 备注 / 来源 / 标签
+    pub assets_updated: usize,
+    /// 有几条在索引里找不到（旧路径 / 素材已删 / 库没挂）
+    pub assets_unknown: usize,
+}
+
+/// 界面里「导入文件到当前文件夹」的结果。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFilesReport {
+    /// 真正复制进来的文件数
+    pub copied: usize,
+    /// 整条跳过的源（源就在目标里 / 源就是目标本身）
+    pub skipped: usize,
+    /// 这次新入库的素材数（扫描前后的素材计数差）
+    pub added: usize,
+    /// 失败条目：`(源路径, 人话原因)`
+    pub failed: Vec<(String, String)>,
+}
+
+/// 资产包清单回填的结果（评分 / 标签各还原了几张）。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageRestore {
+    pub rated: usize,
+    pub tagged: usize,
 }
 
 /// 归并排序的比较器：**必须和 SQL 的 ORDER BY 一致**（含 id 倒序），
@@ -3425,6 +3902,261 @@ mod tests {
             .unwrap()
             .iter()
             .any(|s| s.name == "A∪B (2)"));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 导入用户数据（双击 `.L-AssetManager`）：**只合并不删**。
+    ///
+    /// 断言三件事：① 已有素材一条都不少；② 评分按「目录+文件名」回填回来；
+    /// ③ 库里没有的路径只计数、不新建行（索引归扫描管）。
+    #[test]
+    fn import_userdata_merges_without_deleting() {
+        let d = tmp("import-userdata");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("a.png"), b"x").unwrap();
+        std::fs::write(lib.join("b.png"), b"y").unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let rows = app
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let a_id = rows.iter().find(|r| r.name == "a.png").unwrap().id;
+        app.set_rating(&[a_id], 5).unwrap();
+        let exported = app.export_userdata().unwrap();
+
+        /* 模拟"重扫过索引 / 换了台机器"：评分先清掉，再导回来 */
+        app.set_rating(&[a_id], 0).unwrap();
+        assert_eq!(app.asset(a_id).unwrap().unwrap().rating, 0);
+
+        let r = app.import_userdata(&exported).unwrap();
+        assert_eq!(r.libs_added, 0, "库本来就在，不该重复登记");
+        assert_eq!(r.assets_updated, 1, "只有 a.png 带用户数据");
+        assert_eq!(app.total().unwrap(), 2, "导入绝不能删素材");
+        assert_eq!(app.asset(a_id).unwrap().unwrap().rating, 5, "评分要回填");
+
+        /* 塞一条索引里没有的路径：只算"找不到"，不能凭空建行 */
+        let ghost = serde_json::json!({
+            "app": "AssetManager",
+            "libs": [lib.to_string_lossy()],
+            "assets": [{ "dir": lib.to_string_lossy(), "name": "ghost.png", "rating": 3 }],
+        });
+        let r2 = app.import_userdata(&ghost.to_string()).unwrap();
+        assert_eq!(r2.assets_unknown, 1);
+        assert_eq!(app.total().unwrap(), 2, "找不到的条目不许新建");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 界面导入（任意格式）：复制进来、同名另起名字、目录合并、源文件不动。
+    #[test]
+    fn import_files_copies_and_renames_on_collision() {
+        let d = tmp("import-files");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(lib.join("kit")).unwrap();
+        std::fs::write(lib.join("a.png"), b"old").unwrap();
+        std::fs::write(lib.join("kit").join("keep.png"), b"keep").unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let outside = d.join("downloads");
+        std::fs::create_dir_all(outside.join("kit").join("nested")).unwrap();
+        let src_a = outside.join("a.png");
+        let src_b = outside.join("b.jpg");
+        let src_c = outside.join("c.txt");
+        std::fs::write(&src_a, b"new").unwrap();
+        std::fs::write(&src_b, b"bbb").unwrap();
+        std::fs::write(&src_c, b"ccc").unwrap();
+        std::fs::write(outside.join("kit").join("p.png"), b"ppp").unwrap();
+        std::fs::write(outside.join("kit").join("nested").join("q.png"), b"qqq").unwrap();
+
+        let r = app
+            .import_files(
+                &[src_a.clone(), src_b.clone(), src_c.clone(), outside.join("kit")],
+                &lib,
+            )
+            .unwrap();
+        assert_eq!(r.copied, 5, "3 个散文件 + kit 里的 2 个");
+        assert!(r.failed.is_empty(), "不该有失败：{:?}", r.failed);
+        assert!(r.added >= 4, "子目录里的新文件也要入库，实际 {} 条", r.added);
+
+        /* 同名不覆盖：老的那张还在，新来的变成 a (2).png */
+        assert_eq!(std::fs::read(lib.join("a.png")).unwrap(), b"old");
+        assert_eq!(std::fs::read(lib.join("a (2).png")).unwrap(), b"new");
+        /* 同名目录合并：原有的 keep.png 没被动，新文件进了同一个 kit */
+        assert_eq!(std::fs::read(lib.join("kit").join("keep.png")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(lib.join("kit").join("p.png")).unwrap(), b"ppp");
+        assert_eq!(
+            std::fs::read(lib.join("kit").join("nested").join("q.png")).unwrap(),
+            b"qqq"
+        );
+        /* 复制不是移动：源文件还留在原地 */
+        assert!(src_a.is_file());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 路径写法不一致（`C:/x/y` vs `C:\x\y`）时，导入**不能**多插一行目录、
+    /// 更不能把它挂成树根 —— 实测过的 bug：侧栏多出一个孤儿目录，两个行指向同一个文件夹。
+    #[test]
+    fn import_files_reuses_the_indexed_dir_row() {
+        let d = tmp("import-path-style");
+        let lib = d.join("lib");
+        let sub = lib.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.png"), b"old").unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+        let lib_id = app.libs[0].id;
+        let before = db::dir_count(&app.lib(lib_id).unwrap().conn).unwrap();
+
+        let src = d.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let new_png = src.join("b.png");
+        std::fs::write(&new_png, b"new").unwrap();
+
+        /* 故意用正斜杠写法（资源管理器 / CLI / 某些前端路径就是这样） */
+        let dest_slash = sub.to_string_lossy().replace('\\', "/");
+        let r = app
+            .import_files(&[new_png], std::path::Path::new(&dest_slash))
+            .unwrap();
+        assert_eq!(r.copied, 1);
+        assert!(r.added >= 1, "新文件要入库，实际 {} 条", r.added);
+
+        let after = db::dir_count(&app.lib(lib_id).unwrap().conn).unwrap();
+        assert_eq!(after, before, "同一个文件夹不能因为斜杠写法不同多出一行目录");
+        assert!(sub.join("b.png").is_file());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 目标不在任何库里 → 直接拒绝（不信任前端传的路径）。
+    #[test]
+    fn import_files_rejects_outside_library() {
+        let d = tmp("import-outside");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let outside = d.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let src = outside.join("x.png");
+        std::fs::write(&src, b"x").unwrap();
+
+        let e = app
+            .import_files(&[src.clone()], &outside)
+            .unwrap_err();
+        assert!(e.contains("不在素材库里"), "{e}");
+        assert!(!outside.join("x (2).png").exists(), "拒绝了就一个字节都不该复制");
+        assert_eq!(std::fs::read(&src).unwrap(), b"x");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 资产包往返：评分 / 备注 / 手工标签在解到新库之后能还原。
+    #[test]
+    fn export_package_roundtrip_keeps_tags_and_rating() {
+        let d = tmp("pkg-roundtrip");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(lib.join("色彩")).unwrap();
+        std::fs::write(lib.join("a.png"), b"aaa").unwrap();
+        std::fs::write(lib.join("色彩").join("b.jpg"), b"bbb").unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let rows = app
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        let a_id = rows.iter().find(|r| r.name == "a.png").unwrap().id;
+        app.set_rating(&[a_id], 4).unwrap();
+        app.set_note(a_id, "客户 A 的那一版").unwrap();
+        app.set_asset_tags(a_id, &["主视觉".to_string()]).unwrap();
+
+        let zip = d.join("lib.P-AssetManager");
+        let (ok, skipped) = app
+            .export_package(&lib.to_string_lossy(), &zip)
+            .unwrap();
+        assert_eq!((ok, skipped), (2, 0), "两张图都在原位");
+
+        /* 解到一个全新目录，用一套新索引入库（模拟换机） */
+        let dest = d.join("restored");
+        let (files, manifest) = snapshot::unzip_package(&zip, &dest).unwrap();
+        assert_eq!(files, 2);
+        assert!(manifest.is_some(), "资产包必须带清单");
+        assert!(!dest.join("manifest.json").exists(), "清单不许落盘");
+
+        let mut app2 = App::open(d.join("data2")).unwrap();
+        app2.scan(&dest.to_string_lossy(), |_| {}).unwrap();
+        let rows2 = app2
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows2.len(), 2);
+        let a2 = rows2.iter().find(|r| r.name == "a.png").unwrap().id;
+
+        let rep = app2
+            .import_package_manifest(manifest.as_deref().unwrap(), &dest)
+            .unwrap();
+        assert_eq!(rep.rated, 1);
+        assert_eq!(rep.tagged, 1);
+
+        let back = app2.asset(a2).unwrap().unwrap();
+        assert_eq!(back.rating, 4);
+        assert_eq!(back.note, "客户 A 的那一版");
+        let names: Vec<String> = app2
+            .tags_for(&[a2])
+            .unwrap()
+            .into_iter()
+            .flat_map(|(_, v)| v)
+            .collect();
+        assert!(names.iter().any(|n| n == "主视觉"), "手工标签要还原：{names:?}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 包里的 `manifest.json` 不能变成素材（否则用户库里会多一个 json 条目）。
+    #[test]
+    fn package_manifest_is_not_indexed() {
+        let d = tmp("pkg-manifest");
+        let lib = d.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("only.png"), b"x").unwrap();
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let zip = d.join("one.P-AssetManager");
+        app.export_package(&lib.to_string_lossy(), &zip).unwrap();
+        let dest = d.join("restored");
+        let (files, _manifest) = snapshot::unzip_package(&zip, &dest).unwrap();
+        assert_eq!(files, 1);
+        assert!(!dest.join("manifest.json").exists());
+
+        let mut app2 = App::open(d.join("data3")).unwrap();
+        app2.scan(&dest.to_string_lossy(), |_| {}).unwrap();
+        let rows = app2
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "素材数必须等于包内图片数");
+        assert!(rows.iter().all(|r| r.name != "manifest.json"));
 
         let _ = std::fs::remove_dir_all(&d);
     }

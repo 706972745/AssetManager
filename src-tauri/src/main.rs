@@ -23,6 +23,12 @@ mod snip_native;
 /// 仓库名与安装形态判据换成本仓的）。
 mod update;
 
+/// 三种导出文件的双击关联（0.4.2）：只写 HKCU，免管理员，值没变就不写。
+mod file_assoc;
+
+/// 单实例守卫 + 唤起 + 「双击文件把路径递给已开着的实例」。
+mod single_instance;
+
 struct AppState(Mutex<App>);
 
 /// 日志目录（默认数据目录）。setup 里设一次，panic hook 与退出回调都从这儿取。
@@ -978,12 +984,54 @@ fn am_rebuild_index(app: AppHandle, state: State<AppState>) -> Result<(), String
     Ok(())
 }
 
-/// 导出用户层数据（T13）：`userdata-<ts>.json` 落在数据目录，返回完整路径。
+/// 本地时间戳 `YYYYMMDD-HHMM`：导出文件默认名里的那一刻。
+///
+/// 为什么不直接用 `db::now_ts()`（unix 秒）：文件名是给人看的，
+/// `userdata-20261119-2143.L-AssetManager` 一眼就知道是哪天的备份。
+/// 取**本地时间**而不是 UTC：用户在上海，文件名写着 8 小时前的那一刻只会让人困惑。
+/// 拿不到系统时间（理论上不会）就退回 unix 秒，别让导出失败。
+#[cfg(windows)]
+fn local_stamp() -> String {
+    #[repr(C)]
+    #[derive(Default)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        millis: u16,
+    }
+    extern "system" {
+        fn GetLocalTime(out: *mut SystemTime);
+    }
+    let mut t = SystemTime::default();
+    unsafe { GetLocalTime(&mut t) };
+    if t.year == 0 {
+        return db::now_ts().to_string();
+    }
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}",
+        t.year, t.month, t.day, t.hour, t.minute
+    )
+}
+
+#[cfg(not(windows))]
+fn local_stamp() -> String {
+    db::now_ts().to_string()
+}
+
+/// 导出用户层数据（T13）：`userdata-<YYYYMMDD-HHMM>.L-AssetManager` 落在数据目录，返回完整路径。
+///
+/// 后缀（0.4.2）从 `.json` 换成 `.L-AssetManager`：双击就能导回来（文件关联 + 内容嗅探），
+/// **内容格式一个字都没改** —— 老文件照样能导入。
 #[tauri::command]
 fn am_export_userdata(state: State<AppState>) -> Result<String, String> {
     let app = lock(&state);
     let json = app.export_userdata()?;
-    let name = format!("userdata-{}.json", db::now_ts());
+    let name = format!("userdata-{}.L-AssetManager", local_stamp());
     let path = app.data_dir.join(name);
     std::fs::write(&path, json).map_err(|e| format!("写文件失败：{}", e))?;
     Ok(path.to_string_lossy().to_string())
@@ -3175,8 +3223,8 @@ async fn am_snapshot_export(
     let stem = am_core::snapshot::safe_file_stem(&file.name);
     let picked = rfd::AsyncFileDialog::new()
         .set_title("导出快照（只含图片编号，不含原图）")
-        .set_file_name(format!("{stem}.am-snapshot.json"))
-        .add_filter("AssetManager 快照", &["json"])
+        .set_file_name(format!("{stem}.S-AssetManager"))
+        .add_filter("AssetManager 快照", &["S-AssetManager"])
         .save_file()
         .await;
     let Some(h) = picked else { return Ok(None) };
@@ -3196,7 +3244,8 @@ async fn am_snapshot_import(
 ) -> Result<Option<(i64, String, usize, usize)>, String> {
     let picked = rfd::AsyncFileDialog::new()
         .set_title("导入快照")
-        .add_filter("AssetManager 快照", &["json"])
+        /* 新后缀优先，老文件（.json）继续认：用户手里还留着一堆旧备份 */
+        .add_filter("AssetManager 快照", &["S-AssetManager", "json"])
         .pick_file()
         .await;
     let Some(h) = picked else { return Ok(None) };
@@ -3242,6 +3291,8 @@ async fn am_snapshot_export_zip(
     }
     let stem = am_core::snapshot::safe_file_stem(&name);
     let picked = rfd::AsyncFileDialog::new()
+        /* 快照的原始图片包**保持 .zip**（owner 2026-11-19 明确）：
+           它是"一堆散图"，不是资产包；.P 留给设置里的「导出资产包」 */
         .set_title("导出原始图片（zip）")
         .set_file_name(format!("{stem}.zip"))
         .add_filter("压缩包", &["zip"])
@@ -3262,6 +3313,289 @@ async fn am_snapshot_export_zip(
         );
     }
     Ok(Some(SnapshotZip { path: target.to_string_lossy().to_string(), ok, bad, missing }))
+}
+
+/* ---------------- 双击导入（0.4.2） ----------------
+
+   三条导出（`.L` 用户数据 / `.S` 快照清单 / `.P` 资源包）都注册了文件关联：
+   资源管理器双击 → `AssetManager.exe --open "<文件>"` → 若已有实例在跑，路径经
+   `single_instance` 转给首实例 → 首实例 emit `am://open-file` → 前端弹确认框 →
+   调 `am_open_import_file`。**类型由内容嗅探决定**（`am_core::file_kind`），
+   所以用户把后缀改坏了也认得出来。
+
+   为什么分成四个命令：前端只需要认识 `am_open_import_file` 一个入口，
+   另外三个是它的分派目标（CLI 与自测也直接调，省得每次都要弹对话框）。 */
+
+/// 导入结果（前端拿它拼提示）。字段名转 camelCase 给 TS。
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportReport {
+    /// `userdata` / `snapshot` / `package` —— 前端据此决定要不要提示"会解压"
+    kind: String,
+    /// 一句话结论（已经带数量，前端直接 toast）
+    message: String,
+    libs_added: usize,
+    assets_updated: usize,
+    assets_unknown: usize,
+    /// 资源包：解出来几个文件
+    files: usize,
+    /// 快照：新增几条 / 跳过几条坏数据
+    added: usize,
+    skipped: usize,
+    /// 快照：落库后的 id 与最终名字（重名会自动加 (2)）
+    snapshot_id: i64,
+    snapshot_name: String,
+    /// 资产包清单回填：还原了几张的评分 / 标签
+    rated: usize,
+    tagged: usize,
+}
+
+/// 读一个文本类导出文件。错误说人话（"为什么 + 怎么办"）。
+fn read_import_text(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "读不了「{}」（{e}）。它可能被移动、删除了，或者正被别的程序占用。",
+            path.display()
+        )
+    })
+}
+
+/// 导入用户数据（`.L`）：只合并不删 —— 回填评分 / 备注 / 来源 / 标签。
+#[tauri::command]
+fn am_import_userdata(app: AppHandle, path: String) -> Result<ImportReport, String> {
+    let text = read_import_text(Path::new(&path))?;
+    let st = app.state::<AppState>();
+    let mut a = lock(&st);
+    let r = a.import_userdata(&text)?;
+    let mut parts: Vec<String> = Vec::new();
+    if r.libs_added > 0 {
+        parts.push(format!("新增 {} 个库", r.libs_added));
+    }
+    parts.push(format!("回填 {} 张素材", r.assets_updated));
+    if r.assets_unknown > 0 {
+        parts.push(format!("{} 条在索引里找不到", r.assets_unknown));
+    }
+    Ok(ImportReport {
+        kind: "userdata".into(),
+        message: format!("已导入用户数据：{}", parts.join("，")),
+        libs_added: r.libs_added,
+        assets_updated: r.assets_updated,
+        assets_unknown: r.assets_unknown,
+        ..Default::default()
+    })
+}
+
+/// 导入快照清单（`.S`）：落在**当前库**，重名自动加 `(2)`。
+#[tauri::command]
+fn am_snapshot_import_path(app: AppHandle, path: String) -> Result<ImportReport, String> {
+    let text = read_import_text(Path::new(&path))?;
+    let st = app.state::<AppState>();
+    let mut a = lock(&st);
+    let (id, name, added, skipped) = a.snapshot_import(&text)?;
+    Ok(ImportReport {
+        kind: "snapshot".into(),
+        message: format!("已导入快照「{name}」：{added} 张"),
+        added,
+        skipped,
+        snapshot_id: id,
+        snapshot_name: name,
+        ..Default::default()
+    })
+}
+
+/// 导入资产包（`.P`）：**先问用户解压到哪**，再解包 + 扫一遍那个目录入库 + 按清单还原。
+///
+/// 为什么一定要问：包里的文件名是导出时的名字，直接铺到库根会跟现有文件混在一起，
+/// 用户事后根本分不清哪些是这次导进来的。让它落在一个空目录里，进不进库由用户决定。
+///
+/// 没有清单的包（比如用户把旧的"快照原始图片 .zip"改名过来）也能导：纯解压 + 扫描。
+#[tauri::command]
+async fn am_import_package(app: AppHandle, path: String) -> Result<Option<ImportReport>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("把资产包解压到这个文件夹（建议新建一个空文件夹）")
+        .pick_folder()
+        .await;
+    let Some(dir) = picked else { return Ok(None) };
+    let dest = dir.path().to_path_buf();
+    let src = PathBuf::from(&path);
+    let want = dest.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || -> Result<ImportReport, String> {
+        /* 清单读进内存，**不落盘** —— 落下去会被当成一张素材入索引 */
+        let (files, manifest) = am_core::snapshot::unzip_package(&src, &want)?;
+        if files == 0 && manifest.is_none() {
+            return Err("这个包里一个文件都没有，没什么可导入的。".into());
+        }
+        /* 解到哪儿就扫到哪儿：不自动设成"当前库"，用户想加库自己加。
+           **路径先统一成 Windows 口径**：索引里的 `dirs.path` 是原样存的，
+           这里要是写成 `C:/x/y`，待会儿按清单回填时用 `C:\x\y` 就一行也查不到。 */
+        let dest_str = want.to_string_lossy().replace('/', "\\");
+        let st = app.state::<AppState>();
+        let mut a = lock(&st);
+        let stats = a.scan(&dest_str, |_| {})?;
+        let restore = match manifest.as_deref() {
+            Some(m) => a.import_package_manifest(m, &want)?,
+            None => am_core::PackageRestore::default(),
+        };
+        let mut msg = format!(
+            "已解压 {} 个文件到「{}」，{} 张图片已入库",
+            files,
+            want.display(),
+            stats.images
+        );
+        if restore.rated > 0 || restore.tagged > 0 {
+            msg.push_str(&format!(
+                "；还原评分 {} 张、标签 {} 张",
+                restore.rated, restore.tagged
+            ));
+        }
+        Ok(ImportReport {
+            kind: "package".into(),
+            message: msg,
+            files,
+            added: stats.images.max(0) as usize,
+            rated: restore.rated,
+            tagged: restore.tagged,
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(|e| format!("解包线程没能跑完（{e}）。请重试一次。"))??;
+    Ok(Some(r))
+}
+
+/// 双击导入的统一入口：**先嗅探内容**，再分派到上面三条之一。
+#[tauri::command]
+async fn am_open_import_file(app: AppHandle, path: String) -> Result<Option<ImportReport>, String> {
+    let p = PathBuf::from(&path);
+    let kind = am_core::file_kind::sniff(&p)?;
+    match kind {
+        am_core::file_kind::ImportKind::UserData => am_import_userdata(app, path).map(Some),
+        am_core::file_kind::ImportKind::Snapshot => am_snapshot_import_path(app, path).map(Some),
+        am_core::file_kind::ImportKind::Package => am_import_package(app, path).await,
+    }
+}
+
+/* ---------------- 界面里的「导入文件到此处」（0.4.2） ----------------
+
+   与双击导入的区别：**不认导出文件**，认的是用户随手拿来的任意素材（png/jpg/psd/txt…），
+   语义是"复制一份进当前这个文件夹"。所以它不嗅探、不弹确认框，只有一条路：选文件 → 复制 → 入库。
+
+   三个入口（侧栏右键 / 空文件夹 / 命令面板）最后都落到 `am_pick_and_import`。 */
+
+/// 把一批任意格式的文件**复制**进目标文件夹并入库。
+///
+/// `target` 由前端给（当前打开的文件夹），但**后端必须再校验一次**：
+/// 界面可能拿着上一次的旧状态（刚删库、刚移库），复制到库外等于往用户磁盘上乱写。
+#[tauri::command]
+fn am_import_files(
+    state: State<AppState>,
+    paths: Vec<String>,
+    target: String,
+) -> Result<am_core::ImportFilesReport, String> {
+    let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let mut a = lock(&state);
+    a.import_files(&list, Path::new(&target))
+}
+
+/// 选文件（**不加扩展名过滤器**：任何格式都能导入）→ 走同一条 `import_files`。
+#[tauri::command]
+async fn am_pick_and_import(
+    state: State<'_, AppState>,
+    target: String,
+) -> Result<Option<am_core::ImportFilesReport>, String> {
+    /* 先校验目标再弹框：让用户挑完一堆文件才告诉他"这个文件夹不在库里"最气人 */
+    {
+        let a = lock(&state);
+        let _ = a.conn_for_path(&target)?;
+        if !Path::new(&target).is_dir() {
+            return Err(format!("目标文件夹不存在：{target}"));
+        }
+    }
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导入文件到当前文件夹（任意格式）")
+        .pick_files()
+        .await;
+    let Some(handles) = picked else { return Ok(None) };
+    let list: Vec<PathBuf> = handles.iter().map(|h| h.path().to_path_buf()).collect();
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let mut a = lock(&state);
+    a.import_files(&list, Path::new(&target)).map(Some)
+}
+
+/// 资产包导出的返回（前端拼 toast 用）
+#[derive(Clone, Default, serde::Serialize)]
+struct PackageOut {
+    path: String,
+    ok: usize,
+    skipped: usize,
+}
+
+/// 导出资产包（`.P-AssetManager`）：**整个当前素材库**（不是当前文件夹、不是选中项）。
+///
+/// `path` = 前端给的"当前打开的目录"，用它定位是哪个库；传 None 就退到当前库 / 第一个库。
+#[tauri::command]
+async fn am_export_package(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<Option<PackageOut>, String> {
+    /* ① 先把库根定下来（锁用完就放，绝不能带进 await） */
+    let root = {
+        let a = lock(&state);
+        let by_path = path
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .and_then(|p| a.lib_for_path(p))
+            .and_then(|id| a.libs.iter().find(|l| l.id == id).map(|l| l.root.clone()));
+        let cur = a
+            .current
+            .and_then(|id| a.libs.iter().find(|l| l.id == id))
+            .map(|l| l.root.clone());
+        by_path
+            .or(cur)
+            .or_else(|| a.libs.first().map(|l| l.root.clone()))
+            .ok_or_else(|| "还没有素材库：先在设置里加一个文件夹".to_string())?
+    };
+    let lib_name = Path::new(&root)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "素材库".into());
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导出资产包（整个素材库）")
+        .set_file_name(format!(
+            "{}.P-AssetManager",
+            am_core::snapshot::safe_file_stem(&lib_name)
+        ))
+        .add_filter("AssetManager 资产包", &["P-AssetManager"])
+        .save_file()
+        .await;
+    let Some(h) = picked else { return Ok(None) };
+    let target = h.path().to_path_buf();
+    let t2 = target.clone();
+    let (ok, skipped) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(usize, usize), String> {
+            let st = app.state::<AppState>();
+            let a = lock(&st);
+            a.export_package(&root, &t2)
+        })
+        .await
+        .map_err(|e| format!("打包线程没能跑完（{e}）。请重试一次。"))??;
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!(
+                "export package ok={ok} skipped={skipped} -> {}",
+                target.display()
+            ),
+        );
+    }
+    Ok(Some(PackageOut {
+        path: target.to_string_lossy().to_string(),
+        ok,
+        skipped,
+    }))
 }
 
 /// 快照的灵感板：先把条目对成现在的素材，再把它们铺到无限画布上。
@@ -5700,37 +6034,12 @@ fn serve_media(req_path: &str) -> Response<Vec<u8>> {
    做法：命名互斥体（`Local\` = 每个登录会话一把，不跨用户串味）。已存在 → 把那个主窗
    拉到前台，本进程直接退出；找不到窗（崩在启动早期）→ 弹一句人话。
 
+   0.4.2 起同一套机制**多担一件事**：双击 `.L/.S/.P-AssetManager` 时 Windows 会按文件
+   关联再起一个进程并传 `--open "<文件>"`。这个进程把路径写进请求文件 + `SetEvent`，
+   首实例收到后 emit `am://open-file` 交给前端（细节见 `single_instance.rs`）。
+
    为什么不用 `tauri-plugin-single-instance`：它要多引一个 crate（本地 registry 没有缓存，
-   得联网拉），而这里要的只是「别起第二个」。十几个 syscall，零依赖。 */
-
-#[cfg(windows)]
-fn claim_single_instance() -> bool {
-    const ERROR_ALREADY_EXISTS: u32 = 183;
-    /* 句柄一律用 `isize`（Win32 的 HANDLE），与本文件别处的 Win32 声明保持同一签名 ——
-       同一个符号有两种签名时 rustc 会告警，也容易在以后真的调错 */
-    extern "system" {
-        fn CreateMutexW(attrs: isize, owner: i32, name: *const u16) -> isize;
-        fn GetLastError() -> u32;
-    }
-    let name: Vec<u16> = "Local\\AssetManager.single.instance\0".encode_utf16().collect();
-    unsafe {
-        let h = CreateMutexW(0, 0, name.as_ptr());
-        // 连互斥体都建不出来（权限 / 资源耗尽）：宁可让用户先用，也不要卡住启动
-        if h == 0 {
-            return true;
-        }
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            return false;
-        }
-        // 句柄故意不关：要活到进程结束，系统会在退出时回收
-        true
-    }
-}
-
-#[cfg(not(windows))]
-fn claim_single_instance() -> bool {
-    true
-}
+   得联网拉），而这里要的只是「别起第二个」+「递个路径」。十几个 syscall，零依赖。 */
 
 /// 把已经在跑的那个主窗拉到前台。返回 false 表示没找到窗（已弹提示）。
 #[cfg(windows)]
@@ -5790,8 +6099,10 @@ fn focus_running_window() -> bool {
 }
 
 fn main() {
-    /* 单实例：必须在 `tauri::Builder` 之前 —— Builder 一跑就会 open 索引。 */
-    if !claim_single_instance() {
+    /* 单实例：必须在 `tauri::Builder` 之前 —— Builder 一跑就会 open 索引。
+       命令行里可能带着要打开的导出文件（双击文件 = Windows 给个 `--open "<路径>"`）。 */
+    let initial_file = single_instance::argv_file();
+    if !single_instance::claim(initial_file.as_deref()) {
         #[cfg(windows)]
         {
             focus_running_window();
@@ -5815,7 +6126,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None::<Vec<&str>>,
         ))
-        .setup(|app| {
+        .setup(move |app| {
             /* 数据目录可配置（照 FontManager 的「字体库文件夹」）：
                `%LOCALAPPDATA%\AssetManager\data-root.json` 记着自定义位置；
                自定义目录不可用（盘拔了）时 resolve 会回退默认目录，不让软件打不开。 */
@@ -5850,6 +6161,24 @@ fn main() {
                 }
             });
             app.manage(AppState(Mutex::new(st)));
+
+            /* ---- 双击导入的三块地基（0.4.2） ----
+               ① 文件关联：每次都对齐（覆盖安装后 exe 路径变了，靠它自动修好）；
+               ② 单实例转发：首实例起线程等「再点一次图标 / 双击文件」的信号；
+               ③ 启动参数：软件关着时双击文件，Windows 把路径当 argv 给了我们。
+               三件都不该阻断启动：写不进注册表也只是"双击不好使"，软件照样能用。 */
+            {
+                #[cfg(windows)]
+                match file_assoc::ensure_associations() {
+                    Ok(true) => log_runtime(&default_dir, "文件关联：已更新"),
+                    Ok(false) => {}
+                    Err(e) => log_runtime(&default_dir, &format!("文件关联失败（不影响使用）：{e}")),
+                }
+                single_instance::watch(app.handle().clone());
+                if let Some(f) = initial_file.clone() {
+                    single_instance::open_initial_file(app.handle().clone(), f);
+                }
+            }
 
             /* ---- 托盘 / 关闭到托盘 / 启动时最小化 / 界面缩放（0.3.30） ----
                这一块必须紧跟 `manage(AppState)`：`read_ui_prefs` 要靠 AppState 里的 data_dir。 */
@@ -6225,6 +6554,15 @@ fn main() {
             am_snapshot_export,
             am_snapshot_import,
             am_snapshot_export_zip,
+            /* 双击导入（0.4.2）：前端只认识第一个，其余几个是它的分派目标 */
+            am_open_import_file,
+            am_import_userdata,
+            am_import_package,
+            am_snapshot_import_path,
+            /* 界面导入任意格式 + 导出资产包（0.4.2） */
+            am_import_files,
+            am_pick_and_import,
+            am_export_package,
             am_snapshot_open,
             am_snapshot_paste,
             am_save_as,

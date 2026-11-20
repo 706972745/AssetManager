@@ -77,6 +77,7 @@ export function Settings({
   onAddFolder,
   onAddPath,
   onRemoveLib,
+  activePath,
   updateAvailable,
 }: {
   open: boolean;
@@ -96,6 +97,11 @@ export function Settings({
   /** 从素材库移除一个库根（只清索引） */
   onRemoveLib: (path: string) => Promise<void>;
   /**
+   * 当前打开的目录（0.4.2）：导出资产包要按它定位"是哪个库"。
+   * null = 还没选目录（那种情况下后端会退到当前库 / 第一个库）。
+   */
+  activePath?: string | null;
+  /**
    * 启动时静默检查到的可更新版本号（null = 没有/还没查）。
    * 只在左侧「更新」那一行点一个小圆点 —— 设置面板关着的时候不占任何屏幕面积，
    * 用户主动打开设置才看得到「有这么一页该去点」，不做自动弹窗。
@@ -110,6 +116,8 @@ export function Settings({
   const [autoStart, setAutoStart] = useState<boolean | null>(null);
   /* 缩放实际生效倍率：选"自动"时后端会算一个值回来，界面要显示它 */
   const [scaleNow, setScaleNow] = useState<number | null>(null);
+  /* 「导出资产包」那一行要显示的库名（null = 还没问到 / 没有库） */
+  const [libName, setLibName] = useState<string | null>(null);
 
   const [draft, setDraft] = useState<Prefs>(prefs);
   const [section, setSection] = useState<SettingsKey>(initialSection ?? "general");
@@ -131,6 +139,37 @@ export function Settings({
     void source.setUiScale(draft.uiScale).then(setScaleNow).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, source]);
+
+  /* 「导出资产包」那一行要写清**导的是哪个库**（owner 2026-11-20：
+     避免用户以为"只导当前文件夹"）。库名 = activePath 所属库根的文件夹名；
+     嵌套库根时长前缀优先，与 core 的 `lib_for_path` 同一口径；拿不到就退回静态文案。 */
+  useEffect(() => {
+    if (!open || !source.desktop) return;
+    let dead = false;
+    void source
+      .roots()
+      .then((rs) => {
+        if (dead) return;
+        if (!rs.length) {
+          setLibName(null);
+          return;
+        }
+        if (!activePath) {
+          setLibName(rs[0]?.name ?? null);
+          return;
+        }
+        const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+        const ap = norm(activePath);
+        const hit = rs
+          .filter((r) => ap === norm(r.path) || ap.startsWith(`${norm(r.path)}\\`))
+          .sort((a, b) => b.path.length - a.path.length)[0];
+        setLibName(hit?.name ?? rs[0]?.name ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [open, activePath, source]);
 
   /* 「关闭到托盘 / 启动时最小化 / 缩放」三项必须同步给后端：
      这两件都发生在 webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs）。 */
@@ -753,7 +792,7 @@ export function Settings({
           {
             id: "export",
             label: "导出用户数据",
-            hint: "库根 + 评分 + 备注，写成 userdata-时间戳.json（索引可重建，这份是人写的东西）",
+            hint: "库根 + 评分 + 备注，写成 userdata-时间戳.L-AssetManager（索引可重建，这份是人写的东西）",
             kw: "导出 备份 export userdata 换机",
             node: (
               <button
@@ -764,6 +803,40 @@ export function Settings({
                   try {
                     const p = await source.exportUserdata();
                     onToast("已导出用户数据", false, p);
+                  } catch (e) {
+                    onToast(String(e), true);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                导出
+              </button>
+            ),
+          },
+          {
+            id: "package",
+            label: "导出资产包",
+            hint: libName
+              ? `把「${libName}」的全部原图打成一个包（含清单：路径/评分/备注/手工标签），换机时双击即可导入`
+              : "把当前素材库的全部原图打成一个包（含清单：路径/评分/备注/手工标签），换机时双击即可导入",
+            kw: "导出 资产包 打包 package 迁移 换机 备份",
+            node: (
+              <button
+                className="btn"
+                disabled={busy || !source.desktop}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const r = await source.exportPackage(activePath ?? null);
+                    /* null = 用户在保存对话框里点了取消 */
+                    if (!r) return;
+                    const file = r.path.split(/[\\/]/).pop() ?? r.path;
+                    onToast(
+                      `已导出 ${r.ok} 张 → ${file}`,
+                      r.skipped > 0,
+                      r.skipped ? `${r.skipped} 张文件不在原位，没进包` : undefined
+                    );
                   } catch (e) {
                     onToast(String(e), true);
                   } finally {
@@ -898,7 +971,7 @@ export function Settings({
         ],
       },
     ];
-  }, [draft, stat, total, busy, t, localePref, autoStart, scaleNow, source, onToast]);
+  }, [draft, stat, total, busy, t, localePref, autoStart, scaleNow, libName, activePath, source, onToast]);
 
   const needle = q.trim().toLowerCase();
   const shown = needle

@@ -133,6 +133,142 @@ pub fn stat_paths(paths: &[PathBuf]) -> ItemStat {
     acc
 }
 
+/* ---------------------------------------------------------------- 导入：复制进来 */
+
+/// 一次「把外部文件复制进库」的结果。
+///
+/// 为什么复制而不是移动：用户是**从 U 盘 / 下载目录 / 别的盘**拿素材进来，
+/// 移动等于把源文件弄走了 —— 他下次还在原地找。导入的语义只有一个：**加一份副本**。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyOutcome {
+    /// 真正写出去的文件数
+    pub copied: usize,
+    /// 整条跳过的源（源就在目标里 / 源就是目标本身）
+    pub skipped: usize,
+    /// 失败条目：`(源路径, 人话原因)`。单条失败不影响其它
+    pub failed: Vec<(String, String)>,
+    /// 这次**新建**出来的子目录（父在前、子在后），调用方拿它补索引
+    pub new_dirs: Vec<PathBuf>,
+    /// 这次**写过文件**的所有目标目录（含本来就有、这次只做了合并的）：
+    /// 调用方要逐个扫一遍，否则"往已有子目录里加文件"这条路上，新文件要等下次扫描才出现
+    pub touched: Vec<PathBuf>,
+}
+
+/// 在 `dir` 里给 `name` 找一个不冲突的文件名：`名字 (2).ext`。
+///
+/// 冲突时**另起名字**而不是覆盖：导入进来的可能是同名的另一张图，
+/// 覆盖等于替用户删了他原来的素材（这个代价不可接受）。
+pub fn unique_file_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((a, e)) if !a.is_empty() => (a.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 2..10_000u32 {
+        let cand = dir.join(format!("{stem} ({n}){ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    /* 一万个同名：拿时间戳兜底，绝不返回一个会覆盖别人的路径 */
+    dir.join(format!("{stem} ({}){ext}", db::now_ts()))
+}
+
+/// 目录落点：**同名目录合并**，同名的是文件就另起名字（不能把文件当目录用）。
+fn dir_target(parent: &Path, name: &str) -> PathBuf {
+    let p = parent.join(name);
+    if p.is_dir() || !p.exists() {
+        p
+    } else {
+        unique_file_path(parent, name)
+    }
+}
+
+fn copy_one_file(src: &Path, dest_dir: &Path, out: &mut CopyOutcome) {
+    let Some(name) = src.file_name().map(|s| s.to_string_lossy().to_string()) else {
+        out.failed.push((src.display().to_string(), "这个文件名读不出来".into()));
+        return;
+    };
+    let target = unique_file_path(dest_dir, &name);
+    match std::fs::copy(src, &target) {
+        Ok(_) => out.copied += 1,
+        Err(e) => {
+            /* 半截文件不能留着：否则下次扫描会把它当一张坏图入索引 */
+            let _ = std::fs::remove_file(&target);
+            out.failed
+                .push((src.display().to_string(), explain_io(&e, "复制失败")));
+        }
+    }
+}
+
+fn copy_dir_tree(src: &Path, dest_parent: &Path, depth: usize, out: &mut CopyOutcome) {
+    if depth > 32 {
+        out.failed
+            .push((src.display().to_string(), "目录套得太深，先手动整理一下再导入".into()));
+        return;
+    }
+    let Some(name) = src.file_name().map(|s| s.to_string_lossy().to_string()) else {
+        return;
+    };
+    let target = dir_target(dest_parent, &name);
+    let fresh = !target.exists();
+    if let Err(e) = std::fs::create_dir_all(&target) {
+        out.failed
+            .push((src.display().to_string(), explain_io(&e, "建不了文件夹")));
+        return;
+    }
+    if fresh {
+        out.new_dirs.push(target.clone());
+    }
+    out.touched.push(target.clone());
+    let Ok(rd) = std::fs::read_dir(src) else {
+        out.failed
+            .push((src.display().to_string(), "读不了这个文件夹（没有权限？）".into()));
+        return;
+    };
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.is_dir() {
+            copy_dir_tree(&p, &target, depth + 1, out);
+        } else if p.is_file() {
+            copy_one_file(&p, &target, out);
+        }
+    }
+}
+
+/// 把一批外部文件/文件夹**复制进** `dest_dir`（目标里同名不覆盖，目录合并）。
+///
+/// 只做磁盘动作，**不碰索引**：入库由 `App::import_files` 负责（那里知道库在哪）。
+pub fn copy_into(sources: &[PathBuf], dest_dir: &Path) -> CopyOutcome {
+    let mut out = CopyOutcome::default();
+    for src in sources {
+        if !src.exists() {
+            out.failed.push((
+                src.display().to_string(),
+                "找不到这个文件（可能已经被移动或删除）".into(),
+            ));
+            continue;
+        }
+        /* 源在目标里 / 源就是目标：复制自己会无限套娃，直接跳过并计数 */
+        let same = lower(src).trim_end_matches('\\').to_string()
+            == lower(dest_dir).trim_end_matches('\\').to_string();
+        if same || is_inside(src, dest_dir) {
+            out.skipped += 1;
+            continue;
+        }
+        if src.is_dir() {
+            copy_dir_tree(src, dest_dir, 0, &mut out);
+        } else {
+            copy_one_file(src, dest_dir, &mut out);
+        }
+    }
+    out
+}
+
 /// 落盘前的体检结果：前端据此弹「>100 个 / >2GB」的二次确认、
 /// 以及「目标已有同名 → 三选」的对话框。
 #[derive(Debug, Clone, Default, Serialize)]

@@ -6,6 +6,8 @@
 //!   am-cli tree [--data <目录>] [--parent <id>]
 //!   am-cli thumb <asset_id> [--px 256]
 //!   am-cli shell <文件路径>            ← 只测系统缩略图那一层（T10 排查用）
+//!   am-cli import <文件> [--to <解压目录>] ← 双击导入（按内容嗅探类型）
+//!   am-cli import <文件...> --dest <库内目录> ← 界面导入（复制进来 + 入库）
 //!   am-cli undo
 
 use am_core::{db, fsops, model, App};
@@ -202,6 +204,157 @@ fn main() {
             match ops.undo_last() {
                 Ok(msg) => println!("{}", msg),
                 Err(e) => println!("{}", e),
+            }
+        }
+        /* 双击导入的无界面验收入口：嗅探 → 分派（用户数据 / 快照 / 资源包）。
+           资源包会真的解压到 `--to <目录>`（不传就落在数据目录下 import-<时间戳>），
+           解完顺便扫一遍，方便确认"文件数对不对得上"。 */
+        "import" => {
+            /* 两种用法，用 `--dest` 区分：
+               · `am-cli import <导出文件>`                —— 双击导入那条路（按内容嗅探类型）
+               · `am-cli import <文件...> --dest <目录>`   —— 界面导入那条路（复制进库内目录） */
+            let dest_arg = arg(&args, "--dest");
+            let mut files: Vec<std::path::PathBuf> = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                let a = &args[i];
+                if a == "--data" || a == "--dest" || a == "--to" {
+                    i += 2;
+                    continue;
+                }
+                if a.starts_with("--") {
+                    i += 1;
+                    continue;
+                }
+                files.push(std::path::PathBuf::from(a));
+                i += 1;
+            }
+            if files.is_empty() {
+                eprintln!(
+                    "用法:\n  am-cli import <导出文件> [--data <数据目录>]\n  am-cli import <文件...> --dest <库内目录> [--data <数据目录>]"
+                );
+                std::process::exit(2);
+            }
+
+            if let Some(dest) = dest_arg {
+                let target = std::path::PathBuf::from(&dest);
+                let t = std::time::Instant::now();
+                match app.import_files(&files, &target) {
+                    Ok(r) => {
+                        println!(
+                            "导入完成：复制 {} 个 / 跳过 {} 个 / 新入库 {} 张（{} ms）",
+                            r.copied,
+                            r.skipped,
+                            r.added,
+                            t.elapsed().as_millis()
+                        );
+                        for (src, why) in &r.failed {
+                            println!("  失败：{src} —— {why}");
+                        }
+                        if !r.failed.is_empty() {
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("导入失败：{e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                if files.len() > 1 {
+                    eprintln!("双击导入一次只能给一个文件；多个文件请用 --dest <库内目录>");
+                    std::process::exit(2);
+                }
+                let src = files[0].clone();
+                let kind = match am_core::file_kind::sniff(&src) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                };
+                println!("识别为：{}", kind.label());
+                match kind {
+                    am_core::file_kind::ImportKind::UserData => {
+                        let text = match std::fs::read_to_string(&src) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!("读不了 {}：{e}", src.display());
+                                std::process::exit(1);
+                            }
+                        };
+                        match app.import_userdata(&text) {
+                            Ok(r) => println!(
+                                "导入完成：新增 {} 个库 / 回填 {} 张 / 找不到 {} 条",
+                                r.libs_added, r.assets_updated, r.assets_unknown
+                            ),
+                            Err(e) => {
+                                eprintln!("导入失败：{e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    am_core::file_kind::ImportKind::Snapshot => {
+                        let text = match std::fs::read_to_string(&src) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!("读不了 {}：{e}", src.display());
+                                std::process::exit(1);
+                            }
+                        };
+                        match app.snapshot_import(&text) {
+                            Ok((id, name, added, skipped)) => println!(
+                                "导入完成：快照「{name}」（id={id}）新增 {added} 条，跳过 {skipped} 条"
+                            ),
+                            Err(e) => {
+                                eprintln!("导入失败：{e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    am_core::file_kind::ImportKind::Package => {
+                        let dest = match arg(&args, "--to") {
+                            Some(d) => std::path::PathBuf::from(d),
+                            None => std::path::PathBuf::from(&data)
+                                .join(format!("import-{}", db::now_ts())),
+                        };
+                        let t = std::time::Instant::now();
+                        let (n, manifest) = match am_core::snapshot::unzip_package(&src, &dest) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!("解压失败：{e}");
+                                std::process::exit(1);
+                            }
+                        };
+                        println!(
+                            "解压完成：{} 个文件 → {}（{} ms）",
+                            n,
+                            dest.display(),
+                            t.elapsed().as_millis()
+                        );
+                        /* 路径统一成 Windows 口径：清单回填是按 `dirs.path` 原样比对的 */
+                        let dest_str = dest.to_string_lossy().replace('/', "\\");
+                        match app.scan(&dest_str, |_| {}) {
+                            Ok(s) => println!(
+                                "扫描完成：{} 目录 / {} 文件 / {} 张图 / {} 错误",
+                                s.dirs, s.files, s.images, s.errors
+                            ),
+                            Err(e) => {
+                                eprintln!("扫描失败：{e}");
+                                std::process::exit(1);
+                            }
+                        }
+                        if let Some(m) = manifest {
+                            match app.import_package_manifest(&m, &dest) {
+                                Ok(r) => println!(
+                                    "清单还原：评分 {} 张 / 标签 {} 张",
+                                    r.rated, r.tagged
+                                ),
+                                Err(e) => eprintln!("清单还原失败（文件已经解好了）：{e}"),
+                            }
+                        }
+                    }
+                }
             }
         }
         "rebuild-fts" => match db::rebuild_fts(conn(&app)) {
