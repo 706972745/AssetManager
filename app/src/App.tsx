@@ -266,6 +266,9 @@ export default function App() {
   /** 选中素材的自动标签（后端推导 + 手工优先） */
   const [selectedAuto, setSelectedAuto] = useState<AutoTag[]>([]);
   const [ctx, setCtx] = useState<CtxState | null>(null);
+  /* 0.4.24：主界面右键 = 在鼠标旁弹详情（不再让右侧详情栏常驻占位）。
+     非空即浮层开启，坐标就是右键点；菜单挪到 Shift+右键。 */
+  const [detailPop, setDetailPop] = useState<{ x: number; y: number } | null>(null);
   const [scan, setScan] = useState<{ active: boolean; dirs: number; files: number; current: string }>({
     active: false,
     dirs: 0,
@@ -3029,6 +3032,22 @@ export default function App() {
       const show = (menu: CtxItem[]) => setCtx({ x, y, items: menu });
 
       const tile = t.closest<HTMLElement>("[data-asset-id]");
+      /* 主界面素材瓦片：**不按 Shift 的右键 = 就地看详情**（0.4.24）。
+         原来这里直接弹 20 多项的菜单，遮挡大、还得先选再找；owner 要的是
+         「右键哪张看哪张」，菜单退到 Shift+右键。左栏树/标签等其它区域不受影响。 */
+      if (tile && !e.shiftKey) {
+        const hitId = Number(tile.dataset.assetId);
+        const a = items.find((v) => v.id === hitId);
+        if (a) {
+          if (!selectedIds.has(hitId)) {
+            setSelected(a);
+            setSelectedIds(new Set([a.id]));
+          }
+          setCtx(null);
+          setDetailPop({ x, y });
+        }
+        return;
+      }
       if (tile) {
         const hitId = Number(tile.dataset.assetId);
         const a = items.find((v) => v.id === hitId);
@@ -3149,7 +3168,17 @@ export default function App() {
             },
           },
           { kind: "separator" },
-          { label: "重命名", icon: "more", disabled: n > 1, action: () => void onRename(a) },
+          /* 详情现在是右键浮层：重命名的就地输入框在详情顶栏，得先把浮层叫出来再进编辑态
+             （0.4.24，否则点了菜单只会看到"什么都没有发生"）。 */
+          {
+            label: "重命名",
+            icon: "more",
+            disabled: n > 1,
+            action: () => {
+              setDetailPop({ x, y });
+              void onRename(a);
+            },
+          },
           {
             label: n > 1 ? `把 ${n} 项移到当前目录` : "移到当前目录…",
             icon: "folder",
@@ -3321,8 +3350,10 @@ export default function App() {
         const i = items.findIndex((x) => x.id === selected.id);
         setLightbox(i >= 0 ? i : 0);
       } else if (e.key === "Escape") {
-        // 详情面板常驻，Esc 只关大图（owner 2026-11-16：详情不再收起）
-        if (lightbox !== null) setLightbox(null);
+        /* 0.4.24：Esc 先关右键浮层（它是"临时看一眼"的东西），再关大图，最后才取消多选。
+           抽屉形态不归 Esc 管 —— 鼠标离开右边缘自己会收。 */
+        if (detailPop) setDetailPop(null);
+        else if (lightbox !== null) setLightbox(null);
         else if (selectedIds.size > 1) clearSel();
       } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
         if (lightbox !== null) {
@@ -3376,7 +3407,7 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek]);
+  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop]);
 
   /* 打开标签编辑卡时把它的自动规则一起取回来（T34） */
   useEffect(() => {
@@ -4137,6 +4168,8 @@ export default function App() {
           onSetRating={onSetRating}
           onSetNote={onSetNote}
           onSetSource={onSetSource}
+          pop={detailPop}
+          onClosePop={() => setDetailPop(null)}
         />
         )}
       </div>

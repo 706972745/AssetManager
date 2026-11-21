@@ -350,6 +350,7 @@
    .workspace = 纵向：顶栏 | 内容
    顶栏必须在这一层，否则会通栏压到侧栏上（见 App.tsx 的注释）。 */
 .main {
+  position: relative;
   flex: 1;
   display: flex;
   min-height: 0;
@@ -364,8 +365,14 @@
 }
 
 /* ---------------------------------------------------------------- 侧栏 */
+/* 0.4.24：侧栏不再占一列，改成贴在左边缘的抽屉 —— 默认 translateX(-100%) 收在视口外，
+   鼠标进左边缘 10px 热区才滑出（覆盖在网格上）。这样主界面能整宽铺图
+   （owner 2026-11-21：素材库不是每分钟都在点，但图要一直看得多）。 */
 .tree {
-  flex: 0 0 var(--tree-w);
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
   width: var(--tree-w);
   display: flex;
   flex-direction: column;
@@ -374,6 +381,13 @@
   border-right: 1px solid var(--hairline);
   min-height: 0;
   background: var(--ui-bg);
+  box-shadow: 10px 0 28px rgba(0, 0, 0, 0.1);
+  transform: translateX(-100%);
+  transition: transform 170ms var(--t-base, ease);
+  z-index: 6;
+}
+.tree.is-open {
+  transform: none;
 }
 .tree-scroll {
   flex: 1;
@@ -933,7 +947,10 @@
 
 /* ---------------------------------------------------------------- 详情 */
 /* 与 FontManager 的 .detail 同构：可拖宽的右列、1px 左发丝线、2% 墨底、
-   头部直接在滚动内容里（不再有 44px 的分隔条）、分区之间 16px。 */
+   头部直接在滚动内容里（不再有 44px 的分隔条）、分区之间 16px。
+
+   0.4.24：主界面不再常驻详情（右键浮层见 `.is-pop`）。基础定义仍保留"右列"的样子 ——
+   回收站详情 `TrashDetail` 还是常驻列，改定位会把它一起带跑。 */
 .detail {
   position: relative;
   flex: none;
@@ -944,6 +961,40 @@
   background: rgba(var(--ink-rgb), 0.02);
   z-index: 3;
 }
+/* 没选中素材：宽度收到 0（JS 里给），连左边那条分隔线一起收掉。
+   不然空着一条 348px 的灰边，看起来像"详情坏了"（owner 2026-11-19）。 */
+.detail.is-empty {
+  border-left-color: transparent;
+}
+
+/* 右键浮层：坐标由 JS 算好（400 × ≤800，贴右/下边会翻到另一侧）。
+   **原地渐入** —— 只有透明度 + 极小缩放，不做位移：owner 2026-11-21 明确不要"从右往左滑过来"。 */
+.detail.is-pop {
+  position: fixed;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  /* 浮层压在图上，必须实底（原来 2% 墨底是为了和网格"同色"，这里会透） */
+  background: var(--e1);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  z-index: 70;
+  animation: detail-pop-in 130ms var(--t-base, ease-out) both;
+  transform-origin: center;
+}
+@keyframes detail-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 浮层宽度固定 400，不给拖宽握把 */
+.detail.is-pop .detail-resize {
+  display: none;
+}
+
 /* 没选中素材：宽度收到 0（JS 里给），连左边那条分隔线一起收掉。
    不然空着一条 348px 的灰边，看起来像"详情坏了"（owner 2026-11-19）。 */
 .detail.is-empty {

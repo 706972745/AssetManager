@@ -5,7 +5,7 @@
  * 新东西必须落进对应分节，不要在文件末尾追加。
  * 本文件不持全局状态（状态在 `App.tsx`），文件操作一律走 `source.xxx`，不直接 invoke。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { SearchSuggest, useSuggest } from "./SearchSuggest";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
@@ -959,6 +959,8 @@ export function Detail({
   onStartRename,
   onCommitRename,
   onCancelRename,
+  pop,
+  onClosePop,
 }: {
   asset: Asset | null;
   source: Source;
@@ -1002,6 +1004,9 @@ export function Detail({
   onSetRating: (ids: number[], rating: number) => void;
   onSetNote: (id: number, note: string) => void;
   onSetSource: (id: number, url: string) => void;
+  /** 右键浮层：非空 = 以「鼠标旁 400×(≤800)」的浮层形态出现（0.4.24） */
+  pop?: { x: number; y: number } | null;
+  onClosePop?: () => void;
 }) {
   const [width, setWidth] = useState(() => {
     /* 宽度记在本地（照 FontManager：它把 panelWidth 存进 prefs）。
@@ -1015,6 +1020,39 @@ export function Detail({
     return DETAIL_W;
   });
   const drag = useRef<{ x: number; w: number } | null>(null);
+
+  /* ---- 0.4.24：详情不再常驻、也不做右边缘抽屉 ----
+     它只在「右键某张素材」时以浮层出现，**原地渐入**（不滑动）——
+     owner 2026-11-21：详情是"顺手看一眼"的东西，跟着鼠标来、点外面就走。
+     主界面因此把这 348px 还给了网格；左侧素材库另有自己的收起/滑出（见 Tree.tsx）。 */
+  const isPop = !!pop && !!asset;
+
+  /** 浮层落点：默认鼠标右下，右边/下边放不下就翻到另一侧，再不行夹在视口内 */
+  const popPos = useMemo(() => {
+    if (!pop) return null;
+    const W = 400;
+    const pad = 10;
+    const H = Math.min(800, window.innerHeight - pad * 2);
+    let left = pop.x + 14;
+    if (left + W > window.innerWidth - pad) left = pop.x - W - 14;
+    left = Math.min(Math.max(pad, left), Math.max(pad, window.innerWidth - W - pad));
+    let top = pop.y - 36;
+    top = Math.min(Math.max(pad, top), Math.max(pad, window.innerHeight - H - pad));
+    return { left, top, width: W, height: H };
+  }, [pop]);
+
+  /* 浮层：点外部或 Esc 关掉（owner 选的「看完即走」） */
+  useEffect(() => {
+    if (!isPop || !onClosePop) return;
+    const down = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && t.closest(".detail")) return;
+      onClosePop();
+    };
+    document.addEventListener("pointerdown", down, true);
+    return () => document.removeEventListener("pointerdown", down, true);
+  }, [isPop, onClosePop]);
+
   /** 引用（显示层 / 谁在用 / 它引用了谁）默认收起 —— 排障时才展开 */
   const [refsOpen, setRefsOpen] = useState(false);
   /* 引用关系（T26）：这个文件引用了谁 / 谁在用它。只在选中变化时查一次。 */
@@ -1130,14 +1168,15 @@ export function Detail({
     onToast(ok ? `已复制${what}` : `复制失败，可以手动选中`, !ok);
   };
 
-  /* 没选中素材时**整块收起来**（owner 2026-11-19：空着一条大灰边没有意义）。
-     宽度走 0，内容和左边那条分隔线一起被裁掉，网格自然占满。 */
+  /* 没选中素材时什么都不渲染；右键浮层关闭后也就整块卸掉（不留空壳、不占位）。
+     形态只有一种：跟鼠标的浮层，渐入出现（CSS 里 `detail-pop-in`）。 */
+  if (!asset || !isPop || !popPos) return null;
   return (
-    <aside
-      className={`detail ${asset ? "" : "is-empty"}`}
-      style={{ width: asset ? width : 0 }}
-      aria-label="详情"
-    >
+      <aside
+        className="detail is-pop"
+        style={{ left: popPos.left, top: popPos.top, width: popPos.width, height: popPos.height }}
+        aria-label="详情"
+      >
       <div
         className="detail-resize"
         role="separator"
@@ -1529,7 +1568,7 @@ export function Detail({
           </>
         ) : null}
       </div>
-    </aside>
+      </aside>
   );
 }
 
