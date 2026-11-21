@@ -3023,6 +3023,17 @@ fn spawn_board(
         }
     }
     let label = format!("board-{}", BOARD_SEQ.fetch_add(1, Ordering::Relaxed));
+    /* 设计稿 v1.3：灵感板跟随软件主题 —— 主窗当前主题塞进 boot，前端 Board.tsx 设 data-theme */
+    let mut boot = boot;
+    if let Some(obj) = boot.as_object_mut() {
+        obj.insert(
+            "theme".into(),
+            serde_json::json!(match UI_THEME.load(Ordering::SeqCst) {
+                1 => "light",
+                _ => "dark",
+            }),
+        );
+    }
     let script = format!("window.__AM_BOARD__ = {boot};");
     let bb = tauri::WebviewWindowBuilder::new(
         app,
@@ -5642,6 +5653,8 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         "avg": avg,
         "scale": scale,
         "x": vx, "y": vy, "w": vw, "h": vh,
+        /* 设计稿 v1.3：截图界面跟随软件主题（工具栏 / 提示条配色） */
+        "theme": match UI_THEME.load(Ordering::SeqCst) { 1 => "light", _ => "dark" },
     });
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("snip t thumb={}ms", t_all.elapsed().as_millis()));

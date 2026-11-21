@@ -1093,7 +1093,7 @@ export function Settings({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <aside className="set-nav">
-          <div className="set-nav-title">偏好设置</div>
+          <div className="set-nav-title">设置</div>
           <div className="set-search">
             <Icon name="search" size={13} stroke={1.7} className="set-search-icon" />
             <input
@@ -1153,11 +1153,11 @@ export function Settings({
                  同 key 的兄弟节点会被 React 复用 —— 表现是「点快捷键，内容却是语言/系统，
                  还重复一遍」。0.3.30 装上去当天就被 owner 抓到，这里必须唯一。 */
               shown.map((g) => (
-                <div className="set-card" key={`${g.key}:${g.title}`}>
-                  <div className="set-card-head">
-                    {t(g.tk)}
-                    <span className="set-card-count">{g.rows.length}</span>
-                  </div>
+                /* 设计稿 §3.6 / HTML 预览 set-sec2：分组标题提到卡片**外面**（11px 小标题 +
+                   下面一张发丝线卡），不再是"卡片头里塞一行大写小字"。 */
+                <div className="set-sec" key={`${g.key}:${g.title}`}>
+                  <div className="set-sec-ttl">{t(g.tk)}</div>
+                  <div className="set-card">
                   {g.rows.map((r) =>
                     r.block ? (
                       <div className="set-row set-row-block" key={r.id}>
@@ -1173,6 +1173,7 @@ export function Settings({
                       </div>
                     )
                   )}
+                  </div>
                 </div>
               ))
             )}

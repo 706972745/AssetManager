@@ -36,6 +36,8 @@ interface SnipBoot {
   y: number;
   w: number;
   h: number;
+  /** 主窗当前主题（设计稿 v1.3：截图界面跟随软件主题） */
+  theme?: string;
 }
 
 function bootData(): SnipBoot | null {
@@ -420,7 +422,13 @@ export function Snip() {
   const [fill, setFill] = useState(false);
   const [arrowSolid, setArrowSolid] = useState(true);
   const [badge, setBadge] = useState(1);
-  const [tbTheme] = useState<"dark" | "light">(resolveTheme);
+  const [tbTheme] = useState<"dark" | "light">(() => {
+    /* 开窗 boot 里带了主窗当前主题（0.4.26 起）：优先用它，localStorage 的 prefs
+       只是兜底（旧包没有 theme 字段时走老路） */
+    const bt = boot?.theme;
+    if (bt === "light" || bt === "dark") return bt;
+    return resolveTheme();
+  });
 
   /* 截图窗是**独立窗口**，App.tsx 那套 `html[data-theme]` 不会自动带过来。
      这里按软件的主题偏好补上，工具条 / HUD / 提示的配色就能全部走 tokens.css

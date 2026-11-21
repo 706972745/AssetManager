@@ -78,6 +78,8 @@ interface BoardBoot {
   total?: number;
   /** 快照板专用：快照里有、但这次没找到的条数（标题上要说出来） */
   missing?: number;
+  /** 主窗当前主题（设计稿 v1.3：灵感板跟随软件主题，浅色白面板深字） */
+  theme?: string;
 }
 
 function bootData(): BoardBoot | null {
@@ -415,6 +417,9 @@ export function Board() {
   useEffect(() => {
     document.body.classList.add("board-body");
     document.documentElement.classList.add("board-body");
+    /* 主题：灵感板是独立 webview，不自动继承主窗 data-theme（同 Peek 的做法：
+       开窗时由 Rust 把当前主题塞进 boot，这里设到根上，tokens / 板面 CSS 跟着走） */
+    document.documentElement.dataset.theme = boot?.theme === "light" ? "light" : "dark";
     return () => {
       document.body.classList.remove("board-body");
       document.documentElement.classList.remove("board-body");

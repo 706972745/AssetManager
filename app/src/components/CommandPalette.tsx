@@ -137,6 +137,7 @@ export function CommandPalette({
                 onKeyDown={onKey}
                 spellCheck={false}
               />
+              <span className="cmdk-kbd" title="按 Ctrl+K 呼出 / 关闭">Ctrl K</span>
               <span className="cmdk-count mono">{shown.length}</span>
             </div>
 

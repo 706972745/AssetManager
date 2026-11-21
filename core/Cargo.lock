@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "am-core"
-version = "0.4.24"
+version = "0.4.26"
 dependencies = [
  "arboard",
  "image",
