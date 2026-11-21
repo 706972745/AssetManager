@@ -15,14 +15,18 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   ; 升级（$UpdateMode = 1）时不删：新版马上就重新注册，删了反而让资源管理器闪一次
   ${If} $UpdateMode <> 1
-    ; 扩展名 → ProgID 的那一层
+    ; 扩展名 → ProgID 的那一层（.L/.P 是旧后缀，只读兼容，卸载一样要清）
+    DeleteRegKey HKCU "Software\Classes\.D-AssetManager"
     DeleteRegKey HKCU "Software\Classes\.L-AssetManager"
     DeleteRegKey HKCU "Software\Classes\.S-AssetManager"
     DeleteRegKey HKCU "Software\Classes\.P-AssetManager"
+    DeleteRegKey HKCU "Software\Classes\.F-AssetManager"
     ; ProgID 自身（open 命令 + 图标）
+    DeleteRegKey HKCU "Software\Classes\AssetManager.D"
     DeleteRegKey HKCU "Software\Classes\AssetManager.L"
     DeleteRegKey HKCU "Software\Classes\AssetManager.S"
     DeleteRegKey HKCU "Software\Classes\AssetManager.P"
+    DeleteRegKey HKCU "Software\Classes\AssetManager.F"
     ; 图标文件：装到 Program Files 时它们退到 %LOCALAPPDATA%\AssetManager\icons（不在安装目录里，
     ; 卸载器不会替我们清）。装在用户目录时这份本来就在 $INSTDIR 下，RMDir 是空操作，无害。
     RMDir /r "$LOCALAPPDATA\AssetManager\icons"

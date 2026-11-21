@@ -16,23 +16,14 @@ import { BlinkCaretInput, Icon } from "./ui";
  *
  * 与「标签」的分工：标签是**属性**（一张图可以有多个），分组是**收纳**（要点名看的那一批）。
  */
-const PIN_KEY = "am.coll.pinned.v1";
 const DOCK_ID = "collections";
 
-function loadPinned(): boolean {
-  try {
-    return localStorage.getItem(PIN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function savePinned(v: boolean) {
-  try {
-    localStorage.setItem(PIN_KEY, v ? "1" : "0");
-  } catch {
-    /* 存不进去就本次会话有效 */
-  }
-}
+/* 固定开关**只在本次会话有效**，不再写 localStorage（owner 2026-11-21）：
+   - 以前把 pinned 存成 `am.coll.pinned.v1`，于是"装完第一次打开就是展开的"，
+     想让它收起还得再点一下头部 —— 用户要的是「默认收起、不固定」；
+   - 那个键还被自动化脚本写过 "1"（验证点标签不切库时），脏值会一直跟着同一个人，
+     换键只是把脏值藏起来，不如干脆不持久化。
+   想要一直展开就点一下头部，鼠标离开会收，重启也回到收起。 */
 
 export function CollDock({
   items,
@@ -61,7 +52,7 @@ export function CollDock({
   /** @deprecated 由 dockOpen 自动判定两块是否同开，调用点不用再传 */
   half?: boolean;
 }) {
-  const [pinned, setPinned] = useState(loadPinned);
+  const [pinned, setPinned] = useState(false);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [renaming, setRenaming] = useState<{ id: number; name: string } | null>(null);
@@ -149,7 +140,6 @@ export function CollDock({
     }
     const next = !pinned;
     setPinned(next);
-    savePinned(next);
   };
 
   const commitCreate = () => {
@@ -195,6 +185,11 @@ export function CollDock({
       >
         <Icon name="folder-open" size={15} stroke={1.5} className="tag-dock-icon" />
         <span className="tag-dock-title">分组</span>
+        {/* 0.4.24：点分组不再切库，只在**当前素材库**里看这一撮。这个标记就是让用户
+            一眼知道范围 —— 不然"为什么只有 8 张"永远要猜（owner 2026-11-21）。 */}
+        <span className="tag-dock-scope" title="只在当前素材库里生效；当前库里没有时才临时放宽到全部库">
+          仅当前库
+        </span>
         {activeId !== null ? (
           <span className="tag-dock-filter">
             <span className="tag-dock-filter-name">

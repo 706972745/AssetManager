@@ -1127,6 +1127,28 @@ fn am_copy_files(paths: Vec<String>) -> Result<(), String> {
     fsops::copy_files_to_clipboard(&list)
 }
 
+/// 最近 `ms` 毫秒内，**真人**按下的键是不是 `vk`（虚拟键码）。
+///
+/// 0.4.25 起 Ctrl+C →「复制原文件」的第一道闸。为什么要放到 Rust：
+/// 本机有程序会向前台窗口持续注入 Ctrl+C（`core/src/keywatch.rs` 顶部记着来龙去脉），
+/// 而 `isTrusted` 对系统级注入同样是 `true`，前端分辨不出一条键盘消息是人是机。
+/// LL 键盘钩子的 `LLKHF_INJECTED` 是唯一可靠判据。
+///
+/// **判不了就放行**（钩子没装上 / 非 Windows）：宁可让快捷键可用，也不能让它变成哑键 ——
+/// 这条口径和 `keywatch::real_key_matches` 完全一致。
+#[tauri::command]
+fn am_key_recent(vk: u32, ms: Option<u64>) -> bool {
+    let pass = keywatch::real_key_matches(vk, ms.unwrap_or(1200));
+    if let Some(d) = LOG_DIR.get() {
+        let (inst, seen, last) = keywatch::state();
+        log_runtime(
+            d,
+            &format!("copy gate vk={vk:#x} pass={pass} installed={inst} seen={seen} last={last:?}"),
+        );
+    }
+    pass
+}
+
 /* ---------------- 调整尺寸（P2.5 T38） ---------------- */
 /* 「另存为」直接复用上面的 `am_save_as`（原样复制字节，任何格式都成立）。 */
 
@@ -1227,8 +1249,39 @@ fn am_mkdir(parent: String, name: String, state: State<AppState>) -> Result<Stri
 }
 
 /// 落盘前的体检（T05）：给前端弹「>100 个 / >2GB」与「同名三选」用。
+/// 「库外路径一律拒绝」的共用实现（0.4.24 整理：am_delete / am_move / am_move_plan
+/// 三处原本各复制一份）。
+///
+/// `action` 只进错误文案（"删除"/"移动"），保证各命令的提示原文不变；
+/// 有一条路径不在已登记素材库内就整批拒绝，报错最多列出前三条。
+fn ensure_inside_libs(app: &App, action: &str, paths: &[&str]) -> Result<(), String> {
+    let bad: Vec<&str> = paths
+        .iter()
+        .filter(|p| app.lib_for_path(p).is_none())
+        .copied()
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "拒绝{action}：以下 {} 条路径不属于任何素材库：{}",
+        bad.len(),
+        bad.iter().take(3).copied().collect::<Vec<_>>().join("、")
+    ))
+}
+
 #[tauri::command]
-fn am_move_plan(paths: Vec<String>, target: String) -> Result<am_core::fsops::MovePlan, String> {
+fn am_move_plan(
+    paths: Vec<String>,
+    target: String,
+    state: State<AppState>,
+) -> Result<am_core::fsops::MovePlan, String> {
+    /* 预览也校验（0.4.24）：早失败比"预览完 apply 才报错"体验好，
+       且和 am_move 的语义保持一致 —— 库外路径在预览阶段就明确拒绝。 */
+    let app = lock(&state);
+    let mut all: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    all.push(target.as_str());
+    ensure_inside_libs(&app, "移动", &all)?;
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     fsops::plan_move(&list, Path::new(&target))
 }
@@ -1255,6 +1308,14 @@ fn am_move(
     state: State<AppState>,
 ) -> Result<MoveOutcome, String> {
     let mut app = lock(&state);
+    /* 0.4.24：**所有**源路径与目标目录都必须落在素材库内。
+       原来只拿 paths[0] 判归属（拿它的库连接当 FsOps 的库），
+       混进一条库内路径就能把任意库外文件一起搬走；`target` 也从不校验 ——
+       `policy=Replace` 时会先把目标同名项送进系统回收站。
+       这里的校验是全量的：任何一条不在库内就整批拒绝。 */
+    let mut all: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    all.push(target.as_str());
+    ensure_inside_libs(&app, "移动", &all)?;
     let first = paths
         .first()
         .ok_or_else(|| "没有要移动的文件".to_string())?;
@@ -1439,6 +1500,12 @@ fn am_move_start(
 #[tauri::command]
 fn am_delete(paths: Vec<String>, state: State<AppState>) -> Result<usize, String> {
     let mut app = lock(&state);
+    /* **删除只能作用于已登记素材库内的路径**（0.4.24）。
+       这是全软件破坏面最大的命令（路径会进应用回收站），此前对 IPC 传来的
+       路径零校验 —— webview 里任何脚本注入（或前端 bug）都能删到库外。
+       逐条校验、失败关闭：有一条不在库内就整批拒绝。 */
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    ensure_inside_libs(&app, "删除", &refs)?;
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     /* 删除 = **搬进应用内回收站**（owner 2026-11-17，照 FontManager）：
        文件挪到 <数据目录>/trash/ + `.amtrash` 账本，回收站页面能还原 / 彻底删除 / 清空。 */
@@ -1976,12 +2043,16 @@ const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
 /// 贴图窗口四周的透明边距（**CSS px**，逻辑单位；前端 `.peek-root` 的 `--peek-glow` 必须同值）。
 ///
-/// 用途只有一个：「由边框向外的渐变蓝色窗口阴影」（owner 2026-11-18）。
-/// 窗口外面没有像素可画，发光只能画在窗口里，所以窗口要比图片本身大一圈，
-/// 图居中、光晕落在这一圈透明的 padding 里。
+/// 曾经用来给「由边框向外的渐变蓝色阴影」腾地方（窗口外面没有像素可画，发光只能画在窗口里）。
+/// **现在是 0**：那圈透明边在"图就是贴纸"的场景里纯属浪费 —— 窗比图大一圈，
+/// 用户看到的就是"贴图外面套了个透明框"，比例也和缩略图对不上（owner 2026-11-21）。
+/// 想恢复外发光的话，这里和 `--peek-glow` 一起改回 8~10 即可，两边必须同值。
 /// **必须和前端 `.peek-root { --peek-glow }` 的值一致**，不然图会偏、会缩。
 /// 20 → 10（0.2.2）：owner 说蓝边"太宽、太明显"，图外面那圈透明边跟着收窄。
-const PEEK_GLOW: f64 = 10.0;
+/// **10 → 0（0.4.24，owner 2026-11-21）**：「贴图会有一圈透明的，应该是打开时的比例才对」——
+/// 贴图窗现在**就是图的尺寸**，外框比例和缩略图逐像素一致，不再有透明边。
+/// 蓝边（`peek-framed::after`）仍然画在图的边缘（`inset: 0`），只是不再向外发光。
+const PEEK_GLOW: f64 = 0.0;
 const CLIP_HISTORY: usize = 10;
 
 /// 一张"可以贴到屏幕上"的图
@@ -2959,9 +3030,9 @@ fn spawn_board(
         tauri::WebviewUrl::App("index.html".into()),
     )
     .title(title)
-    /* 默认 900×650（owner 2026-11-18）；最小 100×100 —— 板子常被当成"随手看一眼"的
-       临时窗口，1280 太占屏、720 的下限又不让它缩成角落小图。 */
-    .inner_size(900.0, 650.0)
+    /* 默认 450×325（owner 2026-11-21 20:20：原 900×650 缩一倍 —— 板子是"随手看一眼"的
+       临时窗口，大开反而挡屏）；最小 100×100，仍可缩成角落小图。 */
+    .inner_size(450.0, 325.0)
     .min_inner_size(100.0, 100.0)
     .decorations(false)
     .transparent(false)
@@ -3835,7 +3906,8 @@ struct PackageOut {
     skipped: usize,
 }
 
-/// 导出资产包（`.P-AssetManager`）：**整个当前素材库**（不是当前文件夹、不是选中项）。
+/// 导出资产包（`.F-AssetManager`，0.4.24 起；旧后缀 `.P` 仍能双击导回）：
+/// **整个当前素材库**（不是当前文件夹、不是选中项）。
 ///
 /// `path` = 前端给的"当前打开的目录"，用它定位是哪个库；传 None 就退到当前库 / 第一个库。
 #[tauri::command]
@@ -3868,10 +3940,10 @@ async fn am_export_package(
     let picked = rfd::AsyncFileDialog::new()
         .set_title("导出资产包（整个素材库）")
         .set_file_name(format!(
-            "{}.P-AssetManager",
+            "{}.F-AssetManager",
             am_core::snapshot::safe_file_stem(&lib_name)
         ))
-        .add_filter("AssetManager 资产包", &["P-AssetManager"])
+        .add_filter("AssetManager 资产包", &["F-AssetManager"])
         .save_file()
         .await;
     let Some(h) = picked else { return Ok(None) };
@@ -3911,7 +3983,7 @@ const LIB_ZIP_MAX_ENTRIES: u64 = 60_000;
 
 /// 整库导出成**普通 zip**：原图（保留文件夹层级）+ `_AssetManager/` 里的库数据。
 ///
-/// 和 `am_export_package`（`.P-AssetManager`）的区别：那个是给本软件双击导回的，
+/// 和 `am_export_package`（`.F-AssetManager`）的区别：那个是给本软件双击导回的，
 /// 这个是**给人用的** —— 换机备份、发给同事，任何解压软件都能打开，文件名带年月日。
 /// 超过 4 GB / 6.5 万条自动分片（`part1`、`part2`…），单片时不带 `-part1` 尾巴。
 #[tauri::command]
@@ -5449,6 +5521,11 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        （冻结图 / 拖框 / 工具栏 / 标注 / 撤销全在里面），交付仍复用 `am_snip_finish`。
        老路径留在后面，`AM_SNIP_WEBVIEW=1` 可以切回去对照。 */
     if std::env::var("AM_SNIP_WEBVIEW").map(|v| v == "1").unwrap_or(false) == false {
+        /* **原生会话互斥**（0.4.24）：上一个原生会话没结束就不许再开新的。
+           见 `snip_native_busy` 的注释 —— 并发会话是"取消后遮罩残留"的根因。 */
+        if snip_native_busy().swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err("上一次截图还没结束".into());
+        }
         /* 屏幕上的贴图窗口：原生层压暗时要**把它们跳过去**，保持 100% 亮度
            （owner 2026-11-19：「截图时贴图不该慢慢消失」）。
            矩形用物理像素、换算到虚拟桌面左上角 —— 和 `shot` 的坐标系一致。 */
@@ -5496,6 +5573,8 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
                 }
             }
             std::thread::spawn(keywatch::uninstall);
+            /* 会话结束（无论交付还是取消）→ 放行下一次 F1（0.4.24 互斥） */
+            snip_native_busy().store(false, std::sync::atomic::Ordering::SeqCst);
             if let Some(dir) = LOG_DIR.get() {
                 log_runtime(
                     dir,
@@ -6305,6 +6384,19 @@ fn release_peek_hide(app: &AppHandle) {
     }
 }
 
+/// 原生截图会话互斥（0.4.24）。
+///
+/// `snip_native::run` 的遮罩/选区/工具栏都是它自己建的原生窗口，结束才销毁。
+/// 之前 native 会话**不进 `snip_slot`**，F1 快速连按就会并发起两个会话：
+/// 取消其中一个只销毁它自己的窗口，**另一个的遮罩就留在屏幕上**；更糟的是
+/// 先结束的会话会 `keywatch::uninstall`，把还活着的那个的键盘钩子一起卸掉 ——
+/// 剩下的会话永远收不到 Esc，遮罩永远挂屏（runtime.log 里"有 fired 无
+/// cancel/total"的孤儿会话就是这么来的，owner 2026-11-21 实测踩过）。
+fn snip_native_busy() -> &'static AtomicBool {
+    static B: AtomicBool = AtomicBool::new(false);
+    &B
+}
+
 fn dispatch_hotkey(app: &AppHandle, accel: &str) {
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("hotkey fired {accel}"));
@@ -6427,7 +6519,7 @@ fn serve_media(req_path: &str) -> Response<Vec<u8>> {
    做法：命名互斥体（`Local\` = 每个登录会话一把，不跨用户串味）。已存在 → 把那个主窗
    拉到前台，本进程直接退出；找不到窗（崩在启动早期）→ 弹一句人话。
 
-   0.4.2 起同一套机制**多担一件事**：双击 `.L/.S/.P-AssetManager` 时 Windows 会按文件
+   0.4.2 起同一套机制**多担一件事**：双击 `.L/.S/.P/.F-AssetManager` 时 Windows 会按文件
    关联再起一个进程并传 `--open "<文件>"`。这个进程把路径写进请求文件 + `SetEvent`，
    首实例收到后 emit `am://open-file` 交给前端（细节见 `single_instance.rs`）。
 
@@ -6533,6 +6625,26 @@ fn main() {
                但我们事后能知道崩在哪。 */
             let _ = LOG_DIR.set(default_dir.clone());
             log_runtime(&default_dir, &format!("start v{} data={}", env!("CARGO_PKG_VERSION"), data.display()));
+
+            /* 常驻键盘钩子（0.4.25）：主窗的 `Ctrl+C → 复制原文件` 要靠它分辨
+               「真人按的」还是「外部程序注入的」—— 本机有程序会持续向前台窗口注入
+               Ctrl+C（`core/src/keywatch.rs` 顶部有来龙去脉），owner 三轮报
+               「我没按复制，它自己复制了」全是这个来源。
+               后台装：建消息泵 + 等系统调度几十毫秒，不能挡开窗；装不上就走放行分支。 */
+            {
+                let dir = default_dir.clone();
+                std::thread::spawn(move || {
+                    let ok = keywatch::install_persistent();
+                    log_runtime(
+                        &dir,
+                        &format!(
+                            "keywatch persistent ok={ok} tid={} err={}",
+                            keywatch::hook_tid(),
+                            keywatch::last_error()
+                        ),
+                    );
+                });
+            }
 
             /* ---- 主窗口（0.4.13 起从 tauri.conf.json 搬到 Rust）----
                唯一目的是给 AM_CDP=1 一个开关：设了就给 WebView2 挂
@@ -6799,28 +6911,25 @@ fn main() {
                     // ③ 短锁回写：命中缓存时 known_key 早就等于 o.key，一行都不写
                     if known_key.as_deref() != Some(o.key.as_str()) || need_dims {
                         let mut app = lock(&state);
-                        let _ = app.set_thumb(
+                        /* **一个事务写完**（0.4.24）：原来 thumb/尺寸/主色/指纹是
+                           4 条独立写事务，滚一屏新图 = 40×4 = 160 次 autocommit、
+                           次次抢全局锁，后面排着 `am_list`，表现是"边滚边掉帧"。
+                           ⚠️ 主色板 / 指纹必须在这里写（教训见下面原注释的历史）：
+                           "算出来了"和"存进去了"是两件事，两条写库路径都得写。 */
+                        let dims = need_dims.then_some((o.width, o.height));
+                        let palette = (!o.palette.is_empty())
+                            .then(|| (o.palette.as_str(), o.color.as_str()));
+                        let phash = (o.phash != 0).then_some(o.phash);
+                        let _ = app.set_thumb_bundle(
                             id,
                             &o.key,
                             am_core::model::THUMB_OK,
                             o.quality,
                             o.bytes,
+                            dims,
+                            palette,
+                            phash,
                         );
-                        if need_dims {
-                            let _ = app.set_dims_if_missing(id, o.width, o.height);
-                        }
-                        /* **主色板 / 指纹必须在这里写**：缩略图主路径是
-                           `ensure_path`（只出文件、不碰库），写库由这一层做。
-                           0.8.0 只把 palette 写进了 `ensure_for_asset`（那条路只有预览/预热走），
-                           结果 65k 张图 palette 全是 NULL —— 详情里的色板一栏永远不出现，
-                           顶栏按颜色筛也永远是空的。教训：**"算出来了"和"存进去了"是两件事**，
-                           两条写库路径都得写。 */
-                        if !o.palette.is_empty() {
-                            let _ = app.set_palette(id, &o.palette, &o.color);
-                        }
-                        if o.phash != 0 {
-                            let _ = app.set_phash(id, o.phash);
-                        }
                     }
                     match std::fs::read(&o.path) {
                         Ok(bytes) => Response::builder()
@@ -6910,6 +7019,7 @@ fn main() {
             am_reveal,
             am_open_path,
             am_copy_files,
+            am_key_recent,
             am_resize_save,
             am_exif,
             am_rename,

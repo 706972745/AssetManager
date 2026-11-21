@@ -452,9 +452,9 @@ export function Peek() {
             const box = root.current?.getBoundingClientRect();
             if (!ratioFixed.current && box && img.naturalWidth && img.naturalHeight) {
               const want = img.naturalWidth / img.naturalHeight;
-              /* 拿**内容盒**比（窗口要比图大一圈 2×10px 的发光边，`.peek-root` 的 --peek-glow）。
-                 用外框比的话每扇窗都会被判成"比例不对"，白白重设一次尺寸。 */
-              const glow = 20;
+              /* 拿**内容盒**比。0.4.24 起 `--peek-glow` 归零（窗就是图），
+                 但这里仍然按变量算，改回去时不用再动这段。 */
+              const glow = 0;
               const got = (box.width - glow) / Math.max(1, box.height - glow);
               if (Math.abs(want - got) / want > 0.02) {
                 ratioFixed.current = true;

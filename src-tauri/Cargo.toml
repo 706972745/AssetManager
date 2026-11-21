@@ -1,6 +1,6 @@
 [package]
 name = "assetmanager"
-version = "0.4.24"
+version = "0.4.25"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"

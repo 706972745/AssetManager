@@ -76,3 +76,6 @@ __pycache__/
 /docs/工作记录-*.md
 /docs/FontManager-*.md
 /docs/截图工具栏UI设计稿*.html
+
+# 桌面会话录制器的原始数据（几百张截图 + 事件流，本地排查用，不进库）
+/.wb-recordings/

@@ -20,6 +20,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::db;
 use crate::db::Res;
 
+/// 错误 → 字符串（0.4.24 整理：全文件 80+ 处 `.map_err(e2s)` 收敛成一个名字）。
+fn e2s<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
 const REG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
@@ -150,13 +155,13 @@ pub struct LibRow {
 
 pub fn open(path: &Path) -> Res<Connection> {
     let c = db::open_raw(path)?;
-    c.execute_batch(REG_SCHEMA).map_err(|e| e.to_string())?;
+    c.execute_batch(REG_SCHEMA).map_err(e2s)?;
     // 索引**建在补列之后**：0.4.x 的 tags 没有 group_id，把这条 CREATE INDEX 放进
     // REG_SCHEMA 会让老库直接在启动阶段报 `no such column: group_id`（真踩过）。
     if let Some(cols) = columns(&c, "tags")? {
         if cols.iter().any(|c| c == "group_id") {
             c.execute("CREATE INDEX IF NOT EXISTS idx_tags_group ON tags(group_id)", [])
-                .map_err(|e| e.to_string())?;
+                .map_err(e2s)?;
         }
     }
     /* 同一个道理：`collection_assets` 可能已经是库 db 那一版（列叫 `asset_id`），
@@ -167,7 +172,7 @@ pub fn open(path: &Path) -> Res<Connection> {
                 "CREATE INDEX IF NOT EXISTS idx_collection_assets_gid ON collection_assets(asset_gid)",
                 [],
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         }
     }
     /* 灵感板的组与文字外观（0.4.17）：`CREATE TABLE IF NOT EXISTS` 不会给老表补列，
@@ -188,7 +193,7 @@ fn add_col(c: &Connection, table: &str, col: &str, ddl: &str) -> Res<()> {
     if let Some(cols) = columns(c, table)? {
         if !cols.iter().any(|x| x == col) {
             c.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])
-                .map_err(|e| e.to_string())?;
+                .map_err(e2s)?;
         }
     }
     Ok(())
@@ -199,7 +204,7 @@ fn columns(c: &Connection, table: &str) -> Res<Option<Vec<String>>> {
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
-    let rows = st.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+    let rows = st.query_map([], |r| r.get::<_, String>(1)).map_err(e2s)?;
     Ok(Some(rows.flatten().collect()))
 }
 
@@ -214,13 +219,13 @@ pub fn add_lib(c: &Connection, root: &str, file: &str) -> Res<i64> {
         params![root, db::now_ts(), file],
         |r| r.get(0),
     )
-    .map_err(|e| e.to_string())
+    .map_err(e2s)
 }
 
 /// 已经用掉的库 id（重新导入一个老库时，用来判断"旧 id 还能不能复用"）。
 pub fn lib_ids(c: &Connection) -> Res<Vec<i64>> {
-    let mut st = c.prepare("SELECT id FROM libs").map_err(|e| e.to_string())?;
-    let rows = st.query_map([], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?;
+    let mut st = c.prepare("SELECT id FROM libs").map_err(e2s)?;
+    let rows = st.query_map([], |r| r.get::<_, i64>(0)).map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -235,24 +240,24 @@ pub fn add_lib_at(c: &Connection, id: i64, root: &str, file: &str) -> Res<()> {
         params![id, root, db::now_ts(), file],
     )
     .map(|_| ())
-    .map_err(|e| e.to_string())
+    .map_err(e2s)
 }
 
 pub fn libs(c: &Connection) -> Res<Vec<LibRow>> {
     let mut st = c
         .prepare("SELECT id, root, file FROM libs ORDER BY id")
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map([], |r| {
             Ok(LibRow { id: r.get(0)?, root: r.get(1)?, file: r.get(2)? })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.filter_map(|x| x.ok()).collect())
 }
 
 pub fn lib_count(c: &Connection) -> Res<i64> {
     c.query_row("SELECT COUNT(*) FROM libs", [], |r| r.get(0))
-        .map_err(|e| e.to_string())
+        .map_err(e2s)
 }
 
 pub fn lib_roots(c: &Connection) -> Res<Vec<String>> {
@@ -263,7 +268,7 @@ pub fn lib_roots(c: &Connection) -> Res<Vec<String>> {
 /// 删掉库清单里的一行（**不删库文件** —— 文件由 `App::remove_lib` 负责挪走/删除）。
 pub fn remove_lib_row(c: &Connection, root: &str) -> Res<()> {
     c.execute("DELETE FROM libs WHERE root = ?1", params![root])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(())
 }
 
@@ -312,15 +317,15 @@ pub fn ensure_tag(c: &Connection, name: &str) -> Res<i64> {
         "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?1, ?2)",
         params![name, db::now_ts()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     c.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| r.get(0))
-        .map_err(|e| e.to_string())
+        .map_err(e2s)
 }
 
 pub fn tag_id_by_name(c: &Connection, name: &str) -> Res<Option<i64>> {
     c.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| r.get::<_, i64>(0))
         .optional()
-        .map_err(|e| e.to_string())
+        .map_err(e2s)
 }
 
 /// 标签的元数据（跨库共用那一份）：id / 名字 / 颜色 / 分组 / 自动规则。
@@ -338,7 +343,7 @@ pub fn tags_meta(c: &Connection) -> Res<Vec<TagMeta>> {
             "SELECT t.id, t.name, t.color, g.name, t.auto_rule
              FROM tags t LEFT JOIN tag_groups g ON g.id = t.group_id",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map([], |r| {
             Ok(TagMeta {
@@ -349,7 +354,7 @@ pub fn tags_meta(c: &Connection) -> Res<Vec<TagMeta>> {
                 rule: r.get(4)?,
             })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.filter_map(|x| x.ok()).collect())
 }
 
@@ -357,7 +362,7 @@ pub fn set_tag_color(c: &Connection, name: &str, color: Option<&str>) -> Res<()>
     let color = validate_color(color)?;
     let n = c
         .execute("UPDATE tags SET color = ?1 WHERE name = ?2", params![color, name])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if n == 0 {
         return Err(format!("没有这个标签：{name}"));
     }
@@ -409,12 +414,12 @@ pub fn parse_rule(json: &str) -> Option<AutoRule> {
 
 pub fn set_tag_rule(c: &Connection, name: &str, rule: Option<&AutoRule>) -> Res<()> {
     let json = match rule {
-        Some(r) if !r.is_empty() => Some(serde_json::to_string(r).map_err(|e| e.to_string())?),
+        Some(r) if !r.is_empty() => Some(serde_json::to_string(r).map_err(e2s)?),
         _ => None,
     };
     let n = c
         .execute("UPDATE tags SET auto_rule = ?1 WHERE name = ?2", params![json, name])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if n == 0 {
         return Err(format!("没有这个标签：{name}"));
     }
@@ -441,9 +446,9 @@ fn ensure_group(c: &Connection, name: &str) -> Res<i64> {
          VALUES (?1, ?2, (SELECT COALESCE(MAX(sort), 0) + 1 FROM tag_groups))",
         params![n, db::now_ts()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     c.query_row("SELECT id FROM tag_groups WHERE name = ?1", params![n], |r| r.get(0))
-        .map_err(|e| e.to_string())
+        .map_err(e2s)
 }
 
 /// 把标签放进某个分组；`group=None` 表示移回「未分组」。分组不存在就顺手建出来。
@@ -454,7 +459,7 @@ pub fn set_tag_group(c: &Connection, name: &str, group: Option<&str>) -> Res<()>
     };
     let n = c
         .execute("UPDATE tags SET group_id = ?1 WHERE name = ?2", params![gid, name])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if n == 0 {
         return Err(format!("没有这个标签：{name}"));
     }
@@ -465,7 +470,7 @@ pub fn group_new(c: &Connection, name: &str) -> Res<()> {
     let n = validate_group_name(name)?;
     let exists: i64 = c
         .query_row("SELECT COUNT(*) FROM tag_groups WHERE name = ?1", params![n], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if exists > 0 {
         return Err(format!("已经有叫「{n}」的分组了"));
     }
@@ -474,7 +479,7 @@ pub fn group_new(c: &Connection, name: &str) -> Res<()> {
          VALUES (?1, ?2, (SELECT COALESCE(MAX(sort), 0) + 1 FROM tag_groups))",
         params![n, db::now_ts()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     Ok(())
 }
 
@@ -485,13 +490,13 @@ pub fn group_rename(c: &Connection, old: &str, new: &str) -> Res<()> {
     }
     let exists: i64 = c
         .query_row("SELECT COUNT(*) FROM tag_groups WHERE name = ?1", params![n], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if exists > 0 {
         return Err(format!("已经有叫「{n}」的分组了"));
     }
     let m = c
         .execute("UPDATE tag_groups SET name = ?1 WHERE name = ?2", params![n, old])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if m == 0 {
         return Err(format!("没有这个分组：{old}"));
     }
@@ -502,7 +507,7 @@ pub fn group_set_color(c: &Connection, name: &str, color: Option<&str>) -> Res<(
     let color = validate_color(color)?;
     let n = c
         .execute("UPDATE tag_groups SET color = ?1 WHERE name = ?2", params![color, name])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if n == 0 {
         return Err(format!("没有这个分组：{name}"));
     }
@@ -514,15 +519,15 @@ pub fn group_delete(c: &Connection, name: &str) -> Res<i64> {
     let Some(gid) = c
         .query_row("SELECT id FROM tag_groups WHERE name = ?1", params![name], |r| r.get::<_, i64>(0))
         .optional()
-        .map_err(|e| e.to_string())?
+        .map_err(e2s)?
     else {
         return Ok(0);
     };
     let n = c
         .execute("UPDATE tags SET group_id = NULL WHERE group_id = ?1", params![gid])
-        .map_err(|e| e.to_string())? as i64;
+        .map_err(e2s)? as i64;
     c.execute("DELETE FROM tag_groups WHERE id = ?1", params![gid])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(n)
 }
 
@@ -544,12 +549,12 @@ pub fn groups(
              FROM tag_groups g
              ORDER BY g.sort ASC, g.name COLLATE NOCASE ASC",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let base: Vec<(String, Option<String>, i64)> = rows.filter_map(|x| x.ok()).collect();
 
     let mut out = Vec::new();
@@ -604,18 +609,18 @@ const SNAP_SELECT: &str = "SELECT s.id, s.name,
 pub fn snapshots(c: &Connection) -> Res<Vec<SnapshotRow>> {
     let mut st = c
         .prepare(&format!("{SNAP_SELECT} ORDER BY s.created_at DESC, s.id DESC"))
-        .map_err(|e| e.to_string())?;
-    let rows = st.query_map([], |r| row_to_snapshot(r)).map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
+    let rows = st.query_map([], |r| row_to_snapshot(r)).map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
 pub fn snapshot(c: &Connection, id: i64) -> Res<Option<SnapshotRow>> {
     let mut st = c
         .prepare(&format!("{SNAP_SELECT} WHERE s.id = ?1"))
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     st.query_row(params![id], |r| row_to_snapshot(r))
         .optional()
-        .map_err(|e| e.to_string())
+        .map_err(e2s)
 }
 
 pub fn validate_snapshot_name(name: &str) -> Res<String> {
@@ -640,7 +645,7 @@ pub fn snapshot_create(c: &Connection, name: &str) -> Res<i64> {
         params![name, now],
         |r| r.get(0),
     )
-    .map_err(|e| e.to_string())
+    .map_err(e2s)
 }
 
 pub fn snapshot_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
@@ -653,7 +658,7 @@ pub fn snapshot_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if taken.is_some() {
         return Err(format!("已经有一个叫「{name}」的快照了"));
     }
@@ -661,15 +666,15 @@ pub fn snapshot_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
         "UPDATE snapshots SET name = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, name, db::now_ts()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     Ok(())
 }
 
 pub fn snapshot_delete(c: &Connection, id: i64) -> Res<()> {
     c.execute("DELETE FROM snapshot_items WHERE snapshot_id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     c.execute("DELETE FROM snapshots WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(())
 }
 
@@ -679,7 +684,7 @@ pub fn snapshot_items(c: &Connection, id: i64) -> Res<Vec<crate::snapshot::SnapI
             "SELECT hash, name, size, w, h, path, lib FROM snapshot_items
              WHERE snapshot_id = ?1 ORDER BY added_at ASC, name COLLATE NOCASE ASC",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map(params![id], |r| {
             Ok(crate::snapshot::SnapItem {
@@ -692,7 +697,7 @@ pub fn snapshot_items(c: &Connection, id: i64) -> Res<Vec<crate::snapshot::SnapI
                 lib: r.get(6)?,
             })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -711,7 +716,7 @@ pub fn snapshot_insert_items(
                    (snapshot_id, hash, name, size, w, h, path, lib, added_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         for it in items {
             n += st
                 .execute(params![
@@ -725,7 +730,7 @@ pub fn snapshot_insert_items(
                     it.lib,
                     now
                 ])
-                .map_err(|e| e.to_string())?;
+                .map_err(e2s)?;
         }
     }
     snapshot_touch(c, id)?;
@@ -739,7 +744,7 @@ pub fn snapshot_touch_item(c: &Connection, id: i64, hash: &str, name: &str, path
          WHERE snapshot_id = ?1 AND hash = ?2",
         params![id, hash, name, path, lib],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     Ok(())
 }
 
@@ -748,9 +753,9 @@ pub fn snapshot_remove_items(c: &Connection, id: i64, hashes: &[String]) -> Res<
     {
         let mut st = c
             .prepare("DELETE FROM snapshot_items WHERE snapshot_id = ?1 AND hash = ?2")
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         for h in hashes {
-            n += st.execute(params![id, h]).map_err(|e| e.to_string())?;
+            n += st.execute(params![id, h]).map_err(e2s)?;
         }
     }
     snapshot_touch(c, id)?;
@@ -762,7 +767,7 @@ pub fn snapshot_touch(c: &Connection, id: i64) -> Res<()> {
         "UPDATE snapshots SET updated_at = ?2 WHERE id = ?1",
         params![id, db::now_ts()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     Ok(())
 }
 
@@ -786,12 +791,12 @@ pub fn collections(c: &Connection) -> Res<Vec<CollRow>> {
              FROM collections c
              ORDER BY c.sort, c.created_at, c.id",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map([], |r| {
             Ok(CollRow { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, count: r.get(3)? })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -816,7 +821,7 @@ pub fn coll_create(c: &Connection, name: &str) -> Res<i64> {
         params![name, db::now_ts()],
         |r| r.get(0),
     )
-    .map_err(|e| e.to_string())
+    .map_err(e2s)
 }
 
 pub fn coll_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
@@ -828,21 +833,21 @@ pub fn coll_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     if taken.is_some() {
         return Err(format!("已经有一个叫「{name}」的分组了"));
     }
     c.execute("UPDATE collections SET name = ?2 WHERE id = ?1", params![id, name])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(())
 }
 
 /// 删分组：**只删这个分组和它的成员行，素材本身一个都不动**。
 pub fn coll_delete(c: &Connection, id: i64) -> Res<()> {
     c.execute("DELETE FROM collection_assets WHERE collection_id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     c.execute("DELETE FROM collections WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(())
 }
 
@@ -855,9 +860,9 @@ pub fn coll_add(c: &Connection, id: i64, gids: &[i64]) -> Res<usize> {
                 "INSERT INTO collection_assets (collection_id, asset_gid, added_at)
                  VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         for g in gids {
-            n += st.execute(params![id, g, now]).map_err(|e| e.to_string())?;
+            n += st.execute(params![id, g, now]).map_err(e2s)?;
         }
     }
     Ok(n)
@@ -868,9 +873,9 @@ pub fn coll_remove(c: &Connection, id: i64, gids: &[i64]) -> Res<usize> {
     {
         let mut st = c
             .prepare("DELETE FROM collection_assets WHERE collection_id = ?1 AND asset_gid = ?2")
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         for g in gids {
-            n += st.execute(params![id, g]).map_err(|e| e.to_string())?;
+            n += st.execute(params![id, g]).map_err(e2s)?;
         }
     }
     Ok(n)
@@ -879,8 +884,8 @@ pub fn coll_remove(c: &Connection, id: i64, gids: &[i64]) -> Res<usize> {
 pub fn coll_gids(c: &Connection, id: i64) -> Res<Vec<i64>> {
     let mut st = c
         .prepare("SELECT asset_gid FROM collection_assets WHERE collection_id = ?1 ORDER BY added_at, asset_gid")
-        .map_err(|e| e.to_string())?;
-    let rows = st.query_map(params![id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
+    let rows = st.query_map(params![id], |r| r.get(0)).map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -888,8 +893,8 @@ pub fn coll_gids(c: &Connection, id: i64) -> Res<Vec<i64>> {
 pub fn coll_of(c: &Connection, gid: i64) -> Res<Vec<i64>> {
     let mut st = c
         .prepare("SELECT collection_id FROM collection_assets WHERE asset_gid = ?1")
-        .map_err(|e| e.to_string())?;
-    let rows = st.query_map(params![gid], |r| r.get(0)).map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
+    let rows = st.query_map(params![gid], |r| r.get(0)).map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -902,32 +907,41 @@ pub fn coll_of(c: &Connection, gid: i64) -> Res<Vec<i64>> {
 pub fn board_layout(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64, i64)>> {
     let mut st = c
         .prepare("SELECT gid, x, y, w, h, grp FROM board_items WHERE board = ?1")
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map(params![board], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
 /// 记住一批图的摆位（松手时逐张写，不整板重写）。
+///
+/// 整批一个事务（0.4.24）：拖 200 张松手原来要 200 次 autocommit，松手那一下会顿。
 pub fn board_place(c: &Connection, board: &str, rows: &[(i64, f64, f64, f64, f64)]) -> Res<usize> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
     let now = db::now_ts();
-    let mut st = c
-        .prepare(
-            "INSERT INTO board_items (board, gid, x, y, w, h, updated_at)
+    let tx = c.unchecked_transaction().map_err(e2s)?;
+    let mut n = 0usize;
+    {
+        let mut st = tx
+            .prepare(
+                "INSERT INTO board_items (board, gid, x, y, w, h, updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(board, gid) DO UPDATE SET
                x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h, updated_at=excluded.updated_at",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut n = 0usize;
-    for &(g, x, y, w, h) in rows {
-        n += st
-            .execute(params![board, g, x, y, w, h, now])
-            .map_err(|e| e.to_string())?;
+            )
+            .map_err(e2s)?;
+        for &(g, x, y, w, h) in rows {
+            n += st
+                .execute(params![board, g, x, y, w, h, now])
+                .map_err(e2s)?;
+        }
     }
+    tx.commit().map_err(e2s)?;
     Ok(n)
 }
 
@@ -960,7 +974,7 @@ pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
             "SELECT nid, x, y, w, h, text, font, fs, color, bold, grp
              FROM board_notes WHERE board = ?1 ORDER BY nid",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let rows = st
         .query_map(params![board], |r| {
             Ok(BoardNoteRow {
@@ -977,7 +991,7 @@ pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
                 grp: r.get(10)?,
             })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     Ok(rows.flatten().collect())
 }
 
@@ -1006,7 +1020,7 @@ pub fn board_note_put(
                     params![board],
                     |r| r.get(0),
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(e2s)?;
             max + 1
         }
     };
@@ -1029,7 +1043,7 @@ pub fn board_note_put(
             params![board, nid, x, y, w, h, text, db::now_ts()],
         ),
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(e2s)?;
     Ok(nid)
 }
 
@@ -1047,14 +1061,14 @@ pub fn board_group_set(c: &Connection, board: &str, keys: &[i64], grp: i64) -> R
                 params![board],
                 |r| r.get(0),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         let b: i64 = c
             .query_row(
                 "SELECT COALESCE(MAX(grp), 0) FROM board_notes WHERE board = ?1",
                 params![board],
                 |r| r.get(0),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(e2s)?;
         a.max(b) + 1
     } else {
         grp.max(0)
@@ -1062,15 +1076,15 @@ pub fn board_group_set(c: &Connection, board: &str, keys: &[i64], grp: i64) -> R
     let now = db::now_ts();
     let mut st_img = c
         .prepare("UPDATE board_items SET grp = ?3, updated_at = ?4 WHERE board = ?1 AND gid = ?2")
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     let mut st_note = c
         .prepare("UPDATE board_notes SET grp = ?3, updated_at = ?4 WHERE board = ?1 AND nid = ?2")
-        .map_err(|e| e.to_string())?;
+        .map_err(e2s)?;
     for &k in keys {
         if k > 0 {
-            st_img.execute(params![board, k, g, now]).map_err(|e| e.to_string())?;
+            st_img.execute(params![board, k, g, now]).map_err(e2s)?;
         } else if k < 0 {
-            st_note.execute(params![board, -k, g, now]).map_err(|e| e.to_string())?;
+            st_note.execute(params![board, -k, g, now]).map_err(e2s)?;
         }
     }
     Ok(g)
@@ -1082,7 +1096,7 @@ pub fn board_note_del(c: &Connection, board: &str, nid: i64) -> Res<usize> {
         "DELETE FROM board_notes WHERE board = ?1 AND nid = ?2",
         params![board, nid],
     )
-    .map_err(|e| e.to_string())
+    .map_err(e2s)
 }
 
 #[cfg(test)]

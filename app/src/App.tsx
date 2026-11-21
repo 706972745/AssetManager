@@ -74,6 +74,21 @@ const MAX_LIBS = 3;
 /** 批量操作的每片大小：一次丢几千个路径给 Shell，回收站 API 会卡住好几十秒 */
 const CHUNK = 200;
 
+/**
+ * 现在是不是「用户想复制文字」的语境。
+ *
+ * 有文字选区、或焦点在输入框里时，Ctrl+C 必须原样交给浏览器 ——
+ * 否则会出现「我想复制一段文字，结果它把 10 张原图塞进了剪贴板」。
+ * 这条闸先于「复制原文件」生效（0.4.25）。
+ */
+function textCopyContext(): boolean {
+  const el = document.activeElement as HTMLElement | null;
+  const tag = (el?.tagName || "").toUpperCase();
+  if (el && (tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable)) return true;
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().trim().length > 0;
+}
+
 let toastSeq = 1;
 
 /** 「把图片加入快照」弹层的四种来源（见 `snapPromptProps`） */
@@ -215,7 +230,9 @@ export default function App() {
   const lightNav = useRef<((dir: number) => void) | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   /* ---------- 标签（2026-11-16）：手动落库、自动运行时推导 ---------- */
-  /** 正在按哪个标签筛（null = 不筛）。设了标签就跨目录看，和 FontManager 的标签导航一致 */
+  /** 正在按哪个标签筛（null = 不筛）。0.4.24 起是「**当前库内**看这个标签」：
+     点标签不再清目录（清了就变成跨库，画面整个换掉，看着像文件库被切走）；
+     当前库里一张都没有时，`loadPage` 会放宽到全部库并提示一句。 */
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   /* 颜色筛选（T24）：色桶键；colorCounts 是侧栏口径的"每种颜色多少张" */
   const [colorFilter, setColorFilter] = useState<string | null>(null);
@@ -227,12 +244,13 @@ export default function App() {
   const [tags, setTags] = useState<TagCount[]>([]);
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
   /* 分组（0.2.x）：侧栏里紧贴标签面板上方那一段（位置/样式照 FontManager）。
-     筛选语义同标签：点了就**跨目录**看这一撮素材。 */
+     筛选语义同标签：0.4.24 起在**当前库内**看这一撮素材（当前库没有才放宽）。 */
   const [colls, setColls] = useState<CollRow[]>([]);
   const [collFilter, setCollFilter] = useState<number | null>(null);
   /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
   const [snaps, setSnaps] = useState<SnapshotRow[]>([]);
-  /** 正按哪份快照筛（null = 不筛）。与标签/分组同一口径：点了就跨目录看 */
+  /** 正按哪份快照筛（null = 不筛）。快照**仍跨库**：快照本身就是跨库收集的一批，
+     这点和标签/分组不同，别顺手改成"当前库内" */
   const [snapFilter, setSnapFilter] = useState<number | null>(null);
   /* 新建 / 改名都是**侧栏就地输入**（照 FontManager，不弹窗）：状态放这里，
      因为「Ctrl+K → 新建快照」和快照右键「改名」都要能把它打开。 */
@@ -279,6 +297,10 @@ export default function App() {
   const reqRef = useRef(0);
   const dirRef = useRef<DirNode | null>(null);
   dirRef.current = dir;
+  /** 「当前库没有这批素材，已经放宽到全部库」——用 ref 不用 state：
+   *  它只影响**分页**要不要带 dirId，本身不需要触发重渲染（触发就是一次多余的查询）。
+   *  每换一次目录/标签/分组（查询 effect 开跑前）归零。 */
+  const crossLibRef = useRef(false);
   const dragPaths = useRef<string[] | null>(null);
   const dragPreview = useRef<number | null>(null);
   /** 拖动时"这一批是谁"（库内 id）。
@@ -300,6 +322,8 @@ export default function App() {
   const lastPick = useRef<number | null>(null);
   const itemsRef = useRef<Asset[]>([]);
   itemsRef.current = items;
+  /** 上一次「复制原文件」的时刻（performance.now）：400ms 内的重复触发只算一次 */
+  const lastCopyAt = useRef(0);
 
   /* 提示条：内容镜像一份在 ref 里 —— 合并判断必须**同步**拿到"最后一条是谁"，
      放进 setState 的 updater 里读不到（updater 是渲染阶段才跑的，StrictMode 还会跑两遍）。 */
@@ -353,12 +377,10 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     void source.roots().then((rs) => {
-      /* 只有在「没有任何跨目录筛选」时才自动落到第一个库。
-         没有这半个条件就是一个真 bug（owner 2026-11-17 报「标签明明有、点了不出图」）：
-         点标签会把目录清空（= 跨目录看这个标签），紧接着这里又按"当前没选目录"
-         把第一个库选回来 —— 查询立刻变成「这个库 AND 这个标签」，
-         而那个标签的 400 张图在**另一个库**里 → 永远空列表。
-         截图当时的状态就是：筛选条写着标签、侧栏第一个库高亮、网格空白。 */
+      /* 只有在「没有任何筛选」时才自动落到第一个库。
+         0.4.24 起点标签/分组不再清目录，所以正常路径下 `dirRef.current` 一直有值，
+         这段只在**真的没选库**（刚移除库、刚启动）时兜底。
+         保留筛选判断是为了快照那条路（它仍跨库，目录本来就是空的）。 */
       if (!alive || dirRef.current || !rs[0]) return;
       if (tagFilter !== null || collFilter !== null || snapFilter !== null) return;
       setDir(rs[0]);
@@ -498,7 +520,7 @@ export default function App() {
 
   const buildQuery = useCallback(
     (c: [number, number] | null): Query => ({
-      dirId: dir?.id ?? null,
+      dirId: crossLibRef.current ? null : (dir?.id ?? null),
       recursive: true,
       kinds: KINDS_OF[kindKey] ?? null,
       text: debounced,
@@ -517,10 +539,10 @@ export default function App() {
   const loadPage = useCallback(
     async (reset: boolean) => {
       /* 「没有当前目录就不查」只对**浏览目录**成立。
-         标签 / 分组 / 颜色 / 评分 这些是**跨目录**筛选：点标签时目录被清空（这是对的），
-         但如果这里仍然短路，就永远不会去查 —— 表现正是 owner 报的
-         「标签明明有 400 张，点了以后网格空白」（2026-11-17，P0）。
-         判定"有没有筛选"要看这几个维度，不能只看 dir。 */
+         标签 / 分组 / 颜色 / 评分 / 快照 这些筛选在没有目录时也要照常查
+         （快照永远跨库；目录刚被移除时也可能是空的）。
+         判定"有没有筛选"要看这几个维度，不能只看 dir —— 否则就是 owner 报过的
+         「标签明明有 400 张，点了以后网格空白」（2026-11-17，P0）。 */
       const scoped =
         tagFilter !== null ||
         collFilter !== null ||
@@ -536,7 +558,24 @@ export default function App() {
       const my = ++reqRef.current;
       setLoading(true);
       try {
-        const rows = await source.list(buildQuery(reset ? null : cursor));
+        let rows = await source.list(buildQuery(reset ? null : cursor));
+        /* 0.4.24：「当前库 AND 标签/分组」查出 0 条时才放宽到全部库。
+           为什么要有这一步：标签/分组是全局的，素材可能都在别的库里；
+           如果死守当前库，就会退回 2026-11-17 那个 P0（"标签有 400 张，点开空白"）。
+           为什么不再一律跨库：那会让"点一下标签，画面整个换成别的库的素材"，
+           看起来就是文件库被切走了（owner 2026-11-21 报的）。
+           放宽时**保持侧栏当前库不动**，只用一句提示说清楚这是放宽后的结果。 */
+        if (reset && rows.length === 0 && dir && (tagFilter !== null || collFilter !== null)) {
+          crossLibRef.current = true;
+          rows = await source.list({ ...buildQuery(null), dirId: null });
+          if (rows.length) {
+            toast(
+              "当前库里没有这些素材",
+              false,
+              "已改为在所有素材库里看；点侧栏里的库就回到单库",
+            );
+          }
+        }
         if (my !== reqRef.current) return; // 丢弃过期响应
         setItems((prev) => (reset ? rows : [...prev, ...rows]));
         setDone(rows.length < 200);
@@ -577,6 +616,7 @@ export default function App() {
   useEffect(() => {
     setCursor(null);
     setDone(false);
+    crossLibRef.current = false; // 每次换目录/筛选都重新从"当前库"开始
     void loadPage(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter, ratingFilter, collFilter, snapFilter]);
@@ -680,7 +720,7 @@ export default function App() {
 
   /* ---------------- 双击导入（0.4.2） ----------------
 
-     用户在资源管理器双击 `.L/.S/.P-AssetManager` 时，后端已经按**内容**判定过
+     用户在资源管理器双击 `.L/.S/.P/.F-AssetManager` 时，后端已经按**内容**判定过
      "这是我们的文件"，但那不等于"用户点的是他想导的那份"（可能是别人发来的、
      可能点错了）。所以先问一句再动手 —— 尤其 `.P` 包会真的往磁盘上铺文件。
 
@@ -1133,7 +1173,10 @@ export default function App() {
             action: () => {
               setTagFilter(on ? null : tag);
               if (!on) {
-                setDir(null);
+                /* 0.4.24：**不再清目录**。点标签 = 在当前库里看这个标签
+                   （以前 `setDir(null)` 把当前库一起清掉，画面立刻变成"所有库"，
+                   用户感受就是"点个标签把文件库切走了"，owner 2026-11-21 报的）。
+                   当前库内确实没有这类素材时，`loadPage` 里有兜底会放宽到全部库。 */
                 setSnapFilter(null);
               }
             },
@@ -1382,8 +1425,8 @@ export default function App() {
         const id = await source.collCreate(n);
         setColls(await source.collList());
         setCollFilter(id);
-        setDir(null);
         setTagFilter(null);
+        /* 新建分组不搬走当前库：分组是"收纳"，在哪个库里建的就在哪个库里看 */
         setPage("assets");
         toast(`分组「${n}」已建立`, false, "选中素材右键 →「加入分组」就能往里放");
       } catch (e) {
@@ -1483,7 +1526,7 @@ export default function App() {
             icon: "funnel",
             action: () => {
               setCollFilter(collFilter === row.id ? null : row.id);
-              setDir(null);
+              /* 同标签：不再清目录，分组在当前库里看（0.4.24） */
               setTagFilter(null);
               setSnapFilter(null);
               setPage("assets");
@@ -3387,18 +3430,42 @@ export default function App() {
           setTagPrompt({ ids });
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
-        // Ctrl+C = 复制**原文件**（CF_HDROP）。粘到 PS/资源管理器得到的是文件，不是位图 ——
-        // 和右键「复制原文件」完全同一条路，别让两处行为不一样
+        /* Ctrl+C = 复制**原文件**（CF_HDROP）。粘到 PS/资源管理器得到的是文件，不是位图 ——
+           和右键「复制原文件」完全同一条路，别让两处行为不一样。
+
+           0.4.25 加三道闸。owner 连着三轮报「根本没按复制，它自己复制了」，
+           真机排查（`qa-tmp/copy_probe2.py` 逐手势读 toast 角标 + 录屏事件流）：
+             · **没有任何双击路径** —— 双击瓦片/库行/目录行，toast 一次都不涨；
+             · 唯一来源是这里。而本机**有程序会向前台窗口持续注入 Ctrl+C**
+               （80 秒内注入 26 次，多次间隔 0.5s、指针坐标一模一样 —— 不是人按的）。
+           `isTrusted` 对系统级注入同样是 true，前端分辨不了，所以判据放在 Rust
+           （`am_key_recent` → `keywatch::real_key_matches`，截图覆盖层早就靠它挡过同一件事）。
+           三道闸依次是：
+             ① `e.repeat`：长按自动重复不复制 —— 按住 1 秒连弹 10 次 toast 就是这么来的；
+             ② 手上有文字选区 / 焦点在输入框：**不劫持**，让浏览器原生复制；
+             ③ 最近 1.2s 内真人按的确实是 C（注入的键不进 keywatch 的记录）。
+           任何一道没过都**静默**：不弹提示、不写剪贴板、不 preventDefault 后的副作用。 */
+        if (e.repeat || textCopyContext()) return;
         const ids = selectedIds.size ? [...selectedIds] : selected ? [selected.id] : [];
-        if (ids.length) {
-          const paths = ids
-            .map((id) => items.find((x) => x.id === id)?.path)
-            .filter((p): p is string => !!p);
-          if (paths.length) {
-            e.preventDefault();
-            void onCopyFile(paths);
+        if (!ids.length) return;
+        const paths = ids
+          .map((id) => items.find((x) => x.id === id)?.path)
+          .filter((p): p is string => !!p);
+        if (!paths.length) return;
+        e.preventDefault();
+        void (async () => {
+          try {
+            if (!(await source.keyRecent(0x43, 1200))) return;
+          } catch {
+            /* 后端没有这条命令（旧版）：判不了就放行，和 keywatch 的 fail-open 同口径 */
           }
-        }
+          const now = performance.now();
+          /* 同一批素材 400ms 内只复制一次：注入/重复事件连发时，剪贴板只被写一次，
+             toast 也只弹一条，不会攒出 `×11` 那种角标。 */
+          if (now - lastCopyAt.current < 400) return;
+          lastCopyAt.current = now;
+          void onCopyFile(paths);
+        })();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         void onUndo();
@@ -3408,6 +3475,23 @@ export default function App() {
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop]);
+
+  /* Ctrl + 滚轮 = 缩略图大小（owner 2026-11-21）。
+     顶栏那根滑杆（120 / 176 / 260）的另一种按法：手停在网格上就能调，不用去够滑杆。
+     · 只认指针在 `.workspace`（网格区）上：侧栏、详情面板、灵感板不抢这条手势；
+     · **必须 preventDefault**，否则 WebView2 把 Ctrl+滚轮当页面缩放，整个界面跟着变大变小；
+     · React 的 onWheel 是 passive 的（preventDefault 无效），只能原生监听 + passive:false。 */
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.deltaY === 0) return;
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      if (!t?.closest(".workspace")) return;
+      e.preventDefault();
+      setSizeIndex((i) => Math.min(2, Math.max(0, i + (e.deltaY > 0 ? -1 : 1))));
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
 
   /* 打开标签编辑卡时把它的自动规则一起取回来（T34） */
   useEffect(() => {
@@ -3781,6 +3865,10 @@ export default function App() {
           }}
           onShortcuts={() => setShortcutsOpen(true)}
           refreshKey={refreshKey}
+          /* 侧栏里弹出的东西都 portal 到 body：指针一进菜单就不在 `.tree` 里，
+             抽屉会在 240ms 后自动收起，菜单还悬着 —— 必须在这段时间里按住不放。
+             `ctx` 涵盖分组 / 目录 / 素材等右键菜单，`tagEdit` 是标签编辑卡。 */
+          holdOpen={!!ctx || !!tagEdit || !!tagPrompt}
           snapshotDock={
             <SnapshotDock
               items={snaps}
@@ -3817,11 +3905,12 @@ export default function App() {
               items={colls}
               activeId={collFilter}
               onPick={(id) => {
-                /* 点分组 = 跨目录看这一撮素材；再点一次取消。
-                   和标签同一个口径：必须清目录，否则"目录 AND 分组"会空。 */
+                /* 点分组 = 在当前库里看这一撮素材；再点一次取消（0.4.24）。
+                   以前这里 `setDir(null)` 把当前库一起清掉 —— 画面立刻变成"所有库"，
+                   看着就像"点一下分组，文件库被切走了"（owner 2026-11-21 报的）。
+                   只有「当前库内 0 条」时 `loadPage` 才放宽到全部库并给一句提示。 */
                 setCollFilter(id);
                 if (id !== null) {
-                  setDir(null);
                   setTagFilter(null);
                   setColorFilter(null);
                   setRatingFilter(null);
@@ -3847,10 +3936,10 @@ export default function App() {
               autoTags={autoTagCounts}
               activeTag={tagFilter}
               onPickTag={(t) => {
-                // 点标签 = 跨目录看这个标签；再点一次取消
+                /* 点标签 = **在当前库里**看这个标签；再点一次取消（0.4.24）。
+                   以前清目录 → 结果跨全库，侧栏还停在原库，看着像库被切走。 */
                 setTagFilter(t);
                 if (t) {
-                  setDir(null);
                   setCollFilter(null);
                 }
               }}
@@ -3901,12 +3990,9 @@ export default function App() {
                 setColorFilter(null);
                 setRatingFilter(null);
                 setCollFilter(null);
-                /* 目录范围也要放开（2026-11-17 owner 报的 P0）：
-                   侧栏点标签走的是「跨目录看这个标签」，顶栏筛选菜单里点标签
-                   以前**没清目录** → 查询变成「当前目录 AND 这个标签」，
-                   标签明明有 400 张、里面一张都不在当前目录，于是空态。
-                   两个入口必须是同一种语义，否则同一个标签点出两种结果。 */
-                setDir(null);
+                /* 0.4.24：目录**保留**，和侧栏点标签同一个语义（当前库 AND 标签）。
+                   以前这里清目录、侧栏也清目录，两处都把"库"一起丢了；
+                   当前库内确实没有时才由 `loadPage` 放宽到全部库并提示。 */
                 setPage("assets");
               }
             }}
@@ -4160,8 +4246,8 @@ export default function App() {
             if (selected) void removeTag(t, [selected.id]);
           }}
           onPickTag={(t) => {
+            /* 详情面板双击标签也是同一个语义：在当前库里看（0.4.24，不再清目录） */
             setTagFilter(t);
-            setDir(null);
           }}
           onDenyAutoTag={denyAutoTag}
           onEditTag={(name) => openTagEdit("tag", name)}
@@ -4199,7 +4285,6 @@ export default function App() {
                 <button
                   onClick={() => {
                     setTagFilter(tagEdit.name);
-                    setDir(null);
                     setSnapFilter(null);
                     setTagEdit(null);
                   }}

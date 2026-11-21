@@ -42,6 +42,15 @@
   flex: none;
   display: block;
 }
+/* 标题栏里的品牌标 = 应用图标（public/icon.png）。21px 显示的是 512 的图，
+   2x/3x 屏上靠浏览器缩，`contain` 保证非正方形源也不变形。 */
+.brand-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  border-radius: 4px;
+}
 .titlebar-title {
   font-size: var(--fs-13);
   font-weight: 500;
@@ -384,7 +393,11 @@
   box-shadow: 10px 0 28px rgba(0, 0, 0, 0.1);
   transform: translateX(-100%);
   transition: transform 170ms var(--t-base, ease);
-  z-index: 6;
+  /* 10：**必须高于 `.page-view`（z-index 6）**。关于 / 工具这些整页视图是同一层里的
+     后一个兄弟节点，同层级时 DOM 靠后就赢 —— 抽屉滑出来会被整页的白底盖掉，
+     只剩顶上一条（owner 2026-11-21 截图：关于页把侧栏压住了）。
+     也不能更高：批量条(20)、灯箱(40)、右键菜单(110)、弹窗(90+) 都要压在抽屉上面。 */
+  z-index: 10;
 }
 .tree.is-open {
   transform: none;
@@ -2963,6 +2976,22 @@ body[data-dragging] .batch-bar * {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+/* 「仅当前库」小标记（0.4.24）：分组/标签只在当前素材库里生效，范围必须写在脸上。
+   样式照 `.lib-builtin` 的胶囊（同一套令牌），高度压到 15 免得把 32 的头部撑高。 */
+.tag-dock-scope {
+  flex: none;
+  padding: 0 5px;
+  height: 15px;
+  line-height: 15px;
+  border-radius: var(--r-4);
+  font-size: var(--fs-9);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  background: var(--e2);
+  white-space: nowrap;
+  pointer-events: none;
+}
 .tag-dock-caret {
   flex-shrink: 0;
   display: inline-flex;
@@ -4353,12 +4382,12 @@ body.peek-body #root {
 }
 
 .peek-root {
-  /* 四周留一圈透明边距，专门给「向外的蓝色渐变」用（窗口外没有像素，
-     光晕只能画在窗口里）。后端按同一个值给窗口加了同样的边，
-     所以图片**仍然是截图那个尺寸、那个位置**。
-     20 → 10px（0.2.2 owner：「边框阴影太宽、太明显」）：光晕越宽，
-     图与桌面之间那圈"安全距离"越大，看起来越像浮窗而不是贴纸。 */
-  --peek-glow: 10px;
+  /* 四周的透明边距，曾经专门给「向外的蓝色渐变」用（窗口外没有像素，光晕只能画在窗口里）。
+     **0.4.24 起归零**（owner 2026-11-21「贴图会有一圈透明的，应该是打开时的比例才对」）：
+     窗就是图，比例和缩略图一致，外面不再套一圈透明。
+     后端 `PEEK_GLOW` 必须同值 —— 改这里就得同步改 `main.rs`，否则图会偏、会缩。
+     20 → 10px（0.2.2）→ 0（0.4.24）。 */
+  --peek-glow: 0px;
   padding: var(--peek-glow);
   box-sizing: border-box;
   position: fixed;

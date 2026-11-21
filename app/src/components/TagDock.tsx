@@ -20,24 +20,13 @@ import { BlinkCaretInput, Icon } from "./ui";
  * - 选中 = `--ui-hover` 浅灰底 + 2px 竖线（配过色的标签竖线与行名跟标签色走）；
  * - 收起时头部仍显示「正在筛的标签」胶囊，筛选状态不会被藏起来；收起时清掉过滤词。
  */
-const PIN_KEY = "am.tags.pinned.v1";
 const CLOSED_KEY = "am.tags.groups.closed.v1";
 const DOCK_ID = "tags";
 
-function loadPinned(): boolean {
-  try {
-    return localStorage.getItem(PIN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function savePinned(v: boolean) {
-  try {
-    localStorage.setItem(PIN_KEY, v ? "1" : "0");
-  } catch {
-    /* 存不进去就本次会话有效 */
-  }
-}
+/* 固定开关**只在本次会话有效**，不再写 localStorage（owner 2026-11-21）：
+   - 以前把 pinned 存成 `am.tags.pinned.v1`，装完第一次打开就是展开的，要它收起得再点一下；
+   - 那个键还被自动化脚本写过 "1"（验证点标签不切库时），脏值会一直跟着同一个人。
+   要一直展开就点一下头部；鼠标离开会收，重启也回到收起。 */
 function loadClosed(): Set<string> {
   try {
     const raw = localStorage.getItem(CLOSED_KEY);
@@ -86,7 +75,7 @@ export function TagDock({
   /** 有弹层开着（编辑卡 / 批量打标签 / 右键菜单）→ 面板必须留在原地 */
   hold?: boolean;
 }) {
-  const [pinned, setPinned] = useState(loadPinned);
+  const [pinned, setPinned] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(loadClosed);
   const [autoOpen, setAutoOpen] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -159,7 +148,6 @@ export function TagDock({
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
       setPinned(false);
-      savePinned(false);
       setFocusHold(false);
     };
     window.addEventListener("keydown", h);
@@ -173,9 +161,7 @@ export function TagDock({
       onPickTag(null);
       return;
     }
-    const next = !pinned;
-    setPinned(next);
-    savePinned(next);
+    setPinned(!pinned);
   };
 
   const toggleGroup = (name: string) => {
@@ -286,6 +272,10 @@ export function TagDock({
       >
         <Icon name="tag" size={15} stroke={1.5} className="tag-dock-icon" />
         <span className="tag-dock-title">标签</span>
+        {/* 0.4.24：同分组 —— 点标签只在**当前素材库**里筛，标出范围省得用户猜 */}
+        <span className="tag-dock-scope" title="只在当前素材库里生效；当前库里没有时才临时放宽到全部库">
+          仅当前库
+        </span>
 
         {/* 收起时也要看得见「正在按什么筛」，否则状态被藏起来 */}
         {activeTag ? (

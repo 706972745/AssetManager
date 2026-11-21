@@ -661,6 +661,10 @@ struct Ctx {
     keep: Vec<[i32; 4]>,
     sel: Option<[i32; 4]>,
     sel0: [i32; 4],
+    /// 多框选（0.4.24）：已确认的选区块集合。在已有块**外面**再拖 = 追加一块，
+    /// 右键 = 移除当前块；交付取所有块的**并集**（块内不透明、块间透明）。
+    /// 单块时行为与老版本完全一致。
+    areas: Vec<[i32; 4]>,
     ops: Vec<Op>,
     redo: Vec<Op>,
     tool: Tool,
@@ -1234,46 +1238,47 @@ impl Ctx {
     /// 冻结图 → DIB；有选区则选区外压暗
     fn fill_base(&mut self) {
         let row = self.w as usize * 4;
-        match self.sel {
-            Some([rx, ry, rw, rh]) if rw > 2 && rh > 2 => {
-                for y in 0..self.h {
-                    let inside_y = y >= ry && y < ry + rh;
-                    let src = if inside_y { &self.base } else { &self.dim };
-                    let off = y as usize * row;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src.as_ptr().add(off),
-                            self.bits.add(off),
-                            row,
-                        );
-                    }
-                    if inside_y {
-                        let l = rx.max(0) as usize * 4;
-                        let rr = ((rx + rw).min(self.w) as usize) * 4;
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                self.dim.as_ptr().add(off),
-                                self.bits.add(off),
-                                l,
-                            );
-                            if rr < row {
-                                std::ptr::copy_nonoverlapping(
-                                    self.dim.as_ptr().add(off + rr),
-                                    self.bits.add(off + rr),
-                                    row - rr,
-                                );
-                            }
-                        }
-                    }
-                }
+        /* 亮区 = 已确认块 ∪ 当前选区（0.4.24 多框选）：并集内保持 100% 亮度，
+           其余压暗。单块时与老行为逐像素等价。 */
+        let mut lit: Vec<[i32; 4]> = self.areas.clone();
+        if let Some(s) = self.sel {
+            if !lit.contains(&s) {
+                lit.push(s);
             }
-            _ => unsafe {
+        }
+        lit.retain(|r| r[2] > 2 && r[3] > 2);
+        if lit.is_empty() {
+            unsafe {
                 std::ptr::copy_nonoverlapping(
                     self.dim.as_ptr(),
                     self.bits,
                     (self.w as usize) * (self.h as usize) * 4,
                 );
-            },
+            }
+        } else {
+            for y in 0..self.h {
+                let off = y as usize * row;
+                /* 先整行压暗，再把落在亮区里的段从原始冻结图盖回来 */
+                unsafe {
+                    std::ptr::copy_nonoverlapping(self.dim.as_ptr().add(off), self.bits.add(off), row);
+                }
+                for r in &lit {
+                    if y < r[1] || y >= r[1] + r[3] {
+                        continue;
+                    }
+                    let l = (r[0].max(0) as usize) * 4;
+                    let rr = ((r[0] + r[2]).min(self.w) as usize) * 4;
+                    if rr > l {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                self.base.as_ptr().add(off + l),
+                                self.bits.add(off + l),
+                                rr - l,
+                            );
+                        }
+                    }
+                }
+            }
         }
         /* 压暗之后再把这些矩形从**原始冻结图**盖回来：贴图窗口保持 100% 亮度。
            放在压暗之后、标注之前 —— 标注（箭头/文字）依然可以画在贴图上。 */
@@ -3005,6 +3010,15 @@ impl Ctx {
     }
 
     fn draw_sel(&mut self) {
+        /* 其它已确认的块：1px 细蓝框（无把手）—— 多框选时每一块都看得见（0.4.24） */
+        let act = self.sel;
+        for i in 0..self.areas.len() {
+            let r = self.areas[i];
+            if Some(r) == act || r[2] <= 0 || r[3] <= 0 {
+                continue;
+            }
+            self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], 1, 0x1B4FE0);
+        }
         let Some([x, y, w, h]) = self.sel else { return };
         if w <= 0 || h <= 0 {
             return;
@@ -3018,7 +3032,13 @@ impl Ctx {
         // 尺寸标签（文字只能是 GDI：中文/字形没法自己点像素）
         /* v2 的 HUD：宽高 + 屏幕坐标（等宽数字靠字体本身；缩放比拿不到——
            覆盖层全程物理像素，DPI 只在 main.rs 那边有）。 */
-        let label = format!("{} × {}   x {}  y {}", w, h, self.ox + x, self.oy + y);
+        let blocks = self.areas.len() + usize::from(!self.areas.contains(&[x, y, w, h]));
+        let mut label = format!("{} × {}   x {}  y {}", w, h, self.ox + x, self.oy + y);
+        /* 多框选时把块数写进 HUD：不然用户不知道自己已经加了几块、
+           也不知道交付时会被竖着拼起来（owner 2026-11-21 要的"多次加入再合并"）。 */
+        if blocks > 1 {
+            label.push_str(&format!("   共 {} 块 · 纵向拼一张", blocks));
+        }
         let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
         let wide: Vec<u16> = label.encode_utf16().collect();
         unsafe {
@@ -3149,7 +3169,8 @@ impl Ctx {
         const PAD: i32 = 12;
         const CAP_H: i32 = 18;
 
-        let rows: [(&[&str], &str, &str); 6] = [
+        let rows: [(&[&str], &str, &str); 7] = [
+            (&["框外拖"], "再框一块（多框选）", "右键 移除当前块"),
             (&["悬停"], "组按钮展开更多工具", ""),
             (&["滚轮"], "线条粗细（Shift 4px）", "[ ] 也能调"),
             (&["F"], "形状填充", ""),
@@ -3369,6 +3390,69 @@ fn crop_png(c: &Ctx, r: [i32; 4]) -> Option<Vec<u8>> {
     .ok()
 }
 
+/// 两个矩形有没有交叠（多框选：删块时判断标注还归不归剩下的块）
+fn overlap4(a: [i32; 4], b: [i32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// 拼接的纯像素核心：`src` 是整屏 **BGRA** 缓冲，块按"先上后下、同行先左后右"排，
+/// 一块接一块竖着摞，空隙不留；宽度取最宽那块，窄块右侧补全透明。
+/// 不碰 GDI / 裸指针 —— 好让 `stack_tests` 直接单测像素。
+fn stack_rows(src: &[u8], cw: i32, ch: i32, rs: &[[i32; 4]]) -> Option<(Vec<u8>, i32, i32)> {
+    if cw <= 0 || ch <= 0 || rs.is_empty() {
+        return None;
+    }
+    let mut blocks = rs.to_vec();
+    blocks.sort_by_key(|r| (r[1], r[0]));
+    let w = blocks.iter().map(|r| r[2]).max().unwrap_or(0);
+    let h: i32 = blocks.iter().map(|r| r[3]).sum();
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    let mut oy = 0i32;
+    for r in &blocks {
+        let (x0, y0) = (r[0].max(0), r[1].max(0));
+        let bw = r[2].min(cw - x0);
+        let bh = r[3].min(ch - y0);
+        if bw <= 0 || bh <= 0 {
+            continue;
+        }
+        for yy in 0..bh as usize {
+            let so = ((y0 as usize + yy) * (cw as usize) + x0 as usize) * 4;
+            let dst = ((oy as usize + yy) * (w as usize)) * 4;
+            let s = &src[so..so + (bw as usize) * 4];
+            let d = &mut rgba[dst..dst + (bw as usize) * 4];
+            for xx in 0..bw as usize {
+                d[xx * 4] = s[xx * 4 + 2];
+                d[xx * 4 + 1] = s[xx * 4 + 1];
+                d[xx * 4 + 2] = s[xx * 4];
+                d[xx * 4 + 3] = 255;
+            }
+        }
+        oy += bh;
+    }
+    Some((rgba, w, oy))
+}
+
+/// 多框选的**纵向拼接**交付（0.4.24，owner 2026-11-21 定的方式）：
+/// 块按先上后下、同行先左后右摞成一张长图，**块之间的空隙不留**（截聊天记录不留空行）。
+/// 坐标取的是 `c.bits`（已压暗 + 已画标注）—— 和单块裁剪同源。
+fn crop_png_stack(c: &Ctx, rs: &[[i32; 4]]) -> Option<(Vec<u8>, i32, i32)> {
+    let src = unsafe { std::slice::from_raw_parts(c.bits, (c.w as usize) * (c.h as usize) * 4) };
+    let (rgba, w, h) = stack_rows(src, c.w, c.h, rs)?;
+    screen::Shot {
+        x: 0,
+        y: 0,
+        w: w as u32,
+        h: h as u32,
+        rgba,
+    }
+    .png()
+    .ok()
+    .map(|png| (png, w, h))
+}
+
 /// **已经持有 CTX 锁时**用它（工具栏点击 / WM_KEYDOWN 都在锁内）。
 /// 之前这些路径直接调 `deliver()`，而 `deliver` 内部又 `CTX.lock()` ——
 /// std::sync::Mutex 不可重入，于是**整条 UI 线程死锁**：用户看到的就是
@@ -3385,12 +3469,33 @@ fn deliver_to(c: &mut Ctx, action: &str) {
        重放标注用的是 `c.ops`，所以箭头/文字/涂鸦一个都不少。 */
     c.fill_base();
     c.draw_ops();
-    if let Some(png) = crop_png(c, sel) {
-        c.done = Some((
-            action.to_string(),
-            png,
-            [sel[0] as f64, sel[1] as f64, sel[2] as f64, sel[3] as f64],
-        ));
+    /* 0.4.24 多框选：活动块若还没进集合（Ctrl+A / 移动 / 缩放路径），先入集合。
+       之后要么单块（行为与老版本逐字节一致），要么多块纵向拼成一张。 */
+    if !c.areas.contains(&sel) {
+        c.areas.push(sel);
+    }
+    if c.areas.len() <= 1 {
+        if let Some(png) = crop_png(c, sel) {
+            c.done = Some((
+                action.to_string(),
+                png,
+                [sel[0] as f64, sel[1] as f64, sel[2] as f64, sel[3] as f64],
+            ));
+        }
+    } else {
+        let mut rs = c.areas.clone();
+        rs.sort_by_key(|r| (r[1], r[0]));
+        rs.dedup();
+        if let Some((png, w, h)) = crop_png_stack(c, &rs) {
+            /* 贴图位置：落在最上面那一块的左上角，尺寸就是拼好的图 —— 不能再按包围盒，
+               拼接后高度变了，照包围盒贴会被拉变形。 */
+            let first = rs[0];
+            c.done = Some((
+                action.to_string(),
+                png,
+                [first[0] as f64, first[1] as f64, w as f64, h as f64],
+            ));
+        }
     }
     /* 交付失败（写盘出错等）时窗口还开着，把选区框补回来，别让用户看着一块没有框的画面。 */
     if c.done.is_none() {
@@ -3597,25 +3702,54 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
                 return;
             }
         }
-        if c.tool == Tool::Select {
+        /* 光标是不是落在**所有**已确认块之外（决定"开新块"还是"改老块"） */
+        let outside_all = !c.areas.iter().any(|a| inside(*a, x, y));
+        /* 选择工具点到**别的**已确认块里：把它切成活动块（能接着挪 / 拉把手 / 右键删）。
+           没有这一步，第二块一框完第一块就"冻住"了 —— 只能右键删掉重框。 */
+        if c.tool == Tool::Select && !outside_all {
+            if let Some(a) = c.areas.iter().rev().copied().find(|a| inside(*a, x, y)) {
+                c.sel = Some(a);
+                c.sel0 = a;
+                c.drag = Drag::MoveSel;
+                c.anchor = (x, y);
+                c.render();
+                return;
+            }
+        }
+        /* 起点落在**所有已确认块之外** = 开一块新的（多框选，0.4.24）。
+           不必先切回选择工具：框外本来没有别的用途（标注只能画在块内）。
+           `sel0` 必须在这里重置 —— 收尾靠它认"这次动的是哪一块"，留着上一次
+           缩放的原矩形，新框会把上一块原地覆盖掉（多框选定案前实测踩到）。 */
+        if c.tool == Tool::Select || (!c.areas.is_empty() && outside_all) {
             c.sel = Some([x, y, 0, 0]);
+            c.sel0 = [x, y, 0, 0];
             c.drag = Drag::NewSel;
             c.anchor = (x, y);
         }
     } else {
-        match c.drag {
-            Drag::NewSel | Drag::Draw => {
+        /* 收尾要按**手势类型**分派（0.4.24 多框选）：以前 NewSel 与 Draw 共用一个分支、
+           再回头看当前工具，于是"非选择工具在框外拖出的新块"会被当成画一笔。
+           现在 NewSel 永远只改选区，Draw 永远只落一条标注。 */
+        let d = c.drag;
+        match d {
+            Drag::NewSel => {
+                let r = norm4(c.anchor, (x, y));
+                /* 太小的框不算一块：把活动块还给集合里最后一块，
+                   工具栏和 HUD 不会因为"手抖点了一下"整条消失。 */
+                c.sel = if r[2] > 3 && r[3] > 3 {
+                    Some(r)
+                } else {
+                    c.areas.last().copied()
+                };
+                c.preview = None;
+            }
+            Drag::Draw => {
                 let a = c.anchor;
                 let b = (x, y);
-                if c.tool == Tool::Select {
-                    let r = norm4(a, b);
-                    c.sel = if r[2] > 3 && r[3] > 3 { Some(r) } else { None };
-                } else {
-                    let pts = c.pts.clone();
-                    if let Some(op) = c.make_op(a, b, &pts) {
-                        c.ops.push(op);
-                        c.redo.clear();
-                    }
+                let pts = c.pts.clone();
+                if let Some(op) = c.make_op(a, b, &pts) {
+                    c.ops.push(op);
+                    c.redo.clear();
                 }
                 c.preview = None;
             }
@@ -3658,6 +3792,23 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
             _ => {}
         }
         c.drag = Drag::None;
+        /* 活动选区 ↔ 块集合同步（0.4.24 多框选）：
+           · 新拖出来的块（sel0 是起点，匹配不到集合）→ 入集合
+           · 移动 / 缩放过的块（sel0 = 改动前的矩形）→ 原地替换
+           **只认改选区的三种手势**：画标注也跑这段的话，`sel0`（上一次缩放留下的）
+           会把某一块替换成本次选区，属于典型的"改了 A 坏了 B"。 */
+        if matches!(d, Drag::NewSel | Drag::MoveSel | Drag::Resize(_)) {
+            if let Some(s) = c.sel {
+                match c.areas.iter().position(|&a| a == c.sel0) {
+                    Some(i) => c.areas[i] = s,
+                    None => {
+                        if !c.areas.contains(&s) {
+                            c.areas.push(s);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(op) = c.ops.last() {
             let _ = op.bbox();
         }
@@ -3813,7 +3964,19 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
             let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(c) = g.as_mut() {
                 if c.sel.is_some() {
-                    c.sel = None;
+                    /* 0.4.24 多框选：右键 = **移除当前块**，其余块保留（继续加选）。
+                       只删块不清标注是错的（owner 2026-11-21 报的"截图取消后，之前标记的
+                       还在"）：箭头/框/文字画在整屏坐标系里，块没了它们照样画在压暗的
+                       底图上。所以这里**连标注一起收**：包围盒碰不到剩下任何一块的 op
+                       全部丢弃；把最后一块也移除时，等于"取消这次框选"，标注自然清空。 */
+                    if let Some(cur) = c.sel {
+                        c.areas.retain(|&a| a != cur);
+                        let rest = c.areas.clone();
+                        c.ops.retain(|op| rest.iter().any(|&a| overlap4(a, op.bbox())));
+                        c.redo.clear();
+                    }
+                    /* 还有块就让它当活动块：整条工具栏不会因为"刚删掉一块"闪没 */
+                    c.sel = c.areas.last().copied();
                     c.open = None;
                     c.tray_hover = None;
                     c.palette = false;
@@ -3874,9 +4037,11 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                             }
                             c.render();
                         }
-                        // Ctrl+A：选中整屏（网页版同键）
+                        // Ctrl+A：选中整屏（网页版同键）。多框选时**整屏替换**所有块
                         0x41 if ctrl => {
                             c.sel = Some([0, 0, c.w, c.h]);
+                            c.sel0 = [0, 0, c.w, c.h];
+                            c.areas = vec![[0, 0, c.w, c.h]];
                             c.render();
                         }
                         // Ctrl+Shift+S 另存为（自己选路径），Ctrl+S 存到截图库
@@ -4074,6 +4239,7 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
                 keep: keep.to_vec(),
                 sel: None,
                 sel0: [0; 4],
+                areas: Vec::new(),
                 ops: Vec::new(),
                 redo: Vec::new(),
                 tool: Tool::Select,
@@ -4230,6 +4396,7 @@ mod bar_preview {
             w,
             h,
             ox: 0,
+            areas: Vec::new(),
             oy: 0,
             pal,
             mem,
@@ -4767,5 +4934,57 @@ mod bar_preview {
             DeleteDC(c.mem);
             DeleteObject(bmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod stack_tests {
+    /*! 多框选纵向拼接的像素单测（0.4.24）。
+
+        为什么要它：拼接只发生在"复制/保存/贴图"那一刻，真机手测要装包、框三块、
+        再粘出来量尺寸。这里直接喂一块假屏幕缓冲，把"高度=各块之和""窄块右侧补透明"
+        "排序按上→下"三件事钉住，改像素循环时立刻能发现。 */
+
+    use super::stack_rows;
+
+    /// 假屏幕：B = x*10、G = y*10、R = 200，方便断言取到的是哪一行哪一列
+    fn buf(w: i32, h: i32) -> Vec<u8> {
+        let mut v = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let o = ((y * w + x) * 4) as usize;
+                v[o] = (x * 10) as u8;
+                v[o + 1] = (y * 10) as u8;
+                v[o + 2] = 200;
+                v[o + 3] = 255;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn stacks_vertically_without_gap() {
+        let src = buf(4, 6);
+        /* 故意**倒着**传：下面那块先给，上面那块后给 —— 排序必须自己按 y 排 */
+        let (out, w, h) = stack_rows(&src, 4, 6, &[[2, 4, 2, 2], [0, 0, 4, 2]]).unwrap();
+        assert_eq!((w, h), (4, 4), "宽度取最宽块，高度 = 各块之和（空隙不留）");
+
+        /* 第一行是上面那块（源 0,0）：B=0 G=0 R=200 → RGBA [200,0,0,255] */
+        assert_eq!(&out[0..4], &[200, 0, 0, 255]);
+
+        /* 第三行（y=2）是下面那块的第一行，左对齐；源 (2,4) → B=20 G=40 R=200 */
+        let o = (2 * 4) * 4;
+        assert_eq!(&out[o..o + 4], &[200, 40, 20, 255], "窄块左对齐贴到左边");
+
+        /* 窄块只有 2 列，右边两列补全透明 */
+        let o = (2 * 4 + 3) * 4;
+        assert_eq!(&out[o..o + 4], &[0, 0, 0, 0], "窄块右侧补透明");
+    }
+
+    #[test]
+    fn empty_input_is_none() {
+        let src = buf(4, 4);
+        assert!(stack_rows(&src, 4, 4, &[]).is_none());
+        assert!(stack_rows(&src, 4, 4, &[[0, 0, 0, 5]]).is_none());
     }
 }

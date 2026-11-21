@@ -102,7 +102,7 @@ impl SnapFile {
 
 /* ------------------------------------------------------------------ 资产包清单 */
 
-/// 资产包（`.P-AssetManager`）清单里的一条 = 一张素材，`rel` 是相对库根的路径。
+/// 资产包（`.F-AssetManager`，旧后缀 `.P`）清单里的一条 = 一张素材，`rel` 是相对库根的路径。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PackItem {
     /// 相对库根，分隔符统一 `/`（zip 的规矩，也是跨平台唯一安全的写法）
@@ -900,7 +900,7 @@ mod tests {
         let b = src.join("二.jpg");
         std::fs::write(&a, b"hello zip").unwrap();
         std::fs::write(&b, vec![7u8; 40_000]).unwrap();
-        let zip = d.join("pack.P-AssetManager");
+        let zip = d.join("pack.F-AssetManager");
         let (ok, bad) = zip_files(&zip, &[a.clone(), b.clone()]).unwrap();
         assert_eq!((ok, bad.len()), (2, 0));
 
@@ -931,7 +931,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         let payload = src.join("evil.txt");
         std::fs::write(&payload, b"pwned").unwrap();
-        let zip = d.join("evil.P-AssetManager");
+        let zip = d.join("evil.F-AssetManager");
         let mut z = ZipWriter::create(&zip).unwrap();
         /* 故意把条目名写成逃逸路径：写出端不校验名字（它只负责塞字节），
            校验点就在读端 —— 这才是攻击面 */
@@ -945,13 +945,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 不是 zip（比如把 JSON 改名成 .P-AssetManager）→ 人话报错，不是 panic。
+    /// 不是 zip（比如把 JSON 改名成 .F-AssetManager）→ 人话报错，不是 panic。
     #[test]
     fn unzip_rejects_non_zip_file() {
         let d = std::env::temp_dir().join(format!("am-notzip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let p = d.join("x.P-AssetManager");
+        let p = d.join("x.F-AssetManager");
         std::fs::write(&p, br#"{"app":"AssetManager","libs":[]}"#).unwrap();
         let e = unzip_stored(&p, &d.join("dest")).unwrap_err();
         assert!(e.contains("不是 AssetManager 导出的"), "{e}");

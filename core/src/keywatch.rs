@@ -34,6 +34,8 @@ static LAST_VK: AtomicU32 = AtomicU32::new(0);
 /// 回调累计收到的 keydown 条数（**含注入**）。>0 才说明钩子真的在工作。
 static HOOK_SEEN: AtomicU64 = AtomicU64::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
+/// 常驻标记（0.4.25）：主窗的 Ctrl+C 闸门要全程有数据，钩子装一次就不再拆。
+static PERSIST: AtomicBool = AtomicBool::new(false);
 
 /// 钩子是否确认在工作：装上了，并且至少见到过一条 keydown。
 pub fn alive() -> bool {
@@ -193,8 +195,18 @@ mod imp {
                 PeekMessageW(&mut probe, std::ptr::null_mut(), 0, 0, 0 /* PM_NOREMOVE */);
 
                 /* `hMod` 给当前模块句柄（传 NULL 在部分系统上同样是"装上但永不回调"）。 */
-                let hmod = GetModuleHandleW(std::ptr::null());
-                let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), hmod, 0);
+                /* `hMod`：**先传 NULL**。低级钩子的回调就在本进程里跑，系统不靠 hMod 定位；
+                   2026-11-21 实测（0.4.25）：传 `GetModuleHandleW(NULL)` 时
+                   `SetWindowsHookExW` **返回了非空句柄却一条回调都不来**（`HOOK_SEEN` 恒 0），
+                   同一台机器上 Python 用 `hMod=NULL` 立刻就能收到 —— 于是改回 NULL，
+                   「本模块句柄」留作兜底：真有系统要它，装不上时再试一次。 */
+                let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), std::ptr::null_mut(), 0);
+                let h = if h.is_null() {
+                    let hmod = GetModuleHandleW(std::ptr::null());
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), hmod, 0)
+                } else {
+                    h
+                };
                 if h.is_null() {
                     set_last_error(GetLastError());
                     let _ = tx.send(false);
@@ -262,7 +274,22 @@ pub fn install() -> bool {
 
 #[cfg(windows)]
 pub fn uninstall() {
+    /* 常驻模式（0.4.25）：主窗快捷键闸门在用这套记录，**不许拆**。
+       截图会话结束时的那句 `uninstall` 是历史写法，走到这里直接空转。 */
+    if PERSIST.load(Ordering::SeqCst) {
+        return;
+    }
     imp::uninstall()
+}
+
+/// 常驻安装：装一次，进程活多久就记多久，`uninstall()` 之后也不再拆。
+///
+/// 为什么要它：`Ctrl+C → 复制原文件` 要在**主窗**判断「这颗键是真人按的还是注入的」，
+/// 而钩子原来只在截图会话里装（会话一结束就卸）—— 主窗根本没有判据可用。
+/// 装不上也不影响任何功能：`real_key_matches` 判不了时放行。
+pub fn install_persistent() -> bool {
+    PERSIST.store(true, Ordering::SeqCst);
+    install()
 }
 
 /// 钩子线程 id（诊断：`snip gate … tid=` 一眼看出钩子线程还活着没）
@@ -293,3 +320,8 @@ pub fn install() -> bool {
 
 #[cfg(not(windows))]
 pub fn uninstall() {}
+
+#[cfg(not(windows))]
+pub fn install_persistent() -> bool {
+    false
+}

@@ -95,6 +95,10 @@ export const tauriSource: Source = {
   reveal: (path: string) => invoke!<void>("am_reveal", { path }),
   openDefault: (path: string) => invoke!<void>("am_open_path", { path }),
   copyFile: (paths: string[]) => invoke!<void>("am_copy_files", { paths }),
+  /** 最近 `ms` 内**真人**按下的键是不是 `vk`（虚拟键码）。
+   *  注入的按键不算 —— 本机有程序会向前台窗口注入 Ctrl+C（见 core/src/keywatch.rs），
+   *  这是 Ctrl+C 复制原文件的第一道闸，判不了（钩子没装上）时后端放行。 */
+  keyRecent: (vk: number, ms = 1200) => invoke!<boolean>("am_key_recent", { vk, ms }),
   rename: (path: string, name: string) => invoke!<string>("am_rename", { path, name }),
   mkdir: (parent: string, name: string) => invoke!<string>("am_mkdir", { parent, name }),
   move: (paths: string[], target: string, policy: MovePolicy = "skip") =>

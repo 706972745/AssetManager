@@ -30,7 +30,7 @@ pub const INI_NAME: &str = "desktop.ini";
 /// 我们写进 ini 的那一行。**判断"是不是我们那份"就靠它**
 pub const ICON_LINE: &str = r"IconResource=.AssetManager\folder.ico,0";
 
-/// 图标本体（7 帧，35,562 B；与 `src-tauri/icons/file-types/folder.ico` 同一份）
+/// 图标本体（7 帧，58,205 B；与 `src-tauri/icons/file-types/folder.ico` 同一份）
 const ICO_BYTES: &[u8] = include_bytes!("../assets/folder.ico");
 
 /// `ensure()` 的结果。`Kept` = 什么都没动（已是最新，或者用户自己那份）。

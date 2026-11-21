@@ -74,6 +74,25 @@ function saveActiveLib(path: string) {
   }
 }
 
+/**
+ * 指针是不是落在标题栏左侧的品牌区（图标 + 应用名，右边再放宽 40px）。
+ *
+ * 为什么不直接 `closest(".titlebar-brand")`：那块是 `pointer-events: none`
+ * （不能让品牌区抢走标题栏的拖动窗口手势），事件目标是背后的 `.titlebar`，
+ * 结构上永远匹配不到。矩形每次现取：换语言、换字号、窗口宽度变化都会改它。
+ */
+function hitBrand(e: PointerEvent): boolean {
+  const el = document.querySelector(".titlebar-brand");
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return (
+    e.clientY >= r.top - 4 &&
+    e.clientY <= r.bottom + 4 &&
+    e.clientX >= r.left &&
+    e.clientX <= r.right + 40
+  );
+}
+
 interface Props {
   source: Source;
   selected: number | null;
@@ -94,6 +113,11 @@ interface Props {
   collDock?: ReactNode;
   /** 标签抽屉（默认收起、悬浮左缘展开）。侧栏只负责给它一块位置，内容与状态都在 App 里 */
   tagDock?: ReactNode;
+  /**
+   * 侧栏里有弹层开着（右键菜单 / 标签编辑卡 / 打标签弹窗）→ 抽屉**不许自动收起**。
+   * 这些弹层都 portal 到 body，指针进菜单就不再属于 `.tree` 了。
+   */
+  holdOpen?: boolean;
 }
 
 export function Tree({
@@ -111,6 +135,7 @@ export function Tree({
   snapshotDock,
   collDock,
   tagDock,
+  holdOpen = false,
 }: Props) {
   const t = useT();
   const [roots, setRoots] = useState<DirNode[]>([]);
@@ -135,16 +160,40 @@ export function Tree({
      结果就是滑出来之后再也收不回去（2026-11-21 实测踩过，自动化测试里 autoClose=false）。 */
   const [railOpen, setRailOpen] = useState(false);
   const railTimer = useRef<number | null>(null);
+  /* 菜单/弹层开着时**不许收**（owner 2026-11-21）：
+     右键菜单是 portal 到 body 的，指针一进菜单就不在 `.tree` 里了 —— 以前 240ms 后
+     整条侧栏滑走，菜单还悬在半空，"右击分组 → 去点菜单项"这个过程根本走不完。
+     用 ref 而不是把监听重挂一遍：监听注册一次就够，事件里读当时的值。 */
+  const holdRef = useRef(false);
+  holdRef.current = holdOpen;
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const t = e.target as HTMLElement | null;
-      const keepOpen = e.clientX <= 10 || (!!t && !!t.closest(".tree"));
+      /* 三处都算"想开侧栏"（owner 2026-11-21 逐条补的）：
+         ① 视口左缘 10px（原始热区）；
+         ② 已经滑出来的侧栏上（不然一进去就再也收不回去，见下面的注释）；
+         ③ **标题栏左边那块品牌区**（图标 + "AssetManager"）—— 鼠标往上飘到窗口左上角
+            是很自然的动作，那里离素材库最近，扫过去就该把侧栏带出来。
+            这里只能**按坐标判**：`.titlebar-brand` 是 `pointer-events: none`
+            （不能让品牌区抢走标题栏的拖窗口手势），事件目标是它背后的 `.titlebar`，
+            `closest('.titlebar-brand')` 永远匹配不到 —— 第一版就是这么白写的。 */
+      const keepOpen =
+        e.clientX <= 10 ||
+        (!!t && !!t.closest(".tree")) ||
+        (e.clientY < 60 && e.clientX < 360 && hitBrand(e));
       if (keepOpen) {
         if (railTimer.current !== null) {
           window.clearTimeout(railTimer.current);
           railTimer.current = null;
         }
         setRailOpen(true);
+        return;
+      }
+      if (holdRef.current) {
+        if (railTimer.current !== null) {
+          window.clearTimeout(railTimer.current);
+          railTimer.current = null;
+        }
         return;
       }
       if (railTimer.current !== null) window.clearTimeout(railTimer.current);

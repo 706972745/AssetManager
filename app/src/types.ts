@@ -474,6 +474,9 @@ export interface Source {
   openDefault(path: string): Promise<void>;
   /** 把**原文件**放进剪贴板（CF_HDROP，可粘到资源管理器 / PS） */
   copyFile(paths: string[]): Promise<void>;
+  /** 最近 `ms` 内真人按下的键是不是 `vk`（注入的键不算；判不了时后端放行）。
+   *  Ctrl+C →「复制原文件」的第一道闸，见 `core/src/keywatch.rs`。 */
+  keyRecent(vk: number, ms?: number): Promise<boolean>;
   rename(path: string, name: string): Promise<string>;
   mkdir(parent: string, name: string): Promise<string>;
   move(paths: string[], target: string, policy?: MovePolicy): Promise<MoveOutcome>;
@@ -648,7 +651,7 @@ export interface Source {
   snapshotExport(id: number): Promise<string | null>;
   /** 导入清单（选文件对话框那版）。返回 `[id, 最终名字, 新增条数, 跳过条数]`，取消 = null */
   snapshotImport(): Promise<[number, string, number, number] | null>;
-  /** 导出原始图片（.P-AssetManager）。取消 = null */
+  /** 导出原始图片（.F-AssetManager，0.4.24 起；旧后缀 .P）。取消 = null */
   snapshotExportZip(id: number): Promise<SnapshotZip | null>;
   /**
    * 双击 / 命令行传进来的导出文件：后端按**内容**判类型再导入。

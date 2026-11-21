@@ -1129,6 +1129,25 @@ export function Board() {
     /* 正在编辑的便签：这次按下归 textarea（选字 / 摆光标），**不要**起拖动。
        否则往便签里点一下，整张条就被挪走了。 */
     if (t.closest("textarea")) return;
+    /* **Shift + 左键拖 = 移动整个窗口**（owner 2026-11-21），**压在图上也算**。
+       板子是无边框窗（decorations(false)），能拖窗口的只有顶栏那条 drag-region；
+       用户的第一反应是抓画面里任意一处去挪窗 —— 抓空白会拉出框选蓝框，
+       抓图则会开始拖那张图。Shift 这条手势把两种都接过来：
+       窗口跟指针走、画布内容纹丝不动（和"Shift + 滚轮挪窗口"同一语义，只是换成拖）。
+       必须放在图片/便签/手柄判定**之前**：晚一步 `drag.current` 已经起手，
+       同一份位移会被用两次（图跟着窗口跑）。加选因此让给 Ctrl/⌘。 */
+    if (e.button === 0 && e.shiftKey) {
+      e.preventDefault();
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          await getCurrentWindow().startDragging();
+        } catch {
+          /* 浏览器预览里没有 Tauri 运行时：这条手势当没有 */
+        }
+      })();
+      return;
+    }
     const noteEl = t.closest<HTMLElement>("[data-note]");
     const handle = t.closest<HTMLElement>("[data-handle]");
     const ghandle = t.closest<HTMLElement>("[data-group-handle]");
@@ -1173,9 +1192,9 @@ export function Board() {
 
     if ((noteEl || cell) && e.button === 0) {
       const key = noteEl ? -Number(noteEl.dataset.note) : Number(cell!.dataset.img);
-      /* Shift / Ctrl / ⌘ = 加选减选。**这一下不启动拖动** ——
+      /* Ctrl / ⌘ = 加选减选（Shift 让给"拖窗口"了，见 `onDown` 开头）。**这一下不启动拖动** ——
          想多选却手一抖把它拖走，是这类画布最常见的怨气来源。 */
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      if (e.ctrlKey || e.metaKey) {
         const hit = withGroup([key]);
         const next = new Set(selRef.current);
         const on = next.has(key);
@@ -1244,9 +1263,11 @@ export function Board() {
       return;
     }
     if (e.button === 0) {
-      /* 框选：起点记在屏幕坐标里，命中判定时再换算回画布坐标 */
-      marq.current = { sx: e.clientX, sy: e.clientY, add: e.shiftKey, active: false };
-      if (!e.shiftKey && selRef.current.size) {
+      /* 框选：起点记在屏幕坐标里，命中判定时再换算回画布坐标。
+         **加选改成 Ctrl/⌘**：Shift 已经被"拖窗口"占走（同 Adobe 系里 Shift 是加选，
+         但这里窗口没有别的手势能挪，取舍在 owner 那边定了）。 */
+      marq.current = { sx: e.clientX, sy: e.clientY, add: e.ctrlKey || e.metaKey, active: false };
+      if (!marq.current.add && selRef.current.size) {
         selRef.current = new Set();
         setSel(selRef.current);
       }

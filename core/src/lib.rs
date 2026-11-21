@@ -353,6 +353,12 @@ impl App {
 
     /// 路径 → 所属库（长前缀优先：嵌套库根时以更具体的那个为准）。
     pub fn lib_for_path(&self, path: &str) -> Option<i64> {
+        /* 含 `..` 段的路径**一律不认**（0.4.24）：归属靠前缀比对，
+           `..` 能把"看起来在库内"的字符串指到库外。norm_path 虽已折叠，
+           但折叠不掉的（根之上）会保留 `..`，这里直接失败关闭最稳。 */
+        if path.split(['/', '\\']).any(|s| s == "..") {
+            return None;
+        }
         let p = norm_path(path);
         let mut best: Option<(usize, i64)> = None;
         for l in &self.libs {
@@ -1135,6 +1141,33 @@ impl App {
         db::set_thumb(&self.lib(lib_id)?.conn, local, key, state, quality, bytes)
     }
 
+    /// 缩略图的全部事实一次落库（0.4.24）：thumb/尺寸/主色/指纹一个事务。
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_thumb_bundle(
+        &mut self,
+        g: i64,
+        key: &str,
+        state: i32,
+        quality: i32,
+        bytes: i64,
+        dims: Option<(u32, u32)>,
+        palette: Option<(&str, &str)>,
+        phash: Option<i64>,
+    ) -> Result<(), String> {
+        let (lib_id, local) = ungid(g);
+        db::set_thumb_bundle(
+            &self.lib(lib_id)?.conn,
+            local,
+            key,
+            state,
+            quality,
+            bytes,
+            dims,
+            palette,
+            phash,
+        )
+    }
+
     pub fn mark_thumb_state(&mut self, g: i64, state: i32) -> Result<(), String> {
         let (lib_id, local) = ungid(g);
         db::mark_thumb_state(&self.lib(lib_id)?.conn, local, state)
@@ -1482,27 +1515,39 @@ impl App {
             return Ok((total, 0));
         }
         all.sort_by_key(|e| e.last_used);
+        /* 先只挑出要淘汰的，**不在循环里写库**（0.4.24）：
+           原来是"每淘汰一张就 DELETE + UPDATE 各一次 autocommit"，而
+           `UPDATE assets ... WHERE thumb_key=?` 在加索引前是**全表扫**
+           （20 万行 18.5 ms）→ 淘汰 2 万张 ≈ 30 分钟，还全程持锁。 */
+        let mut pick: Vec<Entry> = Vec::new();
         let mut cur = total;
-        let mut freed = 0;
         for e in all {
             if cur <= target {
                 break;
             }
+            cur -= e.bytes;
+            pick.push(e);
+        }
+        let freed: i64 = pick.iter().map(|e| e.bytes).sum();
+
+        // ① 先删磁盘文件（不持库锁）
+        for e in &pick {
             if let Ok(l) = self.lib(e.lib) {
                 let _ = std::fs::remove_file(l.thumbs.file_for(&e.key));
                 let _ = std::fs::remove_file(l.thumbs.file_for(&e.key).with_extension("jpg"));
             }
-            if let Ok(l) = self.lib_mut(e.lib) {
-                let _ = l
-                    .conn
-                    .execute("DELETE FROM thumb_lru WHERE key=?1", rusqlite::params![e.key]);
-                let _ = l.conn.execute(
-                    "UPDATE assets SET thumb_key=NULL, thumb_state=0 WHERE thumb_key=?1",
-                    rusqlite::params![e.key],
-                );
+        }
+
+        // ② 再按库分组、一个事务 + 分批 IN 写库
+        use std::collections::HashMap as Map;
+        let mut by_lib: Map<i64, Vec<String>> = Map::new();
+        for e in pick {
+            by_lib.entry(e.lib).or_default().push(e.key);
+        }
+        for (lib, keys) in by_lib {
+            if let Ok(l) = self.lib_mut(lib) {
+                let _ = db::clear_thumb_keys(&l.conn, &keys);
             }
-            cur -= e.bytes;
-            freed += e.bytes;
         }
         Ok((total, freed))
     }
@@ -1781,7 +1826,7 @@ impl App {
         })
     }
 
-    /// 打一个资产包（`.P-AssetManager`）：`manifest.json` + 整个库的原图。
+    /// 打一个资产包（`.F-AssetManager`，0.4.24 起；旧后缀 `.P`）：`manifest.json` + 整个库的原图。
     ///
     /// 返回 `(写进包里的文件数, 跳过数)`；跳过 = 索引里有、磁盘上找不到（文件被移走/删了）。
     /// 空包直接报错：导出一个"什么都没有"的包，用户以为备份成功了，比报错更糟。
@@ -1864,7 +1909,7 @@ impl App {
 
     /// 整库导成**普通 zip**：原图按库内相对路径摆，库数据全塞进 `_AssetManager/`。
     ///
-    /// 和 `export_package`（`.P-AssetManager`）**两个入口都留着，不要合并**，语义不同：
+    /// 和 `export_package`（`.F-AssetManager`）**两个入口都留着，不要合并**，语义不同：
     /// - 那个是**给本软件双击导回**的（清单是我们自己的机器格式，后缀走文件关联）；
     /// - 这个是**给人用的**：换机备份、发给同事、扔进任何解压软件都能开。
     ///
@@ -2507,7 +2552,32 @@ impl App {
 /* -------------------------------------------------------------- 工具函数 */
 
 fn norm_path(p: &str) -> String {
-    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    /* 0.4.24：除了统一斜杠/小写，还要**逐段折叠 `.` 与 `..`**。
+       归属判定靠字符串前缀比对，不折叠的话
+       `E:\素材库\..\..\Users\x\a.txt` 仍以 `e:\素材库\` 开头，
+       会被误判成"库内"—— 拿着这个假归属就能对库外文件做删除/改名。
+       盘符根之上的 `..`（如 `C:\..`）折叠不掉就保留：结果匹配不到任何库根，
+       即"失败关闭"。UNC 根（无盘符段）同理。 */
+    let s = p.replace('/', "\\");
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    let mut out: Vec<String> = Vec::new();
+    for seg in s.split('\\') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg.eq_ignore_ascii_case("..") {
+            match out.last() {
+                // 前一段是盘符根（`c:`）或本身就是 `..` → 折不动，保留
+                Some(last) if !last.ends_with(':') && last != ".." => {
+                    out.pop();
+                }
+                _ => out.push("..".to_string()),
+            }
+        } else {
+            out.push(seg.to_lowercase());
+        }
+    }
+    out.join("\\")
 }
 
 fn norm_keep_case(p: &str) -> String {
@@ -4947,7 +5017,7 @@ mod tests {
         app.set_note(a_id, "客户 A 的那一版").unwrap();
         app.set_asset_tags(a_id, &["主视觉".to_string()]).unwrap();
 
-        let zip = d.join("lib.P-AssetManager");
+        let zip = d.join("lib.F-AssetManager");
         let (ok, skipped) = app
             .export_package(&lib.to_string_lossy(), &zip)
             .unwrap();
@@ -5002,7 +5072,7 @@ mod tests {
         let mut app = App::open(&d).unwrap();
         app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
 
-        let zip = d.join("one.P-AssetManager");
+        let zip = d.join("one.F-AssetManager");
         app.export_package(&lib.to_string_lossy(), &zip).unwrap();
         let dest = d.join("restored");
         let (files, _manifest) = snapshot::unzip_package(&zip, &dest).unwrap();
@@ -5418,6 +5488,40 @@ mod tests {
             src_snaps.iter().all(|s| s.count == 0),
             "源库快照里不该再挂着它（否则就是『找不到』）：{src_snaps:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.24：**归属判定对 `..` 失败关闭**——含 `..` 段的路径一律不算库内，
+    /// norm_path 也要把 `..` 折叠掉，防止 `E:\库\..\..\Users\x` 骗过前缀比对。
+    #[test]
+    fn lib_for_path_rejects_dotdot() {
+        let d = tmp("libdotdot");
+        let root = d.join("库A");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"A").unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&root.to_string_lossy(), |_| {}).unwrap();
+
+        // 正常路径：在库内
+        let inside = root.join("a.png").to_string_lossy().to_string();
+        assert!(app.lib_for_path(&inside).is_some(), "库内路径应命中");
+
+        // `..` 伪装：字符串上以库根开头，实际指到库外 → 必须拒绝
+        let trick = format!("{}\\..\\..\\Windows\\Temp\\x.txt", root.to_string_lossy());
+        assert!(
+            app.lib_for_path(&trick).is_none(),
+            "含 .. 的路径必须拒绝，实际命中了"
+        );
+
+        // norm_path 折叠语义：E:\库\子\..\图 与 E:\库\图 等价
+        assert_eq!(
+            norm_path(&format!("{}\\子\\..\\图", root.to_string_lossy())),
+            norm_path(&format!("{}\\图", root.to_string_lossy()))
+        );
+        // 根之上的 .. 折叠不掉 → 保留（匹配不到任何库根 = 失败关闭）
+        assert!(norm_path("C:\\..").contains(".."));
 
         let _ = std::fs::remove_dir_all(&d);
     }

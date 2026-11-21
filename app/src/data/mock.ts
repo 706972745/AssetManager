@@ -340,6 +340,10 @@ export const mockSource: Source = {
   async copyFile() {
     throw new Error("浏览器预览模式不支持复制原文件，请用桌面端");
   },
+  /* 浏览器预览没有 LL 键盘钩子：一律「判不了 → 放行」，和桌面端的 fail-open 同口径 */
+  async keyRecent() {
+    return true;
+  },
   async rename(_p, name) {
     const a = assets.find((x) => x.path === _p);
     if (!a) throw new Error("找不到这个文件");

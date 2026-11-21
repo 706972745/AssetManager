@@ -13,6 +13,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowUpDown,
   Camera,
@@ -229,25 +230,22 @@ export function Icon({
   return <G size={size} stroke={stroke} className={className} />;
 }
 
-/** 品牌标：三张错位叠片（拼贴纸片风，母题换「叠片」）。 */
+/** 品牌标：**就是应用图标本身**（0.4.24 起）。
+ *
+ *  这里以前是一段硬编码的内联 SVG（三张错位叠片 + 山和太阳），跟 exe 图标是两套东西：
+ *  2026-11-21 换应用图标时只换了 ico/png，标题栏左上角还留着旧画 —— owner 截图指的就是它。
+ *  现在统一从 `public/icon.png` 取（和关于页 `AboutView` 同一份），换图标只改一个文件。
+ *  用 `<img>` 而不是内联 SVG：图标是 396 KB 的渐变路径图，塞进 bundle 不划算。 */
 export function BrandMark({ size = 21 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
-      <rect x="3.5" y="6.5" width="12" height="14" rx="1.5" fill="currentColor" opacity="0.16" />
-      <rect x="6.5" y="4.5" width="12" height="14" rx="1.5" fill="currentColor" opacity="0.3" />
-      <rect
-        x="9.5"
-        y="2.5"
-        width="11.5"
-        height="13.5"
-        rx="1.5"
-        fill="var(--ui-bg)"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-      <path d="M12 12.2l2.1-3 1.5 2 1.1-1.4 1.3 2.4z" fill="currentColor" opacity="0.55" />
-      <circle cx="12.6" cy="6.6" r="1" fill="currentColor" opacity="0.55" />
-    </svg>
+    <img
+      className="brand-img"
+      src="/icon.png"
+      width={size}
+      height={size}
+      alt=""
+      draggable={false}
+    />
   );
 }
 
@@ -663,7 +661,12 @@ export function Menu({
     );
   };
 
-  return (
+  /* **必须 portal 到 body**（0.4.25）：菜单是 `position: fixed`，但顶栏 `.topbar` 是
+     flex 子项且带 `z-index: 5` —— 它自成一个层叠上下文，菜单的 `z-index: 95`
+     只在顶栏这一层里算数。于是「关于 / 回收站」这种 `.page-view`（z-index 6）一铺开，
+     排序 / 筛选下拉就整块被盖住（owner 2026-11-21 截图：点了排序看不到面板）。
+     挂到 body 后 95 才是全局的 95，和右键菜单 / 浮层同一个口径。 */
+  return createPortal(
     <>
       <div
         ref={ref}
@@ -690,6 +693,7 @@ export function Menu({
           {sub.items.map((it, i) => renderRow(it, i, true))}
         </div>
       )}
-    </>
+    </>,
+    document.body
   );
 }

@@ -560,21 +560,43 @@ impl<'a> FsOps<'a> {
             }
             OP_RENAME | OP_MOVE => {
                 let mut failed = 0;
+                let mut conflict = 0;
                 for it in items.iter().rev() {
                     let from = it["from"].as_str().unwrap_or("");
                     let to = it["to"].as_str().unwrap_or("");
                     if from.is_empty() || to.is_empty() {
                         continue;
                     }
-                    if Path::new(to).exists() && std::fs::rename(to, from).is_err() {
+                    let src = Path::new(to);
+                    let dst = Path::new(from);
+                    /* 源没了（用户自己删了/又移走了）→ 这项撤不回来 */
+                    if !src.exists() {
+                        failed += 1;
+                        continue;
+                    }
+                    /* **绝不覆盖原位置的文件**（owner 2026-11-21）。
+                       Windows 上 `fs::rename` 就是 MOVEFILE_REPLACE_EXISTING：
+                       移动 A→B 之后用户在 A 处新建了同名文件，点「撤销」会把新文件
+                       静默冲掉（本文件里 mv/rename 别处都有同名检查，只有这里漏了）。
+                       冲突就跳过并计数，让用户自己决定怎么处理。 */
+                    if dst.exists() {
+                        conflict += 1;
+                        continue;
+                    }
+                    if std::fs::rename(src, dst).is_err() {
                         failed += 1;
                     }
                 }
                 db::mark_op_undone(self.conn, id)?;
-                Ok(if failed == 0 {
-                    "已撤销上一次移动/重命名".into()
-                } else {
-                    format!("撤销完成，但有 {} 项失败（可能已被占用）", failed)
+                Ok(match (failed, conflict) {
+                    (0, 0) => "已撤销上一次移动/重命名".into(),
+                    (f, 0) => format!("撤销完成，但有 {f} 项失败（可能已被占用）"),
+                    (0, c) => format!(
+                        "有 {c} 项未撤销：原位置已存在同名文件，已跳过（没有覆盖）"
+                    ),
+                    (f, c) => format!(
+                        "撤销完成：{f} 项失败，{c} 项因原位置同名被跳过（没有覆盖）"
+                    ),
                 })
             }
             OP_DELETE => Ok("删除已送进回收站，无法自动撤销，请到回收站还原".into()),
@@ -920,6 +942,39 @@ mod tests {
         assert!(explain_io(&e, "移动失败").contains("占用"));
         let e = std::io::Error::from_raw_os_error(5);
         assert!(explain_io(&e, "改名失败").contains("权限"));
+    }
+
+    /// 撤销移动**绝不覆盖**原位置新建的同名文件（0.4.24）。
+    /// 原 bug：`fs::rename(to, from)` 在 Windows 上就是 REPLACE_EXISTING ——
+    /// 移走 A→B 后用户在 A 又放了同名文件，点「撤销」会把它静默冲掉。
+    /// 现在冲突项跳过并明确提示，两边文件都必须完好。
+    #[test]
+    fn undo_never_overwrites_recreated_file() {
+        let base = std::env::temp_dir().join(format!("am-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let conn = crate::db::open(&base.join("t.db")).unwrap();
+        let ops = FsOps::new(&conn);
+
+        // A 处一张图 → 移进 B
+        std::fs::write(base.join("a.png"), b"old").unwrap();
+        std::fs::create_dir(base.join("b")).unwrap();
+        let pairs = ops
+            .mv(&[base.join("a.png")], &base.join("b"))
+            .expect("mv 应该成功");
+        let (from, to) = &pairs[0];
+        assert_eq!(std::fs::read(to).unwrap(), b"old");
+
+        // 用户在原位置又放了同名文件（内容不同）
+        std::fs::write(from, b"new").unwrap();
+
+        let msg = ops.undo_last().unwrap();
+        assert!(msg.contains("同名"), "提示要说明冲突，实际：{msg}");
+        // 原位置的新文件必须完好无损
+        assert_eq!(std::fs::read(from).unwrap(), b"new");
+        // 被移走的旧文件也必须还在 B
+        assert_eq!(std::fs::read(to).unwrap(), b"old");
     }
 
     /// 新建文件夹：**同名绝不覆盖**，自动加 `(2)`；目录要真的建在磁盘上。

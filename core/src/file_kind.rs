@@ -1,7 +1,7 @@
 //! 双击导入时的「这是什么文件」判定 —— **只看内容，不看扩展名**。
 //!
 //! 职责：把一个用户双击（或从命令行传进来）的文件归到三类之一：
-//! 用户数据（`.D-AssetManager`，0.4.5 起；旧的 `.L-AssetManager` 仍认）/ 快照清单（`.S-AssetManager`）/ 资源包（`.P-AssetManager`）。
+//! 用户数据（`.D-AssetManager`，0.4.5 起；旧的 `.L-AssetManager` 仍认）/ 快照清单（`.S-AssetManager`）/ 资源包（`.F-AssetManager`，0.4.24 起；旧的 `.P-AssetManager` 仍认）。
 //!
 //! 边界：
 //! - 只读文件头 / 解析顶层 JSON 键，**不改文件、不写索引**（落库由调用方做）；
@@ -24,7 +24,8 @@ pub enum ImportKind {
     UserData,
     /// `.S-AssetManager`：快照清单（只有哈希与元数据，不含图片字节）
     Snapshot,
-    /// `.P-AssetManager`：资源包（store-only zip，里面是原图）
+    /// `.F-AssetManager`：资源包（store-only zip，里面是原图）。0.4.24 把后缀从 `.P` 改成 `.F`；
+    /// 判定只看内容，所以老 `.P` 包照样认得。
     Package,
 }
 

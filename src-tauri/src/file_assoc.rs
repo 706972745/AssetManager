@@ -1,9 +1,9 @@
 #![cfg(target_os = "windows")]
-//! 三种导出文件的 Windows 文件关联 + 各自的文件图标。
+//! 四种导出文件的 Windows 文件关联 + 各自的文件图标。
 //!
 //! 职责：把 `.D-AssetManager`（用户数据，0.4.5 起；`.L` 作为旧格式兼容保留）/
-//! `.S-AssetManager`（快照清单）/ `.P-AssetManager`（资产包）注册到 HKCU，
-//! 让资源管理器双击时以 `--open "%1"` 启动本程序，
+//! `.S-AssetManager`（快照清单）/ `.F-AssetManager`（资产包，0.4.24 起；`.P` 作为旧格式兼容保留）
+//! 注册到 HKCU，让资源管理器双击时以 `--open "%1"` 启动本程序，
 //! 并且**列表里显示各自的图标**（data / snapshot / pack）。
 //!
 //! 边界：
@@ -33,12 +33,13 @@ struct Assoc {
     icon_bytes: &'static [u8],
 }
 
-/// 导出文件各自的图标（owner 指定：D→data / S→snapshot / P→pack，原样使用）。
+/// 导出文件各自的图标（owner 指定：D→data / S→snapshot / F,P→pack，原样使用）。
 ///
-/// **`.L` 为什么还留着**：0.4.5 起导出改用 `.D`，但用户手上已有的 `.L` 备份
-/// 不该因为升级就双击失效。所以 `.L` 只作为**只读兼容**保留一条关联，
-/// 程序里没有任何地方再产出它（`file_kind` 判定本来就不看扩展名）。
-const ASSOCS: [Assoc; 4] = [
+/// **`.L` / `.P` 为什么还留着**：0.4.5 起导出改用 `.D`（`.L` 是旧名），
+/// 0.4.24 起资产包改用 `.F`（`.P` 是旧名）。用户手上已有的旧备份
+/// 不该因为升级就双击失效，所以这两个旧后缀只作为**只读兼容**保留一条关联；
+/// 程序里没有任何地方再产出它们（`file_kind` 判定本来就不看扩展名）。
+const ASSOCS: [Assoc; 5] = [
     Assoc {
         ext: "D-AssetManager",
         prog_id: "AssetManager.D",
@@ -60,6 +61,14 @@ const ASSOCS: [Assoc; 4] = [
     Assoc {
         ext: "P-AssetManager",
         prog_id: "AssetManager.P",
+        icon_name: "assetmanager-pack.ico",
+        icon_bytes: include_bytes!("../icons/file-types/pack.ico"),
+    },
+    /* 0.4.24：资产包后缀 `.P` → `.F`（owner 2026-11-21，「F = Files」）。
+       和 `.L` 同样的处理：新后缀是新出口，旧后缀只留关联 */
+    Assoc {
+        ext: "F-AssetManager",
+        prog_id: "AssetManager.F",
         icon_name: "assetmanager-pack.ico",
         icon_bytes: include_bytes!("../icons/file-types/pack.ico"),
     },
@@ -310,12 +319,24 @@ mod tests {
         let exts: Vec<&str> = ASSOCS.iter().map(|a| a.ext).collect();
         assert_eq!(
             exts,
-            vec!["D-AssetManager", "L-AssetManager", "S-AssetManager", "P-AssetManager"]
+            vec![
+                "D-AssetManager",
+                "L-AssetManager",
+                "S-AssetManager",
+                "P-AssetManager",
+                "F-AssetManager"
+            ]
         );
         let ids: Vec<&str> = ASSOCS.iter().map(|a| a.prog_id).collect();
         assert_eq!(
             ids,
-            vec!["AssetManager.D", "AssetManager.L", "AssetManager.S", "AssetManager.P"]
+            vec![
+                "AssetManager.D",
+                "AssetManager.L",
+                "AssetManager.S",
+                "AssetManager.P",
+                "AssetManager.F"
+            ]
         );
     }
 
