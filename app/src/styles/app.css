@@ -2467,6 +2467,14 @@
   color: var(--text-2);
   margin-right: 4px;
 }
+/* 拖拽期间 + 松手后的放行窗口内（App.tsx 给 body 挂 data-dragging），
+   批量条整体不参与 hit-test：系统 OLE 归还时补发的那个 click 打在松手点上，
+   落在「复制原文件」上就会把原文件塞进剪贴板（owner 报过三次）。
+   光靠 click 闸门要赌补发延迟，这层是物理拦截 —— 按钮当场"不存在"。 */
+body[data-dragging] .batch-bar,
+body[data-dragging] .batch-bar * {
+  pointer-events: none;
+}
 /* 批量条左边的 2px 蓝锚点（与侧栏选中同一套语言） */
 .batch-bar::before {
   content: "";

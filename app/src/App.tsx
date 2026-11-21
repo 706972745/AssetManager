@@ -2141,14 +2141,33 @@ export default function App() {
      再 click 能过，真机照旧 —— 因为 OLE 一落地，渲染进程**先**补发 click，Rust 的
      `am://drag-end` 走 IPC 晚几毫秒才到，闸门永远晚一步。
 
-     所以改成一个常驻的闸：**按下瓦片就压下去**（臂已抬起），松手后再保持 300ms 才放行。
-     闸门只是"关"，不放行任何 click，普通点击零开销。 */
+     所以改成一个常驻的闸：**按下瓦片就压下去**（臂已抬起），松手后再保持一段才放行。
+     闸门只是"关"，不放行任何 click，普通点击零开销。
+
+     0.4.16（owner 2026-11-21 第三次复报仍会复制）：300ms 太短 —— 拖到资源管理器绕一圈
+     再回来，OLE 归还后补发 click 的时间不稳定，实测能超过 300ms。两手一起上：
+       ① 窗口拉到 800ms，且窗口内**第一次 click 吞掉后立即放行**（不误伤后续点击）
+       ② 拖拽期间 + 放行窗口内给 body 挂 `data-dragging`，CSS 让 `.batch-bar`
+          `pointer-events:none` —— 补发 click 打在松手点上时，按钮物理上就不接收。 */
   const dragGate = useRef({ on: false, until: 0 });
   const gateWatchdog = useRef<number | null>(null);
+  /** 解除 `data-dragging` 的延时器：和放行窗口同寿，避免提前恢复 pointer-events */
+  const ungateTimer = useRef<number | null>(null);
+
+  /** 拖拽态标记：给 CSS 用（批量条在拖拽期间不接收指针事件） */
+  const markDragging = useCallback((on: boolean) => {
+    if (on) document.body.dataset.dragging = "1";
+    else delete document.body.dataset.dragging;
+  }, []);
 
   /** 压闸：拖拽开始（以及每次交接给系统拖放时）调用 */
   const armDragGate = useCallback(() => {
     dragGate.current = { on: true, until: 0 };
+    markDragging(true);
+    if (ungateTimer.current) {
+      window.clearTimeout(ungateTimer.current);
+      ungateTimer.current = null;
+    }
     if (gateWatchdog.current) window.clearTimeout(gateWatchdog.current);
     /* 兜底：万一拖拽没起成、drag-end 也没来，闸门不能永远压着（那会让全界面点击失效）。
        慢拖超过 30 秒就续期，最多续 3 次（≈2 分钟），再长按"事件丢了"强行放闸。 */
@@ -2160,18 +2179,29 @@ export default function App() {
       }
       dragGate.current = { on: false, until: 0 };
       gateWatchdog.current = null;
+      markDragging(false);
     };
     gateWatchdog.current = window.setTimeout(tick, 30000);
-  }, []);
+  }, [markDragging]);
 
   /** 放闸：拖拽结束调用，`ms` 内继续拦（吃掉补发的那个 click） */
-  const releaseDragGate = useCallback((ms = 300) => {
-    if (gateWatchdog.current) {
-      window.clearTimeout(gateWatchdog.current);
-      gateWatchdog.current = null;
-    }
-    dragGate.current = { on: false, until: Date.now() + ms };
-  }, []);
+  const releaseDragGate = useCallback(
+    (ms = 800) => {
+      if (gateWatchdog.current) {
+        window.clearTimeout(gateWatchdog.current);
+        gateWatchdog.current = null;
+      }
+      dragGate.current = { on: false, until: Date.now() + ms };
+      /* data-dragging 跟放行窗口同寿：批量条这 ms 内都收不到指针事件，
+         补发 click 打在松手点上也打不中按钮（闸门只拦 click，这层连 hit-test 都不给） */
+      if (ungateTimer.current) window.clearTimeout(ungateTimer.current);
+      ungateTimer.current = window.setTimeout(() => {
+        ungateTimer.current = null;
+        markDragging(false);
+      }, ms);
+    },
+    [markDragging]
+  );
 
   /** 常驻拦截器：capture 装在 window 上，React 的根容器收不到 → onClick 不触发 */
   useEffect(() => {
@@ -2180,6 +2210,9 @@ export default function App() {
       if (g.on || Date.now() < g.until) {
         ev.stopPropagation();
         ev.preventDefault();
+        /* 窗口内**第一次** click 吞掉后立刻放行：补发的那个只有一个，
+           后面就是用户真实点击了，多吞会让"点一下没反应" */
+        if (!g.on) g.until = 0;
       }
     };
     window.addEventListener("click", swallow, true);
@@ -2196,9 +2229,9 @@ export default function App() {
     releaseDragGate();
   }, [hideGhost, releaseDragGate]);
 
-  /** 保留旧调用点：闸门已经是常驻的，这里只把尾巴再延 300ms */
+  /** 保留旧调用点：闸门已经是常驻的，这里只把尾巴再延到放行窗口长度 */
   const blockNextClick = useCallback(() => {
-    releaseDragGate(300);
+    releaseDragGate(800);
   }, [releaseDragGate]);
 
   /** 落点动作：标签 / 分组 / 快照只建关联；目录是**唯一**会动磁盘的落点 */
@@ -2389,16 +2422,23 @@ export default function App() {
         clearDrag();
       }
     };
+    /* 拖出窗口**必然失焦**，这里如果照常放闸，OLE 模态循环那几秒里闸门就是开的，
+       拖回来松手补发的 click 正好漏出去（0.4.15 之前漏了三次就是这个原因）。
+       只要 handoffPayload 还挂着，说明这趟系统拖放没落地 —— 闸门和 data-dragging 都压着。 */
+    const onBlur = () => {
+      if (handoffPayload.current) return;
+      clearDrag();
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     window.addEventListener("keydown", onKey, true);
-    window.addEventListener("blur", clearDrag);
+    window.addEventListener("blur", onBlur);
     document.addEventListener("mouseout", onOut);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("blur", clearDrag);
+      window.removeEventListener("blur", onBlur);
       document.removeEventListener("mouseout", onOut);
     };
   }, [blockNextClick, clearDrag, dropHit, handoffToSystem, markDropAt, moveGhost]);

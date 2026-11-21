@@ -234,80 +234,97 @@ pub enum Tool {
     Eraser,
 }
 
-/* ---------------- 工具栏模型（照 Snipaste 2.11.3 的形态） ----------------
+/* ---------------- 工具栏模型（v2：分组 + 悬停托盘） ----------------
 
-   owner 2026-11-19 定：**功能和样式都跟 Snipaste 一样** —— 工具全部平铺一条，
-   不再有"悬浮展开的组面板"（那套 0.3.x 连出三次"展不开"，也越来越不像 Snipaste）。
+   2026-11-21 owner 拿 `screenshot-toolbar-v2/` 的方案要求改成这一版：
+   同构工具收进组，悬停 110ms 展开托盘、移开 190ms 收起；属性（颜色/粗细/填充）
+   常驻成胶囊。0.3.8 那版是**平铺 19 项 + 第二行选项条**（当时为了"像 Snipaste"），
+   这一版把平铺换成分组，第二行整体删掉。
 
-   列的顺序也按 Snipaste：识别工具 → 工具（选择/形状/手绘/打码/标记/橡皮）→ 撤销重做
-   → 交付（复制 / 贴图 / 保存）→ 取消单独在末尾。宽度约 670px：宽屏无压力，
-   1366 笔记本上会占掉小半个屏幕 —— 这是"一步可达"换来的代价，owner 认这个取舍。
-
-   第二行（`OPT`）是当前工具的选项：颜色板 + 粗细。Snipaste 的选项行在主条**下方**，
-   这里照做（`opt_layout`）。 */
+   0.3.1–0.3.5 那三次"面板展不开"的根因是：面板的打开状态与命中区域各写一份，
+   且没有超时兜底。这次的做法：
+   ① 打开/收起只由 `hover_due`（截止时间 + 目标下标）一个状态机驱动，
+      `WM_TIMER` 里统一落地，鼠标移动只负责"改截止时间"；
+   ② 托盘矩形 `self.tray` 由 `tray_layout` 算一次，绘制与命中都读它；
+   ③ 命中顺序固定：调色板 → 托盘 → 主条 → 选区把手 → 选区内。 */
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum BarKind {
     Tool(Tool),
+    /// 折叠组，下标指向 `GROUPS`
+    Group(usize),
+    Chip(Chip),
     Sep,
     Act(&'static str),
 }
 
-const BAR: [BarKind; 19] = [
+/// 属性胶囊：颜色 / 粗细 / 填充
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Chip {
+    Color,
+    Width,
+    Fill,
+}
+
+const G_SHAPE: [Tool; 4] = [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow];
+const G_BRUSH: [Tool; 2] = [Tool::Pen, Tool::Marker];
+const G_TEXT: [Tool; 2] = [Tool::Text, Tool::Number];
+const G_MASK: [Tool; 2] = [Tool::Mosaic, Tool::Blur];
+const GROUPS: [&[Tool]; 4] = [&G_SHAPE, &G_BRUSH, &G_TEXT, &G_MASK];
+/// 每组收起时默认显示的工具（用户换过之后记在 `Ctx::face` 里）
+const GROUP_DEFAULT: [Tool; 4] = [Tool::Rect, Tool::Pen, Tool::Text, Tool::Mosaic];
+const GROUP_NAMES: [&str; 4] = ["形状", "画笔", "文字标注", "遮挡 / 打码"];
+
+const BAR: [BarKind; 18] = [
     BarKind::Tool(Tool::Select),
-    BarKind::Tool(Tool::Rect),
-    BarKind::Tool(Tool::Ellipse),
-    BarKind::Tool(Tool::Line),
-    BarKind::Tool(Tool::Arrow),
-    BarKind::Tool(Tool::Pen),
-    BarKind::Tool(Tool::Marker),
-    BarKind::Tool(Tool::Mosaic),
-    BarKind::Tool(Tool::Blur),
-    BarKind::Tool(Tool::Text),
-    BarKind::Tool(Tool::Number),
-    BarKind::Tool(Tool::Eraser),
+    BarKind::Sep,
+    BarKind::Group(0),
+    BarKind::Group(1),
+    BarKind::Group(2),
+    BarKind::Group(3),
+    BarKind::Sep,
+    BarKind::Chip(Chip::Color),
+    BarKind::Chip(Chip::Width),
+    BarKind::Chip(Chip::Fill),
     BarKind::Sep,
     BarKind::Act("undo"),
     BarKind::Act("redo"),
+    BarKind::Tool(Tool::Eraser),
     BarKind::Sep,
     BarKind::Act("copy"),
-    BarKind::Act("pin"),
     BarKind::Act("save"),
+    BarKind::Act("pin"),
 ];
 
 /// 「取消」固定放最末尾：它和三个交付动作语义相反，而覆盖层是全屏的 ——
 /// 挨着放时手一偏就是"白框一次、什么都没留下"。
 const BAR_TAIL: BarKind = BarKind::Act("cancel");
 
-/* ---------------- 第二行：颜色 / 粗细（照 Snipaste 的调色板） ----------------
+/* ---------------- 调色板（21 色 7×3，取自设计稿 §6.4） ----------------
 
-   像素直绘没有 alpha，色块就是实色。白色块必须描边，否则落在白面板上等于隐形。 */
-const SWATCHES: [u32; 10] = [
-    0xF5222D, // 红（默认标注色，和 0.3.x 一样）
-    0xFA8C16, // 橙
-    0xFADB14, // 黄
-    0x52C41A, // 绿
-    0x13C2C2, // 青
-    0x1890FF, // 蓝
-    0x722ED1, // 紫
-    0x000000, // 黑
-    0xFFFFFF, // 白
-    0x8C8C8C, // 灰
+   分行语义：中性（白→黑）/ 暖色警示 / 冷色与强调；蓝这一列用软件强调色。 */
+const SWATCHES: [u32; 21] = [
+    0xFFFFFF, 0xF5F7FA, 0xC9CFDA, 0x8A93A5, 0x4B5464, 0x232936, 0x000000, 0xFF4D4F,
+    0xFF7A45, 0xFFB020, 0xFFE14D, 0xA0E64B, 0x34D399, 0x22D3EE, 0x5B8CFF, 0x1B4FE0,
+    0x7C6BFF, 0xC084FC, 0xF472B6, 0xFB7185, 0x14B8A6,
 ];
-/// 四档线宽（Snipaste 的 1~12）
-const WIDTHS: [i32; 4] = [1, 3, 6, 12];
+/// 线宽范围（滚轮 / `[` `]` 连续调，单位物理像素）
+const W_MIN: i32 = 1;
+const W_MAX: i32 = 24;
 
-/// 第二行点到了什么
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum OptPick {
-    Color(u32),
-    Width(i32),
-    /// 遮罩类工具的形态：true = 画笔涂抹（马赛克 / 高斯模糊共用）
-    Brush(bool),
-}
+/// 调色板块的几何（绘制与命中共用）
+const SW_COLS: i32 = 7;
+const SW_CELL: i32 = 22;
+const SW_GAP: i32 = 5;
+const SW_PAD: i32 = 10;
+
+/// 悬停展开 / 收起的延迟（毫秒，设计稿 §5.1）
+const OPEN_MS: u64 = 110;
+const CLOSE_MS: u64 = 190;
 
 /// 第二行开头两个形态按钮的宽度（只在马赛克 / 高斯模糊时出现）
 const MODE_W: i32 = 54;
+
 
 /* ---------------- 工具栏配色（v2.1 设计稿：深浅双主题） ----------------
 
@@ -401,13 +418,15 @@ impl Palette {
    而这类偏差在离屏预览里完全看不出来。 */
 const BTN_W: i32 = 36;
 const SEP_W: i32 = 9;
-const BAR_H: i32 = 40;
+const BAR_H: i32 = 56;
 const BAR_RADIUS: i32 = 8;
-const BTN_RADIUS: i32 = 4;
+const BTN_RADIUS: i32 = 8;
 
 fn bar_w(k: BarKind) -> i32 {
     match k {
         BarKind::Sep => SEP_W,
+        /* 颜色 / 粗细是窄胶囊（32），填充用整格 */
+        BarKind::Chip(Chip::Color) | BarKind::Chip(Chip::Width) => 32,
         _ => BTN_W,
     }
 }
@@ -433,6 +452,13 @@ fn tool_label(t: Tool) -> (&'static str, &'static str) {
 fn bar_label(k: BarKind) -> (&'static str, &'static str) {
     match k {
         BarKind::Tool(t) => tool_label(t),
+        BarKind::Group(g) => (
+            GROUP_NAMES.get(g).copied().unwrap_or(""),
+            "悬停展开 · 还有更多",
+        ),
+        BarKind::Chip(Chip::Color) => ("标注颜色", "点开调色板"),
+        BarKind::Chip(Chip::Width) => ("线条粗细", "滚轮 / [ ] 调节"),
+        BarKind::Chip(Chip::Fill) => ("形状填充", "当前色 20%"),
         BarKind::Act(a) => match a {
             "undo" => ("撤销", "Ctrl+Z"),
             "redo" => ("重做", "Ctrl+Y"),
@@ -564,11 +590,25 @@ struct Ctx {
     number_next: i32,
     /// 主条上悬停的按钮下标（分隔条不算）
     hover: Option<usize>,
+    /// 当前展开的托盘属于哪个组（BAR 下标）。同屏只允许一个。
+    open: Option<usize>,
+    /// 托盘矩形。`tray_layout` 算一次存下来，绘制与命中共用。
+    tray: [i32; 4],
+    /// 托盘里悬停的条目下标
+    tray_hover: Option<usize>,
+    /// 悬停状态机：到达 `Instant` 时把 `open` 设成（true, 下标）或 None。
+    /// 鼠标移动只改这个截止时间，真正的开合在 `WM_TIMER` 里落地。
+    hover_due: Option<(std::time::Instant, bool, usize)>,
+    /// 每组收起时显示的工具 = 该组"上次使用的那个"
+    face: [Tool; 4],
+    /// 调色板展开状态与它的矩形
+    palette: bool,
+    sw: [i32; 4],
+    /// 形状填充（当前色 20%）
+    fill: bool,
+    hwnd: Hwnd,
     /// 右下角提示面板的矩形（`draw_keys` 算出来记下，测试要断言这块的 alpha）
     keys: [i32; 4],
-    /// 第二行选项条的矩形。`opt_layout` 算一次存下来，绘制与命中共用 ——
-    /// 两边各算一遍迟早会差 1px，点色块点到旁边的空地上。
-    opt: [i32; 4],
     editor: Hwnd,
     editing: Option<(i32, i32)>,
     // 交付结果
