@@ -59,3 +59,20 @@ qa-tmp/
 app/qa-tmp/
 __pycache__/
 *.pyc
+
+# ===== 图标设计工作区（162 MB / 1900+ 过程图，不进公库）=====
+/design/icons-am/
+/design/
+
+# ===== 内部协作/过程文档（本机维护，不进公库）=====
+/AGENTS.md
+/guide.json
+/导游/
+/导游使用手册.md
+/项目入口与协作规则.md
+/收工检查.cmd
+/docs/交接文档-*.md
+/docs/代码规范与代码地图-*.md
+/docs/工作记录-*.md
+/docs/FontManager-*.md
+/docs/截图工具栏UI设计稿*.html

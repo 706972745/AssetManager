@@ -110,6 +110,9 @@ CREATE TABLE IF NOT EXISTS board_items (
   y REAL NOT NULL,
   w REAL NOT NULL,
   h REAL NOT NULL,
+  /* 所属组（0.4.17）：同一板内相同的非零值 = 同一个组。0 = 没打组。
+     组只是"黏在一起"的标记，没有名字、没有独立包围盒 —— 包围盒永远是成员现算的。 */
+  grp INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (board, gid)
 ) WITHOUT ROWID;
@@ -125,6 +128,14 @@ CREATE TABLE IF NOT EXISTS board_notes (
   w REAL NOT NULL,
   h REAL NOT NULL,
   text TEXT NOT NULL DEFAULT '',
+  /* 文字外观（0.4.17）：`font` 是字体族名（空 = 系统默认），`fs` 是字号（0 = 默认 12.5），
+     `color` 是 #rrggbb（空 = 默认浅色文字），`bold` 0/1。
+     字号跟着**框一起缩放**，所以它必须落库 —— 否则重开板就缩回默认大小。 */
+  font TEXT NOT NULL DEFAULT '',
+  fs REAL NOT NULL DEFAULT 0,
+  color TEXT NOT NULL DEFAULT '',
+  bold INTEGER NOT NULL DEFAULT 0,
+  grp INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (board, nid)
 ) WITHOUT ROWID;
@@ -159,8 +170,28 @@ pub fn open(path: &Path) -> Res<Connection> {
             .map_err(|e| e.to_string())?;
         }
     }
+    /* 灵感板的组与文字外观（0.4.17）：`CREATE TABLE IF NOT EXISTS` 不会给老表补列，
+       老库必须在打开时补上，否则 `SELECT grp` 直接报 `no such column`。
+       补列只加不改、全部带默认值 —— 老数据落进去就是"没打组 / 默认外观"。 */
+    add_col(&c, "board_items", "grp", "grp INTEGER NOT NULL DEFAULT 0")?;
+    add_col(&c, "board_notes", "grp", "grp INTEGER NOT NULL DEFAULT 0")?;
+    add_col(&c, "board_notes", "font", "font TEXT NOT NULL DEFAULT ''")?;
+    add_col(&c, "board_notes", "fs", "fs REAL NOT NULL DEFAULT 0")?;
+    add_col(&c, "board_notes", "color", "color TEXT NOT NULL DEFAULT ''")?;
+    add_col(&c, "board_notes", "bold", "bold INTEGER NOT NULL DEFAULT 0")?;
     db::migrate_versioned(&c)?;
     Ok(c)
+}
+
+/// 给老表补一列（幂等）。表不存在时什么也不做 —— 建表由 `REG_SCHEMA` 负责。
+fn add_col(c: &Connection, table: &str, col: &str, ddl: &str) -> Res<()> {
+    if let Some(cols) = columns(c, table)? {
+        if !cols.iter().any(|x| x == col) {
+            c.execute(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"), [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn columns(c: &Connection, table: &str) -> Res<Option<Vec<String>>> {
@@ -864,17 +895,17 @@ pub fn coll_of(c: &Connection, gid: i64) -> Res<Vec<i64>> {
 
 /* ------------------------------------------------------------------ 灵感板摆位 */
 
-/// 一块板上记下来的摆位：`(gid, x, y, w, h)`。
+/// 一块板上记下来的摆位：`(gid, x, y, w, h, grp)`。
 ///
 /// 只是"上次摆哪儿"的记忆 —— 板上的图被删了 / 换库了，这一行就自然对不上，
 /// 调用方按 gid 过滤即可，**不要**因为对不上而删行（图可能只是暂时不在）。
-pub fn board_layout(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64)>> {
+pub fn board_layout(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64, i64)>> {
     let mut st = c
-        .prepare("SELECT gid, x, y, w, h FROM board_items WHERE board = ?1")
+        .prepare("SELECT gid, x, y, w, h, grp FROM board_items WHERE board = ?1")
         .map_err(|e| e.to_string())?;
     let rows = st
         .query_map(params![board], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
@@ -900,22 +931,61 @@ pub fn board_place(c: &Connection, board: &str, rows: &[(i64, f64, f64, f64, f64
     Ok(n)
 }
 
-/* ------ 灵感板文字便签（0.4.14） ------ */
+/* ------ 灵感板文字便签（0.4.14，0.4.17 起带字体外观与组） ------ */
 
-/// 一块板上的全部便签：`(nid, x, y, w, h, text)`，按创建顺序（nid 升序）。
-pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64, String)>> {
+/// 一行便签。字段多了以后不再用元组 —— 十个值的元组在命令层/前端都容易错位。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoardNoteRow {
+    pub nid: i64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub text: String,
+    /// 字体族名（空 = 系统默认）
+    pub font: String,
+    /// 字号（画布单位，0 = 默认 12.5；缩放框时按比例跟着变）
+    pub fs: f64,
+    /// 文字颜色 `#rrggbb`（空 = 默认浅色）
+    pub color: String,
+    pub bold: bool,
+    /// 所属组（0 = 没打组）
+    pub grp: i64,
+}
+
+/// 一块板上的全部便签，按创建顺序（nid 升序）。
+pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
     let mut st = c
-        .prepare("SELECT nid, x, y, w, h, text FROM board_notes WHERE board = ?1 ORDER BY nid")
+        .prepare(
+            "SELECT nid, x, y, w, h, text, font, fs, color, bold, grp
+             FROM board_notes WHERE board = ?1 ORDER BY nid",
+        )
         .map_err(|e| e.to_string())?;
     let rows = st
         .query_map(params![board], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            Ok(BoardNoteRow {
+                nid: r.get(0)?,
+                x: r.get(1)?,
+                y: r.get(2)?,
+                w: r.get(3)?,
+                h: r.get(4)?,
+                text: r.get(5)?,
+                font: r.get(6)?,
+                fs: r.get(7)?,
+                color: r.get(8)?,
+                bold: r.get::<_, i64>(9)? != 0,
+                grp: r.get(10)?,
+            })
         })
         .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
 }
 
 /// 新建或更新一张便签。`nid = None` 表示新建（发号 `MAX(nid)+1`），返回最终 nid。
+///
+/// `look` 是外观（字体/字号/颜色/加粗）；传 `None` 表示**保留库里原样** ——
+/// 只挪位置时不该把外观冲成默认值。
+#[allow(clippy::too_many_arguments)]
 pub fn board_note_put(
     c: &Connection,
     board: &str,
@@ -925,6 +995,7 @@ pub fn board_note_put(
     w: f64,
     h: f64,
     text: &str,
+    look: Option<(&str, f64, &str, bool)>,
 ) -> Res<i64> {
     let nid = match nid {
         Some(n) if n > 0 => n,
@@ -939,16 +1010,70 @@ pub fn board_note_put(
             max + 1
         }
     };
-    c.execute(
-        "INSERT INTO board_notes (board, nid, x, y, w, h, text, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-         ON CONFLICT(board, nid) DO UPDATE SET
-           x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h,
-           text=excluded.text, updated_at=excluded.updated_at",
-        params![board, nid, x, y, w, h, text, db::now_ts()],
-    )
+    match look {
+        Some((font, fs, color, bold)) => c.execute(
+            "INSERT INTO board_notes (board, nid, x, y, w, h, text, font, fs, color, bold, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             ON CONFLICT(board, nid) DO UPDATE SET
+               x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h,
+               text=excluded.text, font=excluded.font, fs=excluded.fs,
+               color=excluded.color, bold=excluded.bold, updated_at=excluded.updated_at",
+            params![board, nid, x, y, w, h, text, font, fs, color, bold as i64, db::now_ts()],
+        ),
+        None => c.execute(
+            "INSERT INTO board_notes (board, nid, x, y, w, h, text, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(board, nid) DO UPDATE SET
+               x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h,
+               text=excluded.text, updated_at=excluded.updated_at",
+            params![board, nid, x, y, w, h, text, db::now_ts()],
+        ),
+    }
     .map_err(|e| e.to_string())?;
     Ok(nid)
+}
+
+/// 打组 / 解组：把 `keys` 里的成员设成同一个组。
+///
+/// **key 的编码**：`> 0` 是图片的全局 gid，`< 0` 是便签的 nid 取负 —— 和前端
+/// `pos` 的 key 完全一致（图片 id 恒正，便签用负数当 key），两边不需要再翻译一次。
+/// `grp <= 0` 表示**解组**；`grp == -1` 表示新建一组（发号：本板当前最大组号 + 1）。
+/// 返回最终生效的组号（解组返回 0）。
+pub fn board_group_set(c: &Connection, board: &str, keys: &[i64], grp: i64) -> Res<i64> {
+    let g = if grp == -1 {
+        let a: i64 = c
+            .query_row(
+                "SELECT COALESCE(MAX(grp), 0) FROM board_items WHERE board = ?1",
+                params![board],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let b: i64 = c
+            .query_row(
+                "SELECT COALESCE(MAX(grp), 0) FROM board_notes WHERE board = ?1",
+                params![board],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        a.max(b) + 1
+    } else {
+        grp.max(0)
+    };
+    let now = db::now_ts();
+    let mut st_img = c
+        .prepare("UPDATE board_items SET grp = ?3, updated_at = ?4 WHERE board = ?1 AND gid = ?2")
+        .map_err(|e| e.to_string())?;
+    let mut st_note = c
+        .prepare("UPDATE board_notes SET grp = ?3, updated_at = ?4 WHERE board = ?1 AND nid = ?2")
+        .map_err(|e| e.to_string())?;
+    for &k in keys {
+        if k > 0 {
+            st_img.execute(params![board, k, g, now]).map_err(|e| e.to_string())?;
+        } else if k < 0 {
+            st_note.execute(params![board, -k, g, now]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(g)
 }
 
 /// 删一张便签。
@@ -1021,26 +1146,65 @@ mod tests {
         let d = tmp("notes");
         let c = open(&d.join("index.db")).unwrap();
 
-        let a = board_note_put(&c, "tag:参考", None, 10.0, 20.0, 240.0, 120.0, "第一张").unwrap();
-        let b = board_note_put(&c, "tag:参考", None, 30.0, 40.0, 240.0, 90.0, "第二张").unwrap();
+        let a = board_note_put(&c, "tag:参考", None, 10.0, 20.0, 240.0, 120.0, "第一张", None)
+            .unwrap();
+        let b = board_note_put(&c, "tag:参考", None, 30.0, 40.0, 240.0, 90.0, "第二张", None)
+            .unwrap();
         assert!(b > a, "新便签要拿到更大的 nid");
 
         let rows = board_notes(&c, "tag:参考").unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].5, "第一张");
-        assert_eq!(rows[1].1, 30.0);
+        assert_eq!(rows[0].text, "第一张");
+        assert_eq!(rows[1].x, 30.0);
+        assert_eq!(rows[0].grp, 0, "新建便签默认没打组");
+        assert!(rows[0].font.is_empty() && rows[0].fs == 0.0, "默认外观为空");
 
         // 同一个 nid 再写一次 = 更新，不是多一行
-        board_note_put(&c, "tag:参考", Some(a), 11.0, 21.0, 260.0, 140.0, "改过").unwrap();
+        board_note_put(&c, "tag:参考", Some(a), 11.0, 21.0, 260.0, 140.0, "改过", None).unwrap();
         let rows = board_notes(&c, "tag:参考").unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].5, "改过");
-        assert_eq!(rows[0].3, 260.0);
+        assert_eq!(rows[0].text, "改过");
+        assert_eq!(rows[0].w, 260.0);
+
+        // 外观单独写：字体 / 字号 / 颜色 / 加粗都要原样回来
+        board_note_put(
+            &c,
+            "tag:参考",
+            Some(a),
+            11.0,
+            21.0,
+            260.0,
+            140.0,
+            "改过",
+            Some(("Microsoft YaHei", 31.5, "#ffcc00", true)),
+        )
+        .unwrap();
+        let rows = board_notes(&c, "tag:参考").unwrap();
+        assert_eq!(rows[0].font, "Microsoft YaHei");
+        assert_eq!(rows[0].fs, 31.5);
+        assert_eq!(rows[0].color, "#ffcc00");
+        assert!(rows[0].bold);
+
+        // 只挪位置（look = None）不许把外观冲掉
+        board_note_put(&c, "tag:参考", Some(a), 12.0, 22.0, 260.0, 140.0, "改过", None).unwrap();
+        let rows = board_notes(&c, "tag:参考").unwrap();
+        assert_eq!(rows[0].font, "Microsoft YaHei", "只挪位置不该重置字体");
+        assert_eq!(rows[0].fs, 31.5);
+
+        // 打组：图片 gid 为正、便签 nid 取负；解组写回 0
+        let g = board_group_set(&c, "tag:参考", &[7, -a], -1).unwrap();
+        assert!(g > 0);
+        let rows = board_notes(&c, "tag:参考").unwrap();
+        assert_eq!(rows[0].grp, g, "便签要进同一个组");
+        assert_eq!(rows[1].grp, 0, "没点的便签不许跟着进组");
+        board_group_set(&c, "tag:参考", &[7, -a], 0).unwrap();
+        assert_eq!(board_notes(&c, "tag:参考").unwrap()[0].grp, 0, "解组后回到 0");
 
         // 别的板看不到这条
         assert!(board_notes(&c, "snap:7").unwrap().is_empty());
         // 别的板上发的号从 1 重新开始
-        let o = board_note_put(&c, "snap:7", None, 0.0, 0.0, 240.0, 120.0, "别的板").unwrap();
+        let o = board_note_put(&c, "snap:7", None, 0.0, 0.0, 240.0, 120.0, "别的板", None)
+            .unwrap();
         assert_eq!(o, 1);
 
         assert_eq!(board_note_del(&c, "tag:参考", a).unwrap(), 1);

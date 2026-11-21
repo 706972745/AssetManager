@@ -3032,12 +3032,12 @@ async fn am_coll_open(app: AppHandle, state: State<'_, AppState>, coll: i64) -> 
     Ok(shown)
 }
 
-/// 灵感板摆位：读上次摆的位置/尺寸（`[[gid,x,y,w,h], …]`）。读不到就空 —— 板按瀑布流重排
+/// 灵感板摆位：读上次摆的位置/尺寸/组（`[[gid,x,y,w,h,grp], …]`）。读不到就空 —— 板按瀑布流重排
 #[tauri::command]
 fn am_board_layout(
     state: State<'_, AppState>,
     board: String,
-) -> Result<Vec<(i64, f64, f64, f64, f64)>, String> {
+) -> Result<Vec<(i64, f64, f64, f64, f64, i64)>, String> {
     lock(&state).board_layout(&board)
 }
 
@@ -3051,12 +3051,12 @@ fn am_board_place(
     lock(&state).board_place(&board, &rows)
 }
 
-/// 灵感板便签：读这块板上所有文字注释（`[[nid,x,y,w,h,text], …]`，按创建顺序）
+/// 灵感板便签：读这块板上所有文字注释（含字体外观与组号，按创建顺序）
 #[tauri::command]
 fn am_board_notes(
     state: State<'_, AppState>,
     board: String,
-) -> Result<Vec<(i64, f64, f64, f64, f64, String)>, String> {
+) -> Result<Vec<am_core::reg::BoardNoteRow>, String> {
     lock(&state).board_notes(&board)
 }
 
@@ -3064,7 +3064,11 @@ fn am_board_notes(
 ///
 /// 文字为空也算一次正常写入 —— **清空文字的便签由前端决定删不删**，
 /// 后端不替它判断，否则"先清空再打字"会在中途被删掉。
+///
+/// `font / fs / color / bold` 传 `null` 表示**保留原样**（只挪位置时用）：
+/// 否则拖动一下就把用户设的字体冲回默认值。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn am_board_note_put(
     state: State<'_, AppState>,
     board: String,
@@ -3074,14 +3078,41 @@ fn am_board_note_put(
     w: f64,
     h: f64,
     text: String,
+    font: Option<String>,
+    fs: Option<f64>,
+    color: Option<String>,
+    bold: Option<bool>,
 ) -> Result<i64, String> {
-    lock(&state).board_note_put(&board, nid, x, y, w, h, &text)
+    /* 四个外观字段要么一起给、要么一起不给：拆开传会让"改了字号但字体被冲掉"
+       这种半截状态有机会出现。任何一个缺了就当没给。 */
+    let look = match (font, fs, color, bold) {
+        (Some(f), Some(s), Some(c), Some(b)) => Some((f, s, c, b)),
+        _ => None,
+    };
+    match look {
+        Some((f, s, c, b)) => {
+            lock(&state).board_note_put(&board, nid, x, y, w, h, &text, Some((&f, s, &c, b)))
+        }
+        None => lock(&state).board_note_put(&board, nid, x, y, w, h, &text, None),
+    }
 }
 
 /// 灵感板便签：删一张
 #[tauri::command]
 fn am_board_note_del(state: State<'_, AppState>, board: String, nid: i64) -> Result<usize, String> {
     lock(&state).board_note_del(&board, nid)
+}
+
+/// 灵感板打组 / 解组：`grp = -1` 新建一组（后端发号并返回），`grp = 0` 解组。
+/// key 正数 = 图片 gid、负数 = 便签 nid 取负（和前端 `pos` 的 key 一致）。
+#[tauri::command]
+fn am_board_group(
+    state: State<'_, AppState>,
+    board: String,
+    keys: Vec<i64>,
+    grp: i64,
+) -> Result<i64, String> {
+    lock(&state).board_group_set(&board, &keys, grp)
 }
 
 /// 往灵感板上**拖文件进来**（P2.8）：只收已经入库的那几张。
@@ -3154,6 +3185,28 @@ fn free_path(dir: &Path, stem: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem}-{}.png", std::process::id()))
+}
+
+/// 截图文件名：`截图 2026-11-21.png`（owner 2026-11-21：**只要年月日**，不要时分秒）。
+/// 同一天第 2、3 张自动 `(2)(3)` —— 截图目录里都是用户的东西，绝不覆盖。
+fn shot_target(dir: &Path, day: &str) -> PathBuf {
+    let first = dir.join(format!("截图 {day}.png"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..1000 {
+        let p = dir.join(format!("截图 {day} ({n}).png"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("截图 {day} {}.png", std::process::id()))
+}
+
+/// 今天的日期串 `2026-11-21`（`local_stamp` 是"日期 时-分-秒"，这里只取前段）
+fn today_day() -> String {
+    let (stamp, _) = screen::local_stamp();
+    stamp.split(' ').next().unwrap_or("").to_string()
 }
 
 /// 灵感板里 Ctrl+V：剪贴板图片 → **截图目录** → 入库 → 打上这块板的标签 → 上板。
@@ -6011,8 +6064,7 @@ async fn am_snip_finish(
                想留底就从回收站还原（默认回 screenshots，也可以还到指定目录）。 */
             let dir = shot_dir();
             std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录：{e}"))?;
-            let (stamp, _) = screen::local_stamp();
-            let raw = dir.join(format!("截图 {}.png", stamp.replace(':', "-")));
+            let raw = shot_target(&dir, &today_day());
             std::fs::write(&raw, &bytes).map_err(|e| format!("写贴图失败：{e}"))?;
             let path = trash_png(&app, &raw);
             let Some(item) = item_of_file(&path) else {
@@ -6045,8 +6097,8 @@ async fn am_snip_finish(
                 }
                 format!("建不了截图目录 {}：{e}", dir.display())
             })?;
-            let (stamp, _) = screen::local_stamp();
-            let default_name = format!("截图 {}.png", stamp);
+            let day = today_day();
+            let default_name = format!("截图 {day}.png");
             let target = if action == "saveas" {
                 /* 覆盖层是置顶窗：弹对话框前必须**先取消置顶**，
                    否则文件对话框被压在它下面 —— 用户看到的就是"点了保存什么都没发生"
@@ -6067,7 +6119,8 @@ async fn am_snip_finish(
                     None => return Ok(None), // 用户取消：留在覆盖层上继续编辑
                 }
             } else {
-                dir.join(&default_name)
+                /* 同一天多张不覆盖：`截图 2026-11-21 (2).png` */
+                shot_target(&dir, &day)
             };
             std::fs::write(&target, &bytes).map_err(|e| {
                 if let Some(d) = LOG_DIR.get() {
@@ -6860,6 +6913,7 @@ fn main() {
             am_board_notes,
             am_board_note_put,
             am_board_note_del,
+            am_board_group,
             am_board_add_paths,
             am_board_paste,
             am_coll_list,

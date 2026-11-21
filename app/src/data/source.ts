@@ -3,6 +3,7 @@ import type {
   AutoRule,
   AutoTag,
   BoardItemDto,
+  BoardNote,
   BoardPastedItem,
   CollRow,
   DataRootInfo,
@@ -235,13 +236,27 @@ export const tauriSource: Source = {
   snapshotCombine: (ids, name, mode) =>
     invoke!<[number, number, number]>("am_snapshot_combine", { ids, name, mode }),
   boardLayout: (board) =>
-    invoke!<[number, number, number, number, number][]>("am_board_layout", { board }),
+    invoke!<[number, number, number, number, number, number][]>("am_board_layout", { board }),
   boardPlace: (board, rows) => invoke!<number>("am_board_place", { board, rows }),
-  boardNotes: (board) =>
-    invoke!<[number, number, number, number, number, string][]>("am_board_notes", { board }),
-  boardNotePut: (board, nid, x, y, w, h, text) =>
-    invoke!<number>("am_board_note_put", { board, nid, x, y, w, h, text }),
+  boardNotes: (board) => invoke!<BoardNote[]>("am_board_notes", { board }),
+  /** 便签落库。`look` 传 null = 只挪位置，保留库里原有字体外观 */
+  boardNotePut: (board, nid, x, y, w, h, text, look) =>
+    invoke!<number>("am_board_note_put", {
+      board,
+      nid,
+      x,
+      y,
+      w,
+      h,
+      text,
+      font: look ? look.font : null,
+      fs: look ? look.fs : null,
+      color: look ? look.color : null,
+      bold: look ? look.bold : null,
+    }),
   boardNoteDel: (board, nid) => invoke!<number>("am_board_note_del", { board, nid }),
+  /** 打组 / 解组：`grp = -1` 新建（后端发号并返回），`0` 解组 */
+  boardGroup: (board, keys, grp) => invoke!<number>("am_board_group", { board, keys, grp }),
   boardAddPaths: (paths) =>
     invoke!<[BoardItemDto[], string[]]>("am_board_add_paths", { paths }),
   peekTop: (on) => invoke!<boolean>("am_peek_top", { on }),

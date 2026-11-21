@@ -100,7 +100,10 @@ const RIGHT: Group[] = [
     title: "灵感板 · 面板",
     rows: [
       { keys: ["Ctrl", "V"], label: "灵感板：贴剪贴板图入库" },
-      { keys: ["T"], label: "灵感板：加一张文字便签", hint: "双击便签改字" },
+      { keys: ["T"], label: "灵感板：加一张文字便签", hint: "双击便签改字，右下角缩放" },
+      { keys: ["Shift", "点击"], label: "灵感板：加选 / 减选", hint: "点组里一员 = 整组选中" },
+      { keys: ["Ctrl", "G"], label: "灵感板：打组", hint: "组内一起移动、一起缩放" },
+      { keys: ["Ctrl", "Shift", "G"], label: "灵感板：解组" },
       { keys: ["L"], label: "灵感板：开合左侧图层面板", hint: "点谁谁置顶" },
       { keys: ["F"], label: "灵感板：适应窗口", hint: "0 = 回到 100%" },
       { keys: ["Ctrl", "K"], label: "命令面板", hint: "所有操作都能搜到" },

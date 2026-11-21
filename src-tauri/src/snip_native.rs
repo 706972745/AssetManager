@@ -51,6 +51,8 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONDOWN: u32 = 0x0204;
 const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_TIMER: u32 = 0x0113;
 
 #[repr(C)]
 #[derive(Default)]
@@ -91,6 +93,13 @@ struct BlendFunction {
     blend_flags: u8,
     source_constant_alpha: u8,
     alpha_format: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PointI {
+    x: i32,
+    y: i32,
 }
 
 #[repr(C)]
@@ -166,6 +175,9 @@ extern "system" {
     fn LoadCursorW(inst: isize, name: *const u16) -> isize;
     fn GetAsyncKeyState(vk: i32) -> i16;
     fn SendMessageW(h: Hwnd, m: u32, w: usize, l: isize) -> isize;
+    fn SetTimer(h: Hwnd, id: usize, ms: u32, f: usize) -> usize;
+    fn KillTimer(h: Hwnd, id: usize) -> i32;
+    fn ScreenToClient(h: Hwnd, p: *mut PointI) -> i32;
 }
 
 extern "system" {
@@ -232,6 +244,19 @@ pub enum Tool {
     /// 序号标记（1、2、3…点一下就放一个）
     Number,
     Eraser,
+    /* ---- 0.4.19 起补齐参考稿 `screenshot-toolbar-v2` 的五个工具 ---- */
+    /// 引线气泡：对话泡泡 + 引线尖，可在里面写字
+    Callout,
+    /// 色块遮挡：整块实心盖住，最直接的"藏信息"
+    Block,
+    /// 贴纸：点击落一个图案（先用内置几种表情/符号）
+    Sticker,
+    /// 勾选图章
+    Check,
+    /// 叉号图章
+    Cross,
+    /// 插入图片：选一张本地图贴到选区内
+    Image,
 }
 
 /* ---------------- 工具栏模型（v2：分组 + 悬停托盘） ----------------
@@ -268,20 +293,28 @@ enum Chip {
 
 const G_SHAPE: [Tool; 4] = [Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow];
 const G_BRUSH: [Tool; 2] = [Tool::Pen, Tool::Marker];
-const G_TEXT: [Tool; 2] = [Tool::Text, Tool::Number];
-const G_MASK: [Tool; 2] = [Tool::Mosaic, Tool::Blur];
-const GROUPS: [&[Tool]; 4] = [&G_SHAPE, &G_BRUSH, &G_TEXT, &G_MASK];
+const G_TEXT: [Tool; 3] = [Tool::Text, Tool::Number, Tool::Callout];
+const G_MASK: [Tool; 3] = [Tool::Mosaic, Tool::Blur, Tool::Block];
+const G_STICKER: [Tool; 4] = [Tool::Sticker, Tool::Check, Tool::Cross, Tool::Image];
+const GROUPS: [&[Tool]; 5] = [&G_SHAPE, &G_BRUSH, &G_TEXT, &G_MASK, &G_STICKER];
 /// 每组收起时默认显示的工具（用户换过之后记在 `Ctx::face` 里）
-const GROUP_DEFAULT: [Tool; 4] = [Tool::Rect, Tool::Pen, Tool::Text, Tool::Mosaic];
-const GROUP_NAMES: [&str; 4] = ["形状", "画笔", "文字标注", "遮挡 / 打码"];
+const GROUP_DEFAULT: [Tool; 5] = [
+    Tool::Rect,
+    Tool::Pen,
+    Tool::Text,
+    Tool::Mosaic,
+    Tool::Sticker,
+];
+const GROUP_NAMES: [&str; 5] = ["形状", "画笔", "文字标注", "遮挡 / 打码", "素材"];
 
-const BAR: [BarKind; 18] = [
+const BAR: [BarKind; 17] = [
     BarKind::Tool(Tool::Select),
     BarKind::Sep,
     BarKind::Group(0),
     BarKind::Group(1),
     BarKind::Group(2),
     BarKind::Group(3),
+    BarKind::Group(4),
     BarKind::Sep,
     BarKind::Chip(Chip::Color),
     BarKind::Chip(Chip::Width),
@@ -289,12 +322,23 @@ const BAR: [BarKind; 18] = [
     BarKind::Sep,
     BarKind::Act("undo"),
     BarKind::Act("redo"),
-    BarKind::Tool(Tool::Eraser),
     BarKind::Sep,
+    /* 分裂按钮的左半边（照原型 §6.5）：点击 = 直接复制 */
     BarKind::Act("copy"),
-    BarKind::Act("save"),
-    BarKind::Act("pin"),
+    /* 右半边 22px：展开"另存为 / 贴图 / OCR / 分享" */
+    BarKind::Act("copymore"),
 ];
+
+/// `[复制|▾]` 的右段展开项（原型 §6.5）：(文案, 键位, 交付动作)
+const MENU_ITEMS: [(&str, &str, &str, &str); 3] = [
+    ("复制到剪贴板", "Ctrl+C", "copy", "copy"),
+    ("另存为 PNG", "Ctrl+S", "saveas", "save"),
+    ("贴到桌面", "Ctrl+P", "peek", "pin"),
+];
+
+/// 菜单条目高度 / 条目间距（原型 `.split__tray .menu-item{height:32px}` + `gap:1px`）
+const MENU_ITEM_H: i32 = 32;
+const MENU_GAP: i32 = 1;
 
 /// 「取消」固定放最末尾：它和三个交付动作语义相反，而覆盖层是全屏的 ——
 /// 挨着放时手一偏就是"白框一次、什么都没留下"。
@@ -322,9 +366,6 @@ const SW_PAD: i32 = 10;
 const OPEN_MS: u64 = 110;
 const CLOSE_MS: u64 = 190;
 
-/// 第二行开头两个形态按钮的宽度（只在马赛克 / 高斯模糊时出现）
-const MODE_W: i32 = 54;
-
 
 /* ---------------- 工具栏配色（v2.1 设计稿：深浅双主题） ----------------
 
@@ -349,8 +390,10 @@ struct Palette {
     icon: u32,
     sep: u32,
     hover: u32,
-    /// 选中底 = accent 实色
+    /// 强调色实色（分裂按钮底、调色板选中环）
     active: u32,
+    /// 强调色（选中工具的图标色 / 16% 底色 / 34% 内环）
+    accent: u32,
     danger: u32,
     /// 键帽底 / 描边
     key_bg: u32,
@@ -371,7 +414,8 @@ impl Palette {
             /* 比 bg 亮三档：第一版用 #333330，离屏预览里几乎看不见 */
             sep: 0x3F3F3B,
             hover: 0x2A2A27,
-            active: 0x5B8CFF,
+            active: 0x1F6FEB,
+            accent: 0x4A9EFF,
             danger: 0xE05A4A,
             key_bg: 0x2E2E2B,
             key_edge: 0x4A4A46,
@@ -388,7 +432,8 @@ impl Palette {
             icon: 0x3A3A37,
             sep: 0xE2E2DD,
             hover: 0xEAEAE5,
-            active: 0x1B4FE0,
+            active: 0x1F6FEB,
+            accent: 0x1F6FEB,
             danger: 0xC0392B,
             key_bg: 0xF1F1ED,
             key_edge: 0xD4D4CC,
@@ -417,16 +462,33 @@ impl Palette {
    都靠它算），改的时候必须一起改：只改绘制不改命中，用户看到的就是"点上去没反应"，
    而这类偏差在离屏预览里完全看不出来。 */
 const BTN_W: i32 = 36;
-const SEP_W: i32 = 9;
+const SEP_W: i32 = 13;
 const BAR_H: i32 = 56;
-const BAR_RADIUS: i32 = 8;
-const BTN_RADIUS: i32 = 8;
+const BAR_RADIUS: i32 = 14;
+const BTN_RADIUS: i32 = 9;
+/// 分裂按钮圆角（原型 `.split{border-radius:10px}`）
+const SPLIT_RADIUS: i32 = 10;
+
+/// 相邻两项之间的间距 —— 照原型三条规则叠出来的：
+/// `.toolbar{gap:2px}`（全局）/ `.stack+.stack{margin-left:6px}`（组间额外 6）/ `.prop{gap:4px}`（属性组内 4）
+fn bar_gap(prev: BarKind, cur: BarKind) -> i32 {
+    if matches!(prev, BarKind::Chip(_)) && matches!(cur, BarKind::Chip(_)) {
+        return 4;
+    }
+    if matches!(prev, BarKind::Group(_)) && matches!(cur, BarKind::Group(_)) {
+        return 8;
+    }
+    2
+}
 
 fn bar_w(k: BarKind) -> i32 {
     match k {
         BarKind::Sep => SEP_W,
         /* 颜色 / 粗细是窄胶囊（32），填充用整格 */
         BarKind::Chip(Chip::Color) | BarKind::Chip(Chip::Width) => 32,
+        /* 复制分裂按钮：左段 66（图标 + "复制"两字），右段 22（原型 §6.5） */
+        BarKind::Act("copy") => 67,
+        BarKind::Act("copymore") => 22,
         _ => BTN_W,
     }
 }
@@ -446,6 +508,12 @@ fn tool_label(t: Tool) -> (&'static str, &'static str) {
         Tool::Number => ("序号", "N"),
         Tool::Text => ("文字", "T"),
         Tool::Eraser => ("橡皮擦", "X"),
+        Tool::Callout => ("引线气泡", "K"),
+        Tool::Block => ("色块遮挡", "G"),
+        Tool::Sticker => ("贴纸", "S"),
+        Tool::Check => ("勾选图章", "X"),
+        Tool::Cross => ("叉号图章", "C"),
+        Tool::Image => ("插入图片", "I"),
     }
 }
 
@@ -465,6 +533,7 @@ fn bar_label(k: BarKind) -> (&'static str, &'static str) {
             "cancel" => ("取消", "Esc"),
             "pin" => ("贴图", "中键"),
             "save" => ("保存到截图库", "Ctrl+S"),
+            "copymore" => ("更多输出", "另存为 / 贴图 / OCR / 分享"),
             _ => ("复制到剪贴板", "Ctrl+C"),
         },
         BarKind::Sep => ("", ""),
@@ -473,8 +542,9 @@ fn bar_label(k: BarKind) -> (&'static str, &'static str) {
 
 #[derive(Clone)]
 enum Op {
-    Rect([i32; 4], u32, i32),
-    Ellipse([i32; 4], u32, i32),
+    /// 矩形 / 椭圆最后那个 bool = 形状填充（当前色 20%，不遮底图文字）
+    Rect([i32; 4], u32, i32, bool),
+    Ellipse([i32; 4], u32, i32, bool),
     /// 直线存**起止两点**，和箭头同一个理由：包围盒装不下方向。
     /// 2026-11-19 owner 报"直线有 bug"，根因就是这里被 `norm4` 归一化成了
     /// "左上 → 右下" —— 从右上往左下拖，画出来的线是反的（对称的，所以看截图
@@ -498,6 +568,21 @@ enum Op {
     /// 序号：中心点、序号值、颜色
     Number(i32, i32, i32, u32),
     Text(String, i32, i32, u32, i32),
+    /* ---- 0.4.19：参考稿补齐的工具 ---- */
+    /// 色块遮挡：整块实心，彻底盖掉（不透明，和"半透明填充"区分开）
+    Block([i32; 4], u32),
+    /// 图章：中心点 + 颜色 + 种类（勾 / 叉 / 贴纸笑脸）
+    Stamp(i32, i32, u32, Stamp),
+    /// 引线气泡：矩形 + 颜色 + 文字（空串 = 只有泡泡）
+    Callout([i32; 4], u32, String),
+}
+
+/// 图章的种类
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stamp {
+    Check,
+    Cross,
+    Smiley,
 }
 
 impl Op {
@@ -505,7 +590,7 @@ impl Op {
     /// 端点可以是任意方向，但包围盒只能是正矩形。
     fn bbox(&self) -> [i32; 4] {
         match self {
-            Op::Rect(a, _, _) | Op::Ellipse(a, _, _) | Op::Mosaic(a) => *a,
+            Op::Rect(a, _, _, _) | Op::Ellipse(a, _, _, _) | Op::Mosaic(a) => *a,
             Op::Blur(a) => *a,
             /* 直线 / 箭头：端点方向任意，包围盒只能先归一化 */
             Op::Line(p0, p1, _, w) => {
@@ -519,6 +604,9 @@ impl Op {
                 [r[0] - pad, r[1] - pad, r[2] + pad * 2, r[3] + pad * 2]
             }
             Op::Number(x, y, _, _) => [*x - 14, *y - 14, 28, 28],
+            Op::Block(a, _) => *a,
+            Op::Stamp(x, y, _, _) => [*x - 18, *y - 18, 36, 36],
+            Op::Callout(a, _, _) => *a,
             Op::MosaicPath(p, r) | Op::BlurPath(p, r) => {
                 let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
                 for (x, y) in p {
@@ -556,6 +644,9 @@ enum Drag {
 struct Ctx {
     w: i32,
     h: i32,
+    /// 虚拟桌面左上角在屏幕坐标系里的位置（HUD 显示绝对坐标用）
+    ox: i32,
+    oy: i32,
     /// 主窗当前主题对应的那一套色（`run` 时定下来，整场截图不变）
     pal: Palette,
     mem: Hdc,
@@ -600,7 +691,13 @@ struct Ctx {
     /// 鼠标移动只改这个截止时间，真正的开合在 `WM_TIMER` 里落地。
     hover_due: Option<(std::time::Instant, bool, usize)>,
     /// 每组收起时显示的工具 = 该组"上次使用的那个"
-    face: [Tool; 4],
+    face: [Tool; 5],
+    /// 分裂按钮右段是否悬停（左段底是两段共用的，高亮要一起亮）
+    more_hover: bool,
+    /// `[复制|▾]` 的下拉是否展开
+    menu_open: bool,
+    /// 下拉矩形（绘制与命中共用）
+    menu: [i32; 4],
     /// 调色板展开状态与它的矩形
     palette: bool,
     sw: [i32; 4],
@@ -665,10 +762,436 @@ fn point_in_poly(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
     inside
 }
 
+/* ---------------- SVG 图标引擎 ----------------
+
+   owner 2026-11-21 给了 `screenshot-toolbar-v2/`（24 个 20×20 图标、stroke 1.6、
+   圆头圆角），要求「icon 用里面的」。上一版是 `icon_px` 里逐个 `match` 手绘近似，
+   密度和语义都追不上原稿；这一版直接解析原型里的 SVG path，用已有的覆盖率原语
+   描边/填充 —— 等于原样复刻，改图标只改下面 `ICONS` 里的字符串。
+
+   只实现图标用到的命令：M L H V C S Q T A Z（大写绝对 / 小写相对）。
+   曲线按 12 段采样、弧线按 7.5° 采样：20px 下看不出折线感，
+   但省掉贝塞尔 flatness 与 SVG 的完整命令集。 */
+
+/// 读一个 SVG 数字（跳过空白/逗号，支持符号、小数、指数）
+fn svg_num(cs: &[char], i: &mut usize) -> f32 {
+    let ws = |c: char| c == ' ' || c == ',' || c == '\n' || c == '\r' || c == '\t';
+    while *i < cs.len() && ws(cs[*i]) {
+        *i += 1;
+    }
+    let start = *i;
+    if *i < cs.len() && (cs[*i] == '-' || cs[*i] == '+') {
+        *i += 1;
+    }
+    while *i < cs.len() && cs[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    if *i < cs.len() && cs[*i] == '.' {
+        *i += 1;
+        while *i < cs.len() && cs[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    }
+    if *i < cs.len() && (cs[*i] == 'e' || cs[*i] == 'E') {
+        *i += 1;
+        if *i < cs.len() && (cs[*i] == '-' || cs[*i] == '+') {
+            *i += 1;
+        }
+        while *i < cs.len() && cs[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    }
+    cs[start..*i]
+        .iter()
+        .collect::<String>()
+        .parse::<f32>()
+        .unwrap_or(0.0)
+}
+
+/// 三次贝塞尔采样（`t` 从 0 到 1，含终点，不含起点）
+fn svg_cubic(out: &mut Vec<(f32, f32)>, p0: (f32, f32), c1: (f32, f32), c2: (f32, f32), p1: (f32, f32)) {
+    let n = 12;
+    for k in 1..=n {
+        let t = k as f32 / n as f32;
+        let u = 1.0 - t;
+        let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        out.push((
+            a * p0.0 + b * c1.0 + c * c2.0 + d * p1.0,
+            a * p0.1 + b * c1.1 + c * c2.1 + d * p1.1,
+        ));
+    }
+}
+
+/// 二次贝塞尔采样
+fn svg_quad(out: &mut Vec<(f32, f32)>, p0: (f32, f32), c: (f32, f32), p1: (f32, f32)) {
+    let n = 10;
+    for k in 1..=n {
+        let t = k as f32 / n as f32;
+        let u = 1.0 - t;
+        out.push((
+            u * u * p0.0 + 2.0 * u * t * c.0 + t * t * p1.0,
+            u * u * p0.1 + 2.0 * u * t * c.1 + t * t * p1.1,
+        ));
+    }
+}
+
+/// 椭圆弧端点参数化 → 圆心参数化，再按角度采样（SVG 规范 F.6.5，`phi` 恒为 0）
+fn svg_arc(
+    out: &mut Vec<(f32, f32)>,
+    x1: f32,
+    y1: f32,
+    rx: f32,
+    ry: f32,
+    large: bool,
+    sweep: bool,
+    x2: f32,
+    y2: f32,
+) {
+    let (mut rx, mut ry) = (rx.abs(), ry.abs());
+    if rx < 1e-4 || ry < 1e-4 {
+        out.push((x2, y2));
+        return;
+    }
+    let dx2 = (x1 - x2) * 0.5;
+    let dy2 = (y1 - y2) * 0.5;
+    let lam = dx2 * dx2 / (rx * rx) + dy2 * dy2 / (ry * ry);
+    if lam > 1.0 {
+        let s = lam.sqrt();
+        rx *= s;
+        ry *= s;
+    }
+    let sign = if large != sweep { 1.0 } else { -1.0 };
+    let num = rx * rx * ry * ry - rx * rx * dy2 * dy2 - ry * ry * dx2 * dx2;
+    let den = rx * rx * dy2 * dy2 + ry * ry * dx2 * dx2;
+    let co = if den < 1e-9 {
+        0.0
+    } else {
+        sign * (num.max(0.0) / den).sqrt()
+    };
+    let cxp = co * rx * dy2 / ry;
+    let cyp = -co * ry * dx2 / rx;
+    let cx = cxp + (x1 + x2) * 0.5;
+    let cy = cyp + (y1 + y2) * 0.5;
+    let ux = (dx2 - cxp) / rx;
+    let uy = (dy2 - cyp) / ry;
+    let vx = (-dx2 - cxp) / rx;
+    let vy = (-dy2 - cyp) / ry;
+    let th1 = uy.atan2(ux);
+    let mut dth = (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    if !sweep && dth > 0.0 {
+        dth -= std::f32::consts::TAU;
+    } else if sweep && dth < 0.0 {
+        dth += std::f32::consts::TAU;
+    }
+    let n = ((dth.abs() / (std::f32::consts::PI / 24.0)).ceil() as i32).clamp(2, 96);
+    for k in 1..=n {
+        let t = th1 + dth * (k as f32 / n as f32);
+        out.push((cx + rx * t.cos(), cy + ry * t.sin()));
+    }
+}
+
+/// 把一条 SVG path 拆成若干折线子路径（viewBox 原始坐标，未缩放）
+fn svg_polys(d: &str) -> Vec<Vec<(f32, f32)>> {
+    let cs: Vec<char> = d.chars().collect();
+    let mut i = 0usize;
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    let mut polys: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut cur: Vec<(f32, f32)> = Vec::new();
+    let mut prev_c: Option<(f32, f32)> = None;
+    let mut prev_q: Option<(f32, f32)> = None;
+    let mut last = 'M';
+    while i < cs.len() {
+        while i < cs.len() && (cs[i] == ' ' || cs[i] == ',' || cs[i] == '\n' || cs[i] == '\r' || cs[i] == '\t') {
+            i += 1;
+        }
+        if i >= cs.len() {
+            break;
+        }
+        let raw = cs[i];
+        let c = if raw.is_ascii_alphabetic() {
+            i += 1;
+            last = raw;
+            raw
+        } else {
+            last
+        };
+        let rel = c.is_ascii_lowercase();
+        let up = c.to_ascii_uppercase();
+        let (px, py) = (x, y);
+        match up {
+            'M' => {
+                let dx = svg_num(&cs, &mut i);
+                let dy = svg_num(&cs, &mut i);
+                let (nx, ny) = if rel { (px + dx, py + dy) } else { (dx, dy) };
+                if cur.len() > 1 {
+                    polys.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+                cur.push((nx, ny));
+                x = nx;
+                y = ny;
+                sx = nx;
+                sy = ny;
+                prev_c = None;
+                prev_q = None;
+                /* M 后面跟的裸坐标是隐式 L */
+                last = if rel { 'l' } else { 'L' };
+            }
+            'L' => {
+                let dx = svg_num(&cs, &mut i);
+                let dy = svg_num(&cs, &mut i);
+                let (nx, ny) = if rel { (px + dx, py + dy) } else { (dx, dy) };
+                cur.push((nx, ny));
+                x = nx;
+                y = ny;
+                prev_c = None;
+                prev_q = None;
+            }
+            'H' => {
+                let dx = svg_num(&cs, &mut i);
+                let nx = if rel { px + dx } else { dx };
+                cur.push((nx, y));
+                x = nx;
+                prev_c = None;
+                prev_q = None;
+            }
+            'V' => {
+                let dy = svg_num(&cs, &mut i);
+                let ny = if rel { py + dy } else { dy };
+                cur.push((x, ny));
+                y = ny;
+                prev_c = None;
+                prev_q = None;
+            }
+            'C' => {
+                let (mut c1x, mut c1y) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (mut c2x, mut c2y) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (mut ex, mut ey) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                if rel {
+                    c1x += px;
+                    c1y += py;
+                    c2x += px;
+                    c2y += py;
+                    ex += px;
+                    ey += py;
+                }
+                svg_cubic(&mut cur, (px, py), (c1x, c1y), (c2x, c2y), (ex, ey));
+                prev_c = Some((c2x, c2y));
+                prev_q = None;
+                x = ex;
+                y = ey;
+            }
+            'S' => {
+                let (c2x, c2y) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (ex, ey) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (mut c2x, mut c2y, mut ex, mut ey) = (c2x, c2y, ex, ey);
+                if rel {
+                    c2x += px;
+                    c2y += py;
+                    ex += px;
+                    ey += py;
+                }
+                let c1 = match prev_c {
+                    Some((qx, qy)) => (2.0 * px - qx, 2.0 * py - qy),
+                    None => (px, py),
+                };
+                svg_cubic(&mut cur, (px, py), c1, (c2x, c2y), (ex, ey));
+                prev_c = Some((c2x, c2y));
+                prev_q = None;
+                x = ex;
+                y = ey;
+            }
+            'Q' => {
+                let (cx, cy) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (ex, ey) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (mut cx, mut cy, mut ex, mut ey) = (cx, cy, ex, ey);
+                if rel {
+                    cx += px;
+                    cy += py;
+                    ex += px;
+                    ey += py;
+                }
+                svg_quad(&mut cur, (px, py), (cx, cy), (ex, ey));
+                prev_q = Some((cx, cy));
+                prev_c = None;
+                x = ex;
+                y = ey;
+            }
+            'T' => {
+                let (ex, ey) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (mut ex, mut ey) = (ex, ey);
+                if rel {
+                    ex += px;
+                    ey += py;
+                }
+                let c = match prev_q {
+                    Some((qx, qy)) => (2.0 * px - qx, 2.0 * py - qy),
+                    None => (px, py),
+                };
+                svg_quad(&mut cur, (px, py), c, (ex, ey));
+                prev_q = Some(c);
+                prev_c = None;
+                x = ex;
+                y = ey;
+            }
+            'A' => {
+                let rx = svg_num(&cs, &mut i);
+                let ry = svg_num(&cs, &mut i);
+                let _rot = svg_num(&cs, &mut i);
+                let laf = svg_num(&cs, &mut i) != 0.0;
+                let sf = svg_num(&cs, &mut i) != 0.0;
+                let (ex, ey) = (svg_num(&cs, &mut i), svg_num(&cs, &mut i));
+                let (ex, ey) = if rel { (px + ex, py + ey) } else { (ex, ey) };
+                svg_arc(&mut cur, px, py, rx, ry, laf, sf, ex, ey);
+                prev_c = None;
+                prev_q = None;
+                x = ex;
+                y = ey;
+            }
+            'Z' => {
+                if !cur.is_empty() {
+                    cur.push((sx, sy));
+                    polys.push(std::mem::take(&mut cur));
+                }
+                x = sx;
+                y = sy;
+                prev_c = None;
+                prev_q = None;
+            }
+            _ => {
+                /* 未知命令：吞一个数字避免死循环 */
+                let _ = svg_num(&cs, &mut i);
+            }
+        }
+        /* 没有新命令字母时 `last` 保持，下一轮按同一命令继续读参数 */
+        if last == 'Z' || last == 'z' {
+            last = 'M';
+        }
+    }
+    if cur.len() > 1 {
+        polys.push(cur);
+    }
+    polys
+}
+
 fn rgb(c: u32) -> u32 {
     // 0xRRGGBB → COLORREF(0x00BBGGRR)
     ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
 }
+
+/* ---------------- 图标表（照抄 `screenshot-toolbar-v2/index.html` 的 ICONS） ----------------
+
+   每个部件是 `(模式, 透明度, path)`：
+     0 = 描边（stroke 1.6 / viewBox 单位，圆头圆角）
+     1 = 填充
+     2 = 虚线描边（dash 1.6、gap 3.2，只给 `blur` 用）
+
+   原稿里的 `<rect>` / `<ellipse>` / `<circle>` 已展开成等价 path ——
+   引擎只认 path，少一套分支。24×24 viewBox，实际渲染 size（默认 20）。 */
+
+/// r=8 的圆（check / cross / sticker / badge 共用）
+const IC_CIRCLE8: &str = "M4 12A8 8 0 1 0 20 12A8 8 0 1 0 4 12Z";
+
+const ICONS: &[(&str, &[(u8, f32, &str)])] = &[
+    ("select", &[(0, 1.0, "M5 3v16.6l4.4-4.2 2.6 5 3-1.6-2.7-4.9 6-.5z")]),
+    ("rect", &[(0, 1.0, "M6.4 5H17.6A2.2 2.2 0 0 1 19.8 7.2V16.8A2.2 2.2 0 0 1 17.6 19H6.4A2.2 2.2 0 0 1 4.2 16.8V7.2A2.2 2.2 0 0 1 6.4 5Z")]),
+    ("ellipse", &[(0, 1.0, "M4 12A8 6.6 0 1 0 20 12A8 6.6 0 1 0 4 12Z")]),
+    ("line", &[(0, 1.0, "M5 19L19 5")]),
+    ("arrow", &[(0, 1.0, "M4.5 19.5L19 5"), (0, 1.0, "M12.6 5H19V11.4")]),
+    ("pen", &[
+        (0, 1.0, "M4 20l4-.9L19.3 7.8a2.4 2.4 0 0 0-3.4-3.4L4.6 15.7z"),
+        (0, 1.0, "M14.4 6.6l3 3"),
+    ]),
+    ("marker", &[
+        (0, 1.0, "M7.6 16.4L15.1 8.9a2.35 2.35 0 0 1 3.3 3.3l-7.5 7.5-4.5 1.1z"),
+        (0, 1.0, "M13.2 10.8l3.3 3.3"),
+    ]),
+    ("text", &[
+        (0, 1.0, "M5 6.4V5h14v1.4"),
+        (0, 1.0, "M12 5V19"),
+        (0, 1.0, "M8.6 19h6.8"),
+    ]),
+    ("badge", &[
+        (0, 1.0, IC_CIRCLE8),
+        (0, 1.0, "M11.1 9.5L12.8 8.2V16"),
+        (0, 1.0, "M9.8 16h5.6"),
+    ]),
+    ("callout", &[(0, 1.0, "M5 5.5h14v10h-9.2L6.8 19v-3.5H5z")]),
+    ("mosaic", &[(1, 0.85, "M4 4h5v5H4zM13 4h7v5h-7zM4 11h5v5H4zM13 11h7v5h-7zM4 18h5v2H4zM13 18h7v2h-7z")]),
+    ("blur", &[
+        (2, 1.0, "M4.4 12A7.6 7.6 0 1 0 19.6 12A7.6 7.6 0 1 0 4.4 12Z"),
+        (0, 0.55, "M8.6 12A3.4 3.4 0 1 0 15.4 12A3.4 3.4 0 1 0 8.6 12Z"),
+    ]),
+    ("block", &[(1, 0.85, "M6.5 6H17.5A2 2 0 0 1 19.5 8V16A2 2 0 0 1 17.5 18H6.5A2 2 0 0 1 4.5 16V8A2 2 0 0 1 6.5 6Z")]),
+    ("sticker", &[
+        (0, 1.0, IC_CIRCLE8),
+        (0, 1.0, "M9.2 13.6c.6 1 1.7 1.6 2.8 1.6s2.2-.6 2.8-1.6"),
+        (1, 1.0, "M8.45 9.9A0.95 0.95 0 1 0 10.35 9.9A0.95 0.95 0 1 0 8.45 9.9Z"),
+        (1, 1.0, "M13.65 9.9A0.95 0.95 0 1 0 15.55 9.9A0.95 0.95 0 1 0 13.65 9.9Z"),
+    ]),
+    ("check", &[(0, 1.0, IC_CIRCLE8), (0, 1.0, "M8.4 12.2l2.5 2.5 4.7-5")]),
+    ("cross", &[
+        (0, 1.0, IC_CIRCLE8),
+        (0, 1.0, "M9.2 9.2l5.6 5.6"),
+        (0, 1.0, "M14.8 9.2l-5.6 5.6"),
+    ]),
+    ("image", &[
+        (0, 1.0, "M6 5H18A2 2 0 0 1 20 7V17A2 2 0 0 1 18 19H6A2 2 0 0 1 4 17V7A2 2 0 0 1 6 5Z"),
+        (0, 1.0, "M7.7 10A1.3 1.3 0 1 0 10.3 10A1.3 1.3 0 1 0 7.7 10Z"),
+        (0, 1.0, "M5 17.2l4.5-4.5 3 3 2.8-2.8 3.7 3.7"),
+    ]),
+    ("fill", &[
+        (0, 1.0, "M6.4 4.4H17.6A2 2 0 0 1 19.6 6.4V17.6A2 2 0 0 1 17.6 19.6H6.4A2 2 0 0 1 4.4 17.6V6.4A2 2 0 0 1 6.4 4.4Z"),
+        (1, 0.5, "M4.4 12h15.2v5.6a2 2 0 0 1-2 2H6.4a2 2 0 0 1-2-2z"),
+    ]),
+    ("undo", &[
+        (0, 1.0, "M4.5 9.5h9a4.3 4.3 0 0 1 0 8.6H8.4"),
+        (0, 1.0, "M8 5.6L4.2 9.5L8 13.4"),
+    ]),
+    ("redo", &[
+        (0, 1.0, "M19.5 9.5h-9a4.3 4.3 0 0 0 0 8.6h5.1"),
+        (0, 1.0, "M16 5.6l3.8 3.9L16 13.4"),
+    ]),
+    ("copy", &[
+        (0, 1.0, "M10.2 8.2H17.2A2 2 0 0 1 19.2 10.2V17.2A2 2 0 0 1 17.2 19.2H10.2A2 2 0 0 1 8.2 17.2V10.2A2 2 0 0 1 10.2 8.2Z"),
+        (0, 1.0, "M15.6 5H6.6A1.6 1.6 0 0 0 5 6.6V15.6"),
+    ]),
+    ("save", &[
+        (0, 1.0, "M5 5h9.4L19 9.6V19H5z"),
+        (0, 1.0, "M8.4 5v4.6h6.8V5"),
+        (0, 1.0, "M8.4 13H15.6V19H8.4Z"),
+    ]),
+    ("pin", &[
+        (0, 1.0, "M9.4 4h5.2l-1 4.8 3.4 3H6L9.4 8.8z"),
+        (0, 1.0, "M12 11.8V20"),
+    ]),
+    ("ocr", &[
+        (0, 1.0, "M4.6 8.4V5.6h2.8M16.6 5.6h2.8v2.8M19.4 15.6v2.8h-2.8M7.4 18.4H4.6v-2.8"),
+        (0, 1.0, "M8.6 10.6h6.8M8.6 13.6h4.4"),
+    ]),
+    ("share", &[
+        (0, 1.0, "M12 15.4V4.2"),
+        (0, 1.0, "M8.4 7.8L12 4.2l3.6 3.6"),
+        (0, 1.0, "M5.2 13.4v6.4h13.6v-6.4"),
+    ]),
+    ("close", &[(0, 1.0, "M6.4 6.4l11.2 11.2M17.6 6.4L6.4 17.6")]),
+    ("chevron", &[(0, 1.0, "M6 9.5l6 6 6-6")]),
+    ("chevronUp", &[(0, 1.0, "M6 14.5l6-6 6 6")]),
+];
+
+fn icon_parts(name: &str) -> &'static [(u8, f32, &'static str)] {
+    for (n, p) in ICONS {
+        if *n == name {
+            return p;
+        }
+    }
+    &[]
+}
+
+
+
 
 fn norm4(a: (i32, i32), b: (i32, i32)) -> [i32; 4] {
     [
@@ -789,15 +1312,19 @@ impl Ctx {
            会残留状态（同一批调用只有后一半生效），表现为"有的标注画不出来"。
            只有文字仍走 GDI —— 中文字形没法自己点像素。 */
         match op {
-            Op::Rect(r, c, w) => self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], *w, *c),
-            Op::Ellipse(r, c, w) => self.pellipse(
-                r[0] + r[2] / 2,
-                r[1] + r[3] / 2,
-                r[2] / 2,
-                r[3] / 2,
-                *w,
-                *c,
-            ),
+            Op::Rect(r, c, w, fill) => {
+                if *fill {
+                    self.pfill_a(r[0], r[1], r[0] + r[2], r[1] + r[3], *c, 0.20);
+                }
+                self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], *w, *c)
+            }
+            Op::Ellipse(r, c, w, fill) => {
+                let (cx, cy) = (r[0] + r[2] / 2, r[1] + r[3] / 2);
+                if *fill {
+                    self.fill_ellipse(cx, cy, r[2] / 2, r[3] / 2, *c, 0.20);
+                }
+                self.pellipse(cx, cy, r[2] / 2, r[3] / 2, *w, *c)
+            }
             Op::Line(p0, p1, c, w) => self.pline(p0.0, p0.1, p1.0, p1.1, *w, *c),
             Op::Arrow(p0, p1, c, w) => {
                 /* 起点、终点直接用，方向由它们算 —— 别在这里套 norm4（见 `Op::Arrow` 的注释）。 */
@@ -869,6 +1396,76 @@ impl Ctx {
                     }
                     last = Some((*px, *py));
                     self.blur_region(px - *r, py - *r, *r * 2, *r * 2);
+                }
+            }
+            /* 色块遮挡：整块实心（不透明）。和 `Rect` 的 20% 填充区分开 ——
+               那个是"标重点"，这个是"盖掉敏感信息"。 */
+            Op::Block(r, c) => self.pfill(r[0], r[1], r[0] + r[2], r[1] + r[3], *c),
+            Op::Stamp(x, y, c, k) => {
+                let (cx, cy) = (*x as f32, *y as f32);
+                self.pdisc_aa(cx, cy, 15.0, *c);
+                let ink = 0xFFFFFFu32;
+                match k {
+                    Stamp::Check => {
+                        self.pline_aa(cx - 6.2, cy + 0.6, cx - 1.8, cy + 5.0, 3.0, ink);
+                        self.pline_aa(cx - 1.8, cy + 5.0, cx + 6.6, cy - 4.8, 3.0, ink);
+                    }
+                    Stamp::Cross => {
+                        self.pline_aa(cx - 5.2, cy - 5.2, cx + 5.2, cy + 5.2, 3.0, ink);
+                        self.pline_aa(cx + 5.2, cy - 5.2, cx - 5.2, cy + 5.2, 3.0, ink);
+                    }
+                    Stamp::Smiley => {
+                        /* 贴纸先给一个笑脸：两个实心眼 + 一段下弯的嘴（折线拟合） */
+                        self.pdisc_aa(cx - 4.6, cy - 3.4, 1.7, ink);
+                        self.pdisc_aa(cx + 4.6, cy - 3.4, 1.7, ink);
+                        let mut prev = (cx - 6.0, cy + 2.4);
+                        for i in 1..=10 {
+                            let t = i as f32 / 10.0;
+                            let px = cx - 6.0 + 12.0 * t;
+                            let py = cy + 2.4 + 4.6 * (t * std::f32::consts::PI).sin();
+                            self.pline_aa(prev.0, prev.1, px, py, 2.4, ink);
+                            prev = (px, py);
+                        }
+                    }
+                }
+            }
+            Op::Callout(r, c, txt) => {
+                /* 引线气泡：白底（92%）+ 当前色描边 + 左下引线尖 + 文字。
+                   白底是必须的 —— 气泡里的字要压得住任意底图。 */
+                let (x, y, w, h) = (r[0], r[1], r[2].max(24), r[3].max(24));
+                self.pfill_round_a(x, y, x + w, y + h, 8, 0xFFFFFF, 0.93);
+                self.pframe_aa(x as f32, y as f32, (x + w) as f32, (y + h) as f32, 2.0, *c);
+                let tx = (x + 18) as f32;
+                let ty = (y + h) as f32;
+                self.ppoly_aa_a(
+                    &[(tx, ty - 1.0), (tx + 18.0, ty - 1.0), (tx + 2.0, ty + 14.0)],
+                    *c,
+                    0.93,
+                );
+                self.ppoly_aa_a(
+                    &[(tx + 1.5, ty), (tx + 15.5, ty), (tx + 2.8, ty + 10.5)],
+                    0xFFFFFF,
+                    0.93,
+                );
+                if !txt.is_empty() {
+                    let u: Vec<u16> = txt.encode_utf16().collect();
+                    let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+                    unsafe {
+                        let f = CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+                        let oldf = SelectObject(self.mem, f);
+                        SetBkMode(self.mem, TRANSPARENT);
+                        SetTextColor(self.mem, rgb(0x1B1F27));
+                        let mut rc = RectPos {
+                            left: x + 10,
+                            top: y + 8,
+                            right: x + w - 10,
+                            bottom: y + h - 8,
+                        };
+                        /* DT_LEFT(0) | DT_TOP(0) | DT_WORDBREAK(0x10)：这几个常量没导进来，直接给值 */
+                        DrawTextW(self.mem, u.as_ptr(), u.len() as i32, &mut rc, 0x10);
+                        SelectObject(self.mem, oldf);
+                        DeleteObject(f);
+                    }
                 }
             }
             Op::Mosaic(r) => self.mosaic(r[0], r[1], r[2], r[3]),
@@ -1078,8 +1675,8 @@ impl Ctx {
     fn make_op(&self, a: (i32, i32), b: (i32, i32), pts: &[(i32, i32)]) -> Option<Op> {
         let r = norm4(a, b);
         match self.tool {
-            Tool::Rect => Some(Op::Rect(r, self.color, self.width)),
-            Tool::Ellipse => Some(Op::Ellipse(r, self.color, self.width)),
+            Tool::Rect => Some(Op::Rect(r, self.color, self.width, self.fill)),
+            Tool::Ellipse => Some(Op::Ellipse(r, self.color, self.width, self.fill)),
             Tool::Line => Some(Op::Line(a, b, self.color, self.width)),
             Tool::Arrow => Some(Op::Arrow(a, b, self.color, self.width)),
             Tool::Pen => Some(Op::Pen(pts.to_vec(), self.color, self.width)),
@@ -1109,33 +1706,57 @@ impl Ctx {
                     None
                 }
             }
+            /* 色块遮挡：拖出矩形，整块实心盖上去 */
+            Tool::Block => {
+                if r[2] > 2 && r[3] > 2 {
+                    Some(Op::Block(r, self.color))
+                } else {
+                    None
+                }
+            }
+            /* 引线气泡：拖出的矩形就是泡泡本体（最小 60×40 才像个泡泡） */
+            Tool::Callout => {
+                if r[2] > 12 && r[3] > 10 {
+                    Some(Op::Callout(
+                        [r[0], r[1], r[2].max(96), r[3].max(52)],
+                        self.color,
+                        String::new(),
+                    ))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
     /// 工具栏位置与尺寸（宽度由 `bar_w` 累加，尺寸见 `BTN_W` 那一段注释）。
     fn bar_layout(&mut self) {
-        let mut bw = 6; // 左右各 3px 内距
-        for k in BAR {
+        /* 原型 `.toolbar{padding:0 10px}` —— 左右各 10，不是各 5 */
+        let mut bw = 20;
+        let mut prev: Option<BarKind> = None;
+        for k in BAR.iter().copied().chain(std::iter::once(BAR_TAIL)) {
+            if let Some(p) = prev {
+                bw += bar_gap(p, k);
+            }
             bw += bar_w(k);
+            prev = Some(k);
         }
-        bw += bar_w(BAR_TAIL);
         let bh = BAR_H;
         let (x, y) = match self.sel {
             Some([sx, sy, sw, sh]) if sw > 8 && sh > 8 => {
-                /* 优先贴在选区下方 8px（和网页版一致）；下方放不下就翻到选区上方。
-                   翻上去时要留 6px，否则工具栏会贴着屏幕顶被裁掉。 */
-                let y = if sy + sh + 8 + bh + 6 < self.h {
-                    sy + sh + 8
+                /* 下方 14px（设计稿 §5.2）；放不下翻到上方，再不够就贴着顶边 */
+                let y = if sy + sh + 14 + bh + 6 < self.h {
+                    sy + sh + 14
                 } else {
-                    (sy - bh - 8).max(4)
+                    (sy - bh - 14).max(4)
                 };
-                (sx, y)
+                /* v2：**居中于选区**，不再左对齐（左对齐时选区一窄，工具条就甩到右边） */
+                (sx + sw / 2 - bw / 2, y)
             }
-            /* 还没框选时浮在屏幕偏下居中：比贴底更靠上，免得被任务栏挡住 */
             _ => ((self.w - bw) / 2, self.h - bh - 56),
         };
-        self.bar = [x.max(4).min(self.w - bw - 4), y, bw, bh];
+        self.bar = [x.max(4).min((self.w - bw - 4).max(4)), y, bw, bh];
     }
 
     fn bar_len(&self) -> usize {
@@ -1152,8 +1773,11 @@ impl Ctx {
 
     /// 第 i 项的左上角 x（顺序累加，画与点共用同一份）
     fn bar_item_x(&self, i: usize) -> i32 {
-        let mut x = self.bar[0] + 3;
+        let mut x = self.bar[0] + 10;
         for j in 0..i {
+            if j > 0 {
+                x += bar_gap(self.bar_item(j - 1), self.bar_item(j));
+            }
             x += bar_w(self.bar_item(j));
         }
         x
@@ -1179,92 +1803,226 @@ impl Ctx {
         None
     }
 
-    /* ---------- 第二行选项条（颜色 / 粗细） ----------
-
-       Snipaste 的选项行贴在主条**下方**、左端对齐。尺寸在这里算一次存进 `self.opt`，
-       绘制（`draw_opt`）和命中（`opt_hit`）都读它 —— 两边各算一遍迟早差 1px。 */
-
-    /// 遮罩类工具（马赛克 / 高斯模糊）才有「矩形 / 画笔」两种形态
-    fn is_mask_tool(&self) -> bool {
-        matches!(self.tool, Tool::Mosaic | Tool::Blur)
-    }
-
-    /// 色块边长 / 间距 / 粗细按钮宽（三者共同决定整条宽度）。
-    /// **必须和 `draw_opt` / `opt_hit` 用同一套偏移**：宽度算错了，最后一个粗细档
-    /// 就会点到面板外面。
-    fn opt_w(&self) -> i32 {
-        let mode = if self.is_mask_tool() { MODE_W * 2 + SEP_W } else { 0 };
-        mode + 8 + 26 + 8 + 10 * (20 + 4) + SEP_W + 4 * 30 + 10
-    }
-
-    fn opt_layout(&mut self) {
-        let w = self.opt_w().min(self.w - 8);
-        /* x 也要夹住：选区贴屏幕右边时，主条会被夹到 w-bw-4，选项行不能跟着溢出屏幕 */
-        let x = self.bar[0].min((self.w - w - 4).max(4));
-        /* 主条贴在选区**下方**时，选项行继续往下排；
-           主条因为下面放不下而翻到选区上方时，选项行要跟着往上翻 ——
-           不翻的话它会横在选区顶边上，既挡内容又容易被当成"在选区里落笔"。 */
-        let below_sel = self
-            .sel
-            .map(|s| self.bar[1] >= s[1] + s[3])
-            .unwrap_or(true);
-        let y = if below_sel {
-            self.bar[1] + self.bar[3] + 6
-        } else {
-            (self.bar[1] - 6 - BAR_H).max(4)
-        };
-        self.opt = [x, y, w, BAR_H];
-    }
-
-    /// 第二行的命中：返回 (色值 or 粗细)
-    fn opt_hit(&self, x: i32, y: i32) -> Option<OptPick> {
-        if !self.has_sel() {
-            return None;
-        }
-        let [ox, oy, ow, oh] = self.opt;
-        if x < ox || x >= ox + ow || y < oy || y >= oy + oh {
-            return None;
-        }
-        let mut cx = ox + 8;
-        if self.is_mask_tool() {
-            /* 左段 = 矩形，右段 = 画笔。返回的是「点完之后应该是什么」 */
-            if x >= cx && x < cx + MODE_W * 2 {
-                return Some(OptPick::Brush(x >= cx + MODE_W));
+    /// 某一类属性胶囊的矩形（滚轮判断"是否停在粗细上"要用）
+    fn chip_rect(&self, want: Chip) -> Option<[i32; 4]> {
+        for i in 0..self.bar_len() {
+            if self.bar_item(i) == BarKind::Chip(want) {
+                return Some([
+                    self.bar_item_x(i),
+                    self.bar[1],
+                    bar_w(BarKind::Chip(want)),
+                    self.bar[3],
+                ]);
             }
-            cx += MODE_W * 2 + SEP_W;
-        }
-        cx += 26 + 8; // 跳过"当前色"大方块
-        for (i, c) in SWATCHES.iter().enumerate() {
-            if x >= cx && x < cx + 20 {
-                return Some(OptPick::Color(*c));
-            }
-            cx += 24;
-            let _ = i;
-        }
-        /* 分隔 + 四档粗细 */
-        cx += SEP_W;
-        for w in WIDTHS {
-            if x >= cx && x < cx + 30 {
-                return Some(OptPick::Width(w));
-            }
-            cx += 30;
         }
         None
     }
 
-    /// 鼠标悬停在主条哪一个按钮上（分隔条不算）。没选区时工具栏不画，也不该命中。
+    /// 组按钮对应的组下标
+    fn group_of(&self, i: usize) -> Option<usize> {
+        match self.bar_item(i) {
+            BarKind::Group(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// 某个工具属于哪一组（用于"组是否处于激活态"）
+    fn group_of_tool(t: Tool) -> Option<usize> {
+        GROUPS.iter().position(|g| g.contains(&t))
+    }
+
+    /// 选工具（键盘与点击共用）。遮罩类再选一次 = 切「框选 / 画笔」形态，老手势保留。
+    fn pick_tool(&mut self, t: Tool) {
+        if matches!(t, Tool::Mosaic | Tool::Blur) && self.tool == t {
+            self.brush = !self.brush;
+        } else {
+            self.tool = t;
+        }
+        if let Some(g) = Self::group_of_tool(t) {
+            self.face[g] = t;
+        }
+        self.open = None;
+        self.tray_hover = None;
+        self.palette = false;
+        self.hover_due = None;
+        self.render();
+    }
+
+    /* ---------- 托盘（悬停展开） ----------
+       矩形算一次存进 `self.tray`，绘制（`draw_tray`）与命中（`tray_hit`）都读它。
+       和 0.3.1–0.3.5 那套"面板"的区别：没有独立的打开状态，只有 `self.open` 一个下标。 */
+
+    fn tray_layout(&mut self) {
+        self.tray = [0; 4];
+        let Some(i) = self.open else { return };
+        let Some(g) = self.group_of(i) else {
+            self.open = None;
+            return;
+        };
+        let n = GROUPS[g].len() as i32;
+        let tw = 10 + n * BTN_W + 2 * (n - 1);
+        let th = 46;
+        let cx = self.bar_item_x(i) + bar_w(self.bar_item(i)) / 2;
+        let x = (cx - tw / 2).max(4).min((self.w - tw - 4).max(4));
+        /* 默认在工具条上方 12px；工具条本身贴近屏幕顶时翻到下方 */
+        let below = self.bar[1] < th + 24;
+        let y = if below {
+            self.bar[1] + self.bar[3] + 12
+        } else {
+            self.bar[1] - th - 12
+        };
+        self.tray = [x, y, tw, th];
+    }
+
+    fn tray_hit(&self, x: i32, y: i32) -> Option<usize> {
+        let i = self.open?;
+        let g = self.group_of(i)?;
+        if !inside(self.tray, x, y) {
+            return None;
+        }
+        let start = self.tray[0] + 5;
+        for k in 0..GROUPS[g].len() {
+            let ix = start + k as i32 * BTN_W;
+            if x >= ix && x < ix + BTN_W {
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    /* ---------- 调色板（21 色 7×3） ---------- */
+
+    fn sw_layout(&mut self) {
+        self.sw = [0; 4];
+        if !self.palette {
+            return;
+        }
+        let Some(bar) = self.chip_rect(Chip::Color) else {
+            return;
+        };
+        let rows = (SWATCHES.len() as i32 + SW_COLS - 1) / SW_COLS;
+        let w = SW_PAD * 2 + SW_COLS * SW_CELL + (SW_COLS - 1) * SW_GAP;
+        let h = SW_PAD * 2 + rows * SW_CELL + (rows - 1) * SW_GAP;
+        let cx = bar[0] + bar[2] / 2;
+        let x = (cx - w / 2).max(4).min((self.w - w - 4).max(4));
+        let below = self.bar[1] < h + 42;
+        let y = if below {
+            self.bar[1] + self.bar[3] + 30
+        } else {
+            self.bar[1] - h - 30
+        };
+        self.sw = [x, y, w, h];
+    }
+
+    fn sw_hit(&self, x: i32, y: i32) -> Option<u32> {
+        if !self.palette || !inside(self.sw, x, y) {
+            return None;
+        }
+        let lx = x - self.sw[0] - SW_PAD;
+        let ly = y - self.sw[1] - SW_PAD;
+        if lx < 0 || ly < 0 {
+            return None;
+        }
+        let col = lx / (SW_CELL + SW_GAP);
+        let row = ly / (SW_CELL + SW_GAP);
+        /* 落在间隙里不算命中 */
+        if lx % (SW_CELL + SW_GAP) >= SW_CELL || ly % (SW_CELL + SW_GAP) >= SW_CELL {
+            return None;
+        }
+        let idx = row * SW_COLS + col;
+        SWATCHES.get(idx as usize).copied()
+    }
+
+    /* ---------- 悬停状态机 ----------
+       `hover_due` 是**唯一**的打开/收起来源：鼠标移动只改截止时间，WM_TIMER 到点落地。
+       这样快速横穿不会弹一串托盘（<110ms 的悬停根本到不了截止时间）。 */
+
     fn update_bar_hover(&mut self, x: i32, y: i32) -> bool {
         if !self.has_sel() {
-            return self.hover.take().is_some();
+            return self.hover.take().is_some()
+                || self.open.take().is_some()
+                || self.hover_due.take().is_some()
+                || self.tray_hover.take().is_some();
         }
+        let now = std::time::Instant::now();
+        let mut changed = false;
+
+        /* ① 托盘里：保持展开，只换条目高亮（同时取消收起计时） */
+        if self.open.is_some() {
+            if let Some(t) = self.tray_hit(x, y) {
+                if self.tray_hover != Some(t) {
+                    self.tray_hover = Some(t);
+                    changed = true;
+                }
+                if self.hover.take().is_some() || self.hover_due.take().is_some() {
+                    changed = true;
+                }
+                return changed;
+            }
+            /* ② 指针还停在组按钮上：也算"在组里" */
+            if let Some(i) = self.bar_hit(x, y) {
+                if Some(i) == self.open {
+                    if self.tray_hover.take().is_some() || self.hover_due.take().is_some() {
+                        changed = true;
+                    }
+                    return changed;
+                }
+            }
+        }
+
         let hit = self
             .bar_hit(x, y)
             .filter(|i| !matches!(self.bar_item(*i), BarKind::Sep));
         if self.hover != hit {
             self.hover = hit;
-            return true;
+            changed = true;
         }
-        false
+
+        if let Some(i) = hit {
+            if self.group_of(i).is_some() {
+                /* 组按钮：110ms 后展开（已经开着就不动） */
+                if self.open != Some(i) {
+                    /* 已经为同一个组在倒计时：**不要重置**。鼠标在按钮上轻微抖动时
+                       每个 mousemove 都重置的话，110ms 永远到不了，托盘就"展不开"。 */
+                    let pending_same =
+                        matches!(self.hover_due, Some((_, true, j)) if j == i);
+                    if !pending_same {
+                        self.hover_due =
+                            Some((now + std::time::Duration::from_millis(OPEN_MS), true, i));
+                        changed = true;
+                    }
+                } else {
+                    self.hover_due = None;
+                }
+                return changed;
+            }
+        }
+
+        /* ③ 其他任何位置：190ms 后收起 */
+        if self.open.is_some() || self.hover_due.is_some() {
+            self.hover_due = Some((now + std::time::Duration::from_millis(CLOSE_MS), false, 0));
+            changed = true;
+        }
+        changed
+    }
+
+    /// WM_TIMER 到点：把 `hover_due` 落地。返回是否需要重绘。
+    fn tick(&mut self) -> bool {
+        let Some((due, open, idx)) = self.hover_due else {
+            return false;
+        };
+        if std::time::Instant::now() < due {
+            return false;
+        }
+        self.hover_due = None;
+        if open {
+            self.open = Some(idx);
+            self.palette = false;
+        } else {
+            self.open = None;
+            self.tray_hover = None;
+        }
+        true
     }
 
     /* ---------- 像素原语 ----------
@@ -1353,6 +2111,25 @@ impl Ctx {
         self.pline_aa(x1, y0, x1, y1, w, c);
     }
 
+    /// 半透明抗锯齿线段（图标的 `.55` 部件用）
+    fn pline_aa_a(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, w: f32, c: u32, a: f32) {
+        let r = (w * 0.5).max(0.5);
+        let pad = r + 1.0;
+        let minx = (x0.min(x1) - pad).floor() as i32;
+        let maxx = (x0.max(x1) + pad).ceil() as i32;
+        let miny = (y0.min(y1) - pad).floor() as i32;
+        let maxy = (y0.max(y1) + pad).ceil() as i32;
+        for y in miny..=maxy {
+            for x in minx..=maxx {
+                let d = dist_seg(x as f32 + 0.5, y as f32 + 0.5, x0, y0, x1, y1);
+                let cov = r + 0.5 - d;
+                if cov > 0.0 {
+                    self.put_cov(x, y, c, cov * a);
+                }
+            }
+        }
+    }
+
     /// 实心圆
     fn pdisc_aa(&mut self, cx: f32, cy: f32, rad: f32, c: u32) {
         let pad = rad + 1.0;
@@ -1425,6 +2202,72 @@ impl Ctx {
         }
     }
 
+    /// 实心多边形（可带整体透明度，给图标的半透明部件用）
+    fn ppoly_aa_a(&mut self, pts: &[(f32, f32)], c: u32, alpha: f32) {
+        if pts.len() < 3 || alpha <= 0.002 {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (x, y) in pts {
+            x0 = x0.min(*x);
+            y0 = y0.min(*y);
+            x1 = x1.max(*x);
+            y1 = y1.max(*y);
+        }
+        for y in (y0 - 1.0).floor() as i32..=(y1 + 1.0).ceil() as i32 {
+            for x in (x0 - 1.0).floor() as i32..=(x1 + 1.0).ceil() as i32 {
+                let mut hits = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let px = x as f32 + (sx as f32 + 0.5) / 4.0;
+                        let py = y as f32 + (sy as f32 + 0.5) / 4.0;
+                        if point_in_poly(px, py, pts) {
+                            hits += 1;
+                        }
+                    }
+                }
+                if hits > 0 {
+                    self.put_cov(x, y, c, hits as f32 / 16.0 * alpha);
+                }
+            }
+        }
+    }
+
+    /// 虚线描边（`blur` 图标的外环：dash 1.6 / gap 3.2，viewBox 单位）
+    fn pstroke_dashed(&mut self, pts: &[(f32, f32)], w: f32, c: u32, dash: f32, gap: f32) {
+        if pts.len() < 2 {
+            return;
+        }
+        let period = (dash + gap).max(0.01);
+        let mut acc = 0.0f32; // 沿折线累计的弧长
+        for seg in pts.windows(2) {
+            let (ax, ay) = seg[0];
+            let (bx, by) = seg[1];
+            let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+            if len < 1e-5 {
+                continue;
+            }
+            let step = 1.0f32; // 每 1 单位再判一次虚实
+            let n = (len / step).ceil() as i32;
+            for k in 0..n {
+                let t0 = k as f32 / n as f32;
+                let t1 = (k + 1) as f32 / n as f32;
+                let phase = (acc + len * t0) % period;
+                if phase < dash {
+                    self.pline_aa(
+                        ax + (bx - ax) * t0,
+                        ay + (by - ay) * t0,
+                        ax + (bx - ax) * t1,
+                        ay + (by - ay) * t1,
+                        w,
+                        c,
+                    );
+                }
+            }
+            acc += len;
+        }
+    }
+
     /// 圆角矩形填充。
     ///
     /// 为什么自己算而不是画"四个圆 + 两个矩形"拼：拼接会在圆与矩形的接缝处留下
@@ -1433,6 +2276,35 @@ impl Ctx {
     /// 没有抗锯齿：半径只有 8px、屏幕上是 1px 台阶，肉眼看不出来，但省掉一张 mask。
     fn pfill_round(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, c: u32) {
         self.pfill_round_a(x0, y0, x1, y1, r, c, 1.0);
+    }
+
+    /// 圆角矩形**描边**（1px 内描边 / 选中环）。
+    ///
+    /// 没有现成的"圆角环"原语：`pring_aa` 只画正圆，`pframe` 只画直角。
+    /// 这里把圆角矩形的轮廓按 4 段直线 + 4 段 1/4 圆弧采样成折线，逐段 `pline_aa_a`，
+    /// 好处是粗细和抗锯齿跟图标线条完全一致，不会出现"框比图标糙"的割裂感。
+    fn pstroke_round_a(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, c: u32, a: f32) {
+        let (fx0, fy0) = (x0 as f32 + 0.5, y0 as f32 + 0.5);
+        let (fx1, fy1) = (x1 as f32 - 0.5, y1 as f32 - 0.5);
+        let rf = (r as f32 - 0.5).max(0.0);
+        let mut pts: Vec<(f32, f32)> = Vec::with_capacity(40);
+        /* 四个角：右下 → 左下 → 左上 → 右上，顺时针采样 90° */
+        let corners = [
+            (fx1 - rf, fy1 - rf, 0.0_f32),
+            (fx0 + rf, fy1 - rf, 90.0),
+            (fx0 + rf, fy0 + rf, 180.0),
+            (fx1 - rf, fy0 + rf, 270.0),
+        ];
+        for (cx, cy, a0) in corners {
+            for k in 0..=6 {
+                let deg = a0 + 90.0 * (k as f32 / 6.0);
+                let rad = deg.to_radians();
+                pts.push((cx + rf * rad.cos(), cy + rf * rad.sin()));
+            }
+        }
+        for w in pts.windows(2) {
+            self.pline_aa_a(w[0].0, w[0].1, w[1].0, w[1].1, 1.0, c, a);
+        }
     }
 
     fn pfill_round_a(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, c: u32, a: f32) {
@@ -1518,6 +2390,25 @@ impl Ctx {
         }
     }
 
+    /// 实心椭圆（形状填充用）：逐行算 x 跨度再叠 20% 透明色。
+    /// 不用 GDI 的 Ellipse + 画刷：这块 layered DIB 上画刷状态会残留（见像素原语那段的说明）。
+    fn fill_ellipse(&mut self, cx: i32, cy: i32, rx: i32, ry: i32, c: u32, a: f32) {
+        if rx <= 0 || ry <= 0 {
+            return;
+        }
+        for dy in -ry..=ry {
+            let t = 1.0 - (dy as f32 / ry as f32).powi(2);
+            if t <= 0.0 {
+                continue;
+            }
+            let dx = (rx as f32 * t.sqrt()).round() as i32;
+            if dx <= 0 {
+                continue;
+            }
+            self.pfill_a(cx - dx, cy + dy, cx + dx, cy + dy + 1, c, a);
+        }
+    }
+
     /// 实心多边形（扫描线）
     fn ppoly(&mut self, pts: &[(i32, i32)], c: u32) {
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
@@ -1551,6 +2442,9 @@ impl Ctx {
     /// 主工具条。配色与层次见 `Palette` 那一段。
     fn draw_bar(&mut self) {
         let [x, y, w, h] = self.bar;
+        /* 分裂按钮两段共用一块底：hover 落在右段时左段也要跟着亮 */
+        self.more_hover = (0..self.bar_len())
+            .any(|i| self.hover == Some(i) && matches!(self.bar_item(i), BarKind::Act("copymore")));
         self.bar_plate(x, y, w, h, BAR_RADIUS);
 
         for i in 0..self.bar_len() {
@@ -1561,33 +2455,298 @@ impl Ctx {
             match k {
                 BarKind::Sep => {
                     let px = ix + iw / 2;
-                    self.pfill(px, y + 10, px + 1, y + h - 10, self.pal.sep);
+                    self.pfill(px, y + 12, px + 1, y + h - 12, self.pal.sep);
                 }
                 BarKind::Tool(t) => {
                     let active = t == self.tool;
                     self.bar_btn(ix, y, iw, h, active, hover);
-                    let ink = if active { 0xFFFFFF } else { self.pal.icon };
+                    let ink = if active { self.pal.accent } else { self.pal.icon };
                     self.icon_px(ix + iw / 2, y + h / 2, t, ink);
                 }
+                BarKind::Group(g) => {
+                    let active = Self::group_of_tool(self.tool) == Some(g);
+                    let opened = self.open == Some(i);
+                    self.bar_btn(ix, y, iw, h, active, hover || opened);
+                    let t = self.face[g];
+                    let ink = if active { self.pal.accent } else { self.pal.icon };
+                    self.icon_px(ix + iw / 2, y + h / 2, t, ink);
+                    /* 右下角 4px 三角 = "本组还有更多"；换过工具时变强调色 */
+                    let cx = ix + iw - 9;
+                    let cy = y + h - 12;
+                    let tri = if t != GROUP_DEFAULT[g] {
+                        self.pal.active
+                    } else if active {
+                        self.pal.accent
+                    } else {
+                        self.pal.icon
+                    };
+                    self.ppoly(&[(cx, cy + 4), (cx + 4, cy), (cx + 4, cy + 4)], tri);
+                }
+                BarKind::Chip(Chip::Color) => {
+                    self.bar_btn(ix, y, iw, h, false, hover || self.palette);
+                    let (cx, cy) = (ix + iw / 2, y + h / 2);
+                    self.pdisc_aa(cx as f32, cy as f32, 9.5, self.color);
+                    /* 白圈保证深色面板上也能看出圆点边界 */
+                    self.pring_aa(cx as f32, cy as f32, 9.5, 1.6, self.pal.icon);
+                }
+                BarKind::Chip(Chip::Width) => {
+                    self.bar_btn(ix, y, iw, h, false, hover);
+                    /* 原型 `widthGlyph`：24 网格里三条线在 6.2 / 12 / 17.8，
+                       线宽 = clamp(1.1 + w*0.26, 1.3, 3.9)，整组按 20px 图标框缩放。 */
+                    let sc = 20.0 / 24.0;
+                    let (cx, cy) = (ix as f32 + iw as f32 / 2.0, y as f32 + h as f32 / 2.0);
+                    let lw = (1.1 + self.width as f32 * 0.26).clamp(1.3, 3.9) * sc;
+                    for k in 0..3 {
+                        let ly = cy + (6.2 + k as f32 * 5.8 - 12.0) * sc;
+                        self.pline_aa(cx - 8.0 * sc, ly, cx + 8.0 * sc, ly, lw.max(1.0), self.pal.icon);
+                    }
+                }
+                BarKind::Chip(Chip::Fill) => {
+                    self.bar_btn(ix, y, iw, h, self.fill, hover);
+                    let ink = if self.fill { self.pal.accent } else { self.pal.icon };
+                    self.draw_icon(ix as f32 + iw as f32 / 2.0, y as f32 + h as f32 / 2.0, 20.0, "fill", ink);
+                }
                 BarKind::Act(a) => {
-                    if hover {
-                        let bg = if a == "cancel" {
+                    /* 复制是唯一实心主按钮（设计稿 §6.5）：accent 底 + 白图标。
+                       它和右段 `copymore` 是**一颗分裂按钮**：底要连成一片，
+                       两段之间只留一条 1px 白线（28%），中间不能有圆角缝。 */
+                    if a == "copy" {
+                        /* 原型 `.split`：高 36（在 56 的条里居中）、圆角 10、底 accent-solid。
+                           左段 67 = 11 左内距 + 16 图标 + 6 间距 + 24 文本 + 10 右内距；右段 22。 */
+                        let more_w = bar_w(BarKind::Act("copymore"));
+                        let pill = iw + more_w;
+                        let bh = 36.min(h);
+                        let y0 = y + (h - bh) / 2;
+                        let y1 = y0 + bh;
+                        self.pfill_round(ix, y0, ix + pill, y1, SPLIT_RADIUS, self.pal.active);
+                        if hover || self.more_hover {
+                            self.pfill_round_a(ix, y0, ix + pill, y1, SPLIT_RADIUS, 0xFFFFFF, 0.14);
+                        }
+                        self.draw_icon(ix as f32 + 19.0, (y0 + y1) as f32 / 2.0, 16.0, "copy", 0xFFFFFF);
+                        unsafe {
+                            let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+                            let f = CreateFontW(-12, 0, 0, 0, 600, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+                            let oldf = SelectObject(self.mem, f);
+                            SetBkMode(self.mem, TRANSPARENT);
+                            SetTextColor(self.mem, 0xFFFFFF);
+                            let ls: Vec<u16> = "复制".encode_utf16().collect();
+                            let mut rc = RectPos {
+                                left: ix + 33,
+                                top: y0,
+                                right: ix + iw - 2,
+                                bottom: y1,
+                            };
+                            /* 0x20 = DT_SINGLELINE，0x4 = DT_VCENTER */
+                            DrawTextW(self.mem, ls.as_ptr(), ls.len() as i32, &mut rc, 0x20 | 0x4);
+                            SelectObject(self.mem, oldf);
+                            DeleteObject(f);
+                        }
+                        /* 分隔线 = 原型右段的 `border-left`，**通高**（不是内缩 20px） */
+                        let sx = ix + iw;
+                        self.pfill_a(sx, y0, sx + 1, y1, 0xFFFFFF, 0.28);
+                        self.draw_icon(
+                            (sx + more_w / 2) as f32,
+                            (y0 + y1) as f32 / 2.0,
+                            12.0,
+                            "chevron",
+                            0xFFFFFF,
+                        );
+                    } else if a == "copymore" {
+                        /* 底与图标已由左段一并画完，这里什么都不做（命中仍走这一格） */
+                    } else {
+                        if hover {
+                            let bhh = 36.min(h - 8).max(24);
+                            let yy0 = y + (h - bhh) / 2;
+                            if a == "cancel" {
+                                /* 原型 `.close:hover`：danger 14% 底 + danger 墨色，常态是普通墨色 */
+                                self.pfill_round_a(
+                                    ix + 2,
+                                    yy0,
+                                    ix + iw - 2,
+                                    yy0 + bhh,
+                                    BTN_RADIUS,
+                                    self.pal.danger,
+                                    0.14,
+                                );
+                            } else {
+                                self.pfill_round(ix + 2, yy0, ix + iw - 2, yy0 + bhh, BTN_RADIUS, self.pal.hover);
+                            }
+                        }
+                        let ink = if a == "cancel" && hover {
                             self.pal.danger
                         } else {
-                            self.pal.hover
+                            self.pal.icon
                         };
-                        self.pfill_round(ix + 2, y + 3, ix + iw - 2, y + h - 3, BTN_RADIUS, bg);
+                        self.act_px(ix + iw / 2, y + h / 2, a, ink);
                     }
-                    let ink = match (a, hover) {
-                        ("cancel", true) => 0xFFFFFF,
-                        ("cancel", false) => self.pal.danger,
-                        _ => self.pal.icon,
-                    };
-                    self.act_px(ix + iw / 2, y + h / 2, a, ink);
                 }
             }
         }
         /* 图标是像素直绘（alpha 由 put 写满），但主条上还有分隔线等元素；一并固化更省心 */
+        self.solidify([x, y, w, h]);
+    }
+
+    /// 悬停展开的托盘：5px 内距 + 36px 条目，条目数与组一致。
+    fn draw_tray(&mut self) {
+        if self.open.is_none() || self.tray[2] <= 0 {
+            return;
+        }
+        let [tx, ty, tw, th] = self.tray;
+        self.bar_plate(tx, ty, tw, th, 12);
+        /* 原型 `.tray::after`：底部居中的 8px 指示三角（指回所属分组） */
+        let ax = tx + tw / 2;
+        let (ay, ac) = if ty > self.bar[1] {
+            (ty, true) /* 弹在下方 → 三角朝上 */
+        } else {
+            (ty + th, false)
+        };
+        let edge = self.pal.edge;
+        if ac {
+            self.ppoly(&[(ax - 5, ay - 1), (ax + 5, ay - 1), (ax, ay + 5)], edge);
+            self.ppoly(&[(ax - 4, ay), (ax + 4, ay), (ax, ay + 4)], self.pal.bg);
+        } else {
+            self.ppoly(&[(ax - 5, ay + 1), (ax + 5, ay + 1), (ax, ay - 5)], edge);
+            self.ppoly(&[(ax - 4, ay), (ax + 4, ay), (ax, ay - 4)], self.pal.bg);
+        }
+        let Some(g) = self.open.and_then(|i| self.group_of(i)) else {
+            return;
+        };
+        for (i, t) in GROUPS[g].iter().enumerate() {
+            let ix = tx + 5 + i as i32 * (BTN_W + 2);
+            let active = *t == self.tool;
+            let hover = self.tray_hover == Some(i);
+            self.bar_btn(ix, ty, BTN_W, th, active, hover);
+            let ink = if active { 0xFFFFFF } else { self.pal.icon };
+            self.icon_px(ix + BTN_W / 2, ty + th / 2, *t, ink);
+        }
+        self.solidify([tx, ty, tw, th]);
+    }
+
+    /// 调色板：21 色 7×3。选中态用 accent 描边（色块本身有颜色，填充会吃掉颜色）。
+    /// 下拉位置：右对齐工具条右端、条下 8px（绘制与命中都读 `self.menu`）
+    fn menu_layout(&mut self) {
+        if !self.menu_open || !self.has_sel() {
+            self.menu = [0; 4];
+            return;
+        }
+        let [_, by, _, bh] = self.bar;
+        let w = 186;
+        let n = MENU_ITEMS.len() as i32;
+        let h = 10 + n * MENU_ITEM_H + (n - 1) * MENU_GAP;
+        /* `right:0` 相对分裂按钮：找右段定位 */
+        let mut right = self.bar[0] + self.bar[2];
+        for i in 0..self.bar_len() {
+            if matches!(self.bar_item(i), BarKind::Act("copymore")) {
+                right = self.bar_item_x(i) + bar_w(self.bar_item(i));
+            }
+        }
+        self.menu = [(right - w).max(4), by + bh + 8, w, h];
+    }
+
+    fn menu_hit(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.menu_open || !inside(self.menu, x, y) {
+            return None;
+        }
+        let step = MENU_ITEM_H + MENU_GAP;
+        let rel = y - self.menu[1] - 5;
+        if rel < 0 {
+            return None;
+        }
+        /* 落在那 1px 缝里不算命中，避免"点缝隙误触发" */
+        if rel % step >= MENU_ITEM_H {
+            return None;
+        }
+        let i = rel / step;
+        if (i as usize) < MENU_ITEMS.len() {
+            Some(i as usize)
+        } else {
+            None
+        }
+    }
+
+    fn draw_menu(&mut self) {
+        if !self.menu_open || !self.has_sel() || self.menu[2] <= 0 {
+            return;
+        }
+        let [x, y, w, h] = self.menu;
+        self.bar_plate(x, y, w, h, 12);
+        let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+        for (i, (label, key, _, icon)) in MENU_ITEMS.iter().enumerate() {
+            let iy = y + 5 + i as i32 * (MENU_ITEM_H + MENU_GAP);
+            /* 原型 `.menu-item`：左内距 9、图标 16、图标与文字间距 9 */
+            self.draw_icon(
+                x as f32 + 17.0,
+                iy as f32 + MENU_ITEM_H as f32 / 2.0,
+                16.0,
+                icon,
+                self.pal.icon,
+            );
+            unsafe {
+                let f = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+                let oldf = SelectObject(self.mem, f);
+                SetBkMode(self.mem, TRANSPARENT);
+                let ls: Vec<u16> = label.encode_utf16().collect();
+                SetTextColor(self.mem, rgb(self.pal.icon));
+                let mut rc = RectPos {
+                    left: x + 34,
+                    top: iy,
+                    right: x + w - 56,
+                    bottom: iy + MENU_ITEM_H,
+                };
+                /* 0x20 = DT_SINGLELINE，0x4 = DT_VCENTER */
+                DrawTextW(self.mem, ls.as_ptr(), ls.len() as i32, &mut rc, 0x20 | 0x4);
+                /* 右侧键位：10px + 淡底胶囊（原型 `.menu-item kbd`） */
+                let ks: Vec<u16> = key.encode_utf16().collect();
+                let (kw, _) = self.text_metrics(&ks);
+                let kx = x + w - 9 - (kw + 10);
+                self.pfill_round(kx, iy + 9, kx + kw + 10, iy + 23, 4, self.pal.key_bg);
+                SetTextColor(self.mem, rgb(self.pal.text3));
+                let mut rk = RectPos {
+                    left: kx + 5,
+                    top: iy + 9,
+                    right: kx + kw + 5,
+                    bottom: iy + 23,
+                };
+                DrawTextW(self.mem, ks.as_ptr(), ks.len() as i32, &mut rk, 0x20 | 0x4);
+                SelectObject(self.mem, oldf);
+                DeleteObject(f);
+            }
+        }
+        self.solidify([x, y, w, h]);
+    }
+
+    fn draw_palette(&mut self) {
+        if !self.palette || self.sw[2] <= 0 {
+            return;
+        }
+        let [x, y, w, h] = self.sw;
+        self.bar_plate(x, y, w, h, 10);
+        for (i, c) in SWATCHES.iter().enumerate() {
+            let col = i as i32 % SW_COLS;
+            let row = i as i32 / SW_COLS;
+            let sx = x + SW_PAD + col * (SW_CELL + SW_GAP);
+            let sy = y + SW_PAD + row * (SW_CELL + SW_GAP);
+            if *c == self.color {
+                self.pfill_round(
+                    sx - 3,
+                    sy - 3,
+                    sx + SW_CELL + 3,
+                    sy + SW_CELL + 3,
+                    7,
+                    self.pal.active,
+                );
+            }
+            /* 浅色块必须有描边，否则落在白面板上等于隐形 */
+            self.pfill_round(
+                sx - 1,
+                sy - 1,
+                sx + SW_CELL + 1,
+                sy + SW_CELL + 1,
+                6,
+                self.pal.edge,
+            );
+            self.pfill_round(sx, sy, sx + SW_CELL, sy + SW_CELL, 5, *c);
+        }
         self.solidify([x, y, w, h]);
     }
 
@@ -1626,113 +2785,19 @@ impl Ctx {
 
     /// 一个工具按钮的底：选中 / 悬停
     fn bar_btn(&mut self, ix: i32, y: i32, iw: i32, h: i32, active: bool, hover: bool) {
-        let (x0, y0, x1, y1) = (ix + 2, y + 3, ix + iw - 2, y + h - 3);
+        /* 高亮是**居中 36px**（设计稿 §6.1），不是"贴着条上下各 3px"：
+           条高 56 时后者会拉成一条 50px 的大色块，看着像整格被选中。 */
+        let bh = 36.min(h - 8).max(24);
+        let y0 = y + (h - bh) / 2;
+        let (x0, x1, y1) = (ix + 2, ix + iw - 2, y0 + bh);
         if active {
-            self.pfill_round(x0, y0, x1, y1, BTN_RADIUS, self.pal.active);
+            /* 原型 `.tool.is-active`：accent 16% 底 + 34% 1px 内环 + accent 墨色，
+               不是"实心蓝块"。实心蓝只属于分裂按钮。 */
+            self.pfill_round_a(x0, y0, x1, y1, BTN_RADIUS, self.pal.accent, 0.16);
+            self.pstroke_round_a(x0, y0, x1, y1, BTN_RADIUS, self.pal.accent, 0.34);
         } else if hover {
             self.pfill_round(x0, y0, x1, y1, BTN_RADIUS, self.pal.hover);
         }
-    }
-
-    /// 选项行上的小字（形态按钮用）。中文只能走 GDI，画完由 `draw_opt` 末尾的
-    /// `solidify` 统一把 alpha 压满 —— 否则真机上字会透底（见 `solidify` 的注释）。
-    fn small_text(&mut self, s: &str, cx: i32, cy: i32, ink: u32) {
-        let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
-        let wide: Vec<u16> = s.encode_utf16().collect();
-        unsafe {
-            let f = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
-            let old = SelectObject(self.mem, f);
-            SetBkMode(self.mem, TRANSPARENT);
-            SetTextColor(self.mem, rgb(ink));
-            let mut rc = RectPos {
-                left: cx - 34,
-                top: cy - 10,
-                right: cx + 34,
-                bottom: cy + 11,
-            };
-            DrawTextW(
-                self.mem,
-                wide.as_ptr(),
-                wide.len() as i32,
-                &mut rc,
-                DT_CENTER | DT_SINGLELINE,
-            );
-            SelectObject(self.mem, old);
-            DeleteObject(f);
-        }
-    }
-
-    /// 第二行：当前色大方块 + 10 个色块 + 四档粗细（照 Snipaste 的选项行）。
-    ///
-    /// 选中态用 accent 描边而不是填充：色块本身有颜色，填充会把颜色吃掉。
-    /// 白色块必须描一圈边，否则在浅色主题的白面板上等于隐形。
-    fn draw_opt(&mut self) {
-        if !self.has_sel() {
-            return;
-        }
-        let [ox, oy, ow, oh] = self.opt;
-        self.bar_plate(ox, oy, ow, oh, BAR_RADIUS);
-
-        /* 遮罩类工具：开头先给「矩形 / 画笔」两个形态按钮（马赛克、高斯模糊共用）。
-           没有这两个按钮时，切换形态只能"再点一次同一个工具按钮"——owner 2026-11-19
-           的反馈就是"不知道还能涂"，等于这个能力不存在。 */
-        let mut lead = 8;
-        if self.is_mask_tool() {
-            let ty = oy + (oh - 24) / 2;
-            for (i, name) in ["矩形", "画笔"].iter().enumerate() {
-                let sx = ox + 8 + i as i32 * MODE_W;
-                let on = self.brush == (i == 1);
-                if on {
-                    self.pfill_round(sx, ty, sx + MODE_W - 6, ty + 24, BTN_RADIUS, self.pal.active);
-                } else {
-                    self.pfill_round(sx, ty, sx + MODE_W - 6, ty + 24, BTN_RADIUS, self.pal.hover);
-                }
-                let ink = if on { 0xFFFFFF } else { self.pal.icon };
-                self.small_text(name, sx + (MODE_W - 6) / 2, ty + 12, ink);
-            }
-            lead += MODE_W * 2 + SEP_W;
-            /* 形态段后面拉一条分隔线，和右边的颜色区隔开 */
-            let sx = ox + 8 + MODE_W * 2 + SEP_W / 2;
-            self.pfill(sx, oy + 10, sx + 1, oy + oh - 10, self.pal.sep);
-        }
-
-        /* 当前色：大方块 */
-        let (bx, by) = (ox + lead, oy + (oh - 26) / 2);
-        self.pfill_round(bx, by, bx + 26, by + 26, 4, self.pal.edge_out);
-        self.pfill_round(bx + 1, by + 1, bx + 25, by + 25, 3, self.color);
-
-        /* 10 个色块 */
-        let mut cx = ox + lead + 26 + 8;
-        for c in SWATCHES {
-            let ty = oy + (oh - 20) / 2;
-            let sel = c == self.color;
-            if sel {
-                self.pfill_round(cx - 2, ty - 2, cx + 22, ty + 22, 5, self.pal.active);
-            } else {
-                /* 非选中也给一圈淡边：白色块靠它才在浅色面板上看得见 */
-                self.pfill_round(cx - 1, ty - 1, cx + 21, ty + 21, 4, self.pal.edge);
-            }
-            self.pfill_round(cx, ty, cx + 20, ty + 20, 3, c);
-            cx += 24;
-        }
-
-        /* 分隔 + 四档粗细：圆点直径就是线宽本身，选中时底变 accent */
-        cx += SEP_W;
-        let sx = cx - SEP_W / 2;
-        self.pfill(sx, oy + 10, sx + 1, oy + oh - 10, self.pal.sep);
-        for (width_rank, w) in WIDTHS.iter().enumerate() {
-            let sel = *w == self.width;
-            if sel {
-                self.pfill_round(cx + 1, oy + 3, cx + 29, oy + oh - 3, BTN_RADIUS, self.pal.active);
-            }
-            let ink = if sel { 0xFFFFFF } else { self.pal.icon };
-            /* 按**档位**递增（2/3/4/5）而不是按线宽等比：等比时 1px 和 3px 都落到 2px，
-               四档看起来一模一样，等于选不了。 */
-            let r = 2.0 + width_rank as f32;
-            self.pdisc_aa((cx + 15) as f32, (oy + oh / 2) as f32, r, ink);
-            cx += 30;
-        }
-        self.solidify([ox, oy, ow, oh]);
     }
 
     /// 12 个工具图标 —— 24px 网格、**图标框 22、线宽 1.8**、全部抗锯齿。
@@ -1740,140 +2805,87 @@ impl Ctx {
     /// 造型是 0.3.x 甲方认可的那一套（第一版 ±9px 硬像素"画得太丑"后重画的），
     /// 这一版只把图标框从 20 提到 22、线宽从 1.5 提到 1.8 —— 所以下面这些坐标
     /// 是**原值等比放大 1.1 后的结果**，不是重新设计。别按"看着更顺眼"再改形状。
-    fn icon_px(&mut self, cx: i32, cy: i32, t: Tool, ink: u32) {
-        let (x, y) = (cx as f32, cy as f32);
-        let lw = 1.8;
-        match t {
-            Tool::Select => {
-                /* 经典箭头光标。第一版画成实心大三角，在 16px 里糊成一坨 */
-                let pts = [
-                    (x - 4.95, y - 8.25),
-                    (x - 4.95, y + 5.5),
-                    (x - 1.76, y + 2.42),
-                    (x + 0.66, y + 8.25),
-                    (x + 3.52, y + 6.93),
-                    (x + 1.1, y + 1.43),
-                    (x + 5.28, y + 1.43),
-                ];
-                self.ppoly_aa(&pts, ink);
-            }
-            Tool::Rect => self.pframe_aa(x - 8.25, y - 6.6, x + 8.25, y + 6.6, lw, ink),
-            Tool::Ellipse => self.pring_aa_xy_a(x, y, 8.25, 6.6, lw, ink, 1.0),
-            Tool::Line => self.pline_aa(x - 7.15, y + 6.05, x + 7.15, y - 6.05, lw, ink),
-            Tool::Arrow => {
-                self.pline_aa(x - 7.15, y + 6.05, x + 4.18, y - 5.06, lw, ink);
-                self.ppoly_aa(
-                    &[(x + 8.25, y - 8.25), (x + 0.66, y - 6.82), (x + 6.82, y - 0.66)],
-                    ink,
-                );
-            }
-            Tool::Pen => {
-                /* 实心细长铅笔（照 Snipaste）：本体是实心斜条 + 尖头 + 笔尾一道箍。
-                   上一版做成空心轮廓，22px 下像一支"挖空的笔"，owner 说看不出是铅笔。 */
-                self.pline_aa(x - 4.6, y + 4.6, x + 4.6, y - 4.6, 3.8, ink);
-                self.ppoly_aa(
-                    &[(x - 7.6, y + 7.6), (x - 4.4, y + 6.2), (x - 6.2, y + 4.4)],
-                    ink,
-                );
-                let bg = self.pal.bg;
-                self.pline_aa(x + 1.4, y - 4.2, x + 4.2, y - 1.4, 1.2, bg);
-            }
-            Tool::Marker => {
-                /* 荧光笔：细笔杆 + 宽笔头（Snipaste 的笔头是一块实心斜块） */
-                self.pline_aa(x - 4.4, y - 5.6, x + 1.8, y + 0.6, 3.0, ink);
-                self.ppoly_aa(
-                    &[(x - 6.6, y + 3.2), (x - 2.4, y - 1.0), (x + 0.4, y + 1.8), (x - 3.8, y + 6.0)],
-                    ink,
-                );
-            }
-            Tool::Mosaic => {
-                /* 2×2 棋盘方框（Snipaste 的造型：方框 + 对角两块实心） */
-                self.pframe_aa(x - 7.2, y - 7.2, x + 7.2, y + 7.2, lw, ink);
-                self.pfill(
-                    (x - 6.0) as i32,
-                    (y - 6.0) as i32,
-                    (x - 0.8) as i32,
-                    (y - 0.8) as i32,
-                    ink,
-                );
-                self.pfill(
-                    (x + 0.8) as i32,
-                    (y + 0.8) as i32,
-                    (x + 6.0) as i32,
-                    (y + 6.0) as i32,
-                    ink,
-                );
-            }
-            Tool::Blur => {
-                /* 失焦 = 实心核 + 两道渐隐环（第一版五个小圆点像散点） */
-                self.pdisc_aa(x, y, 2.64, ink);
-                self.pring_aa(x, y, 5.72, 1.32, ink);
-                self.pring_aa_xy_a(x, y, 8.36, 8.36, 1.1, ink, 0.45);
-            }
-            Tool::Number => {
-                self.pring_aa(x, y, 7.92, 1.65, ink);
-                self.pline_aa(x, y - 3.52, x, y + 3.96, 1.65, ink);
-                self.pline_aa(x - 1.98, y - 1.98, x, y - 3.74, 1.65, ink);
-            }
-            Tool::Text => {
-                self.pline_aa(x - 6.6, y - 6.6, x + 6.6, y - 6.6, 2.0, ink);
-                self.pline_aa(x, y - 6.6, x, y + 7.7, 2.0, ink);
-            }
-            Tool::Eraser => {
-                /* 实心斜块 + 一道"套箍"（照 Snipaste：橡皮是实心块，不是空心轮廓）。
-                   空心五边形在 22px 下会读成菱形/宝石，实心块才不会。 */
-                let blk = [
-                    (x - 7.2, y + 1.2),
-                    (x - 1.2, y - 4.8),
-                    (x + 6.6, y + 3.0),
-                    (x + 0.6, y + 9.0),
-                ];
-                self.ppoly_aa(&blk, ink);
-                let bg = self.pal.bg;
-                self.pline_aa(x - 3.7, y + 4.7, x + 2.3, y - 1.3, 1.4, bg);
+    /// 画一个参考版图标：`size` 是渲染边长（viewBox 24 等比缩放）。
+    /// stroke 1.6 是 viewBox 单位，缩放后约 1.33px（与原型 `index.html` 一致）。
+    fn draw_icon(&mut self, cx: f32, cy: f32, size: f32, name: &str, ink: u32) {
+        let parts = icon_parts(name);
+        if parts.is_empty() {
+            return;
+        }
+        let s = size / 24.0;
+        let ox = cx - size * 0.5;
+        let oy = cy - size * 0.5;
+        let w = 1.6 * s;
+        for (mode, alpha, d) in parts {
+            let polys = svg_polys(d);
+            for poly in &polys {
+                if poly.len() < 2 {
+                    continue;
+                }
+                let pts: Vec<(f32, f32)> = poly
+                    .iter()
+                    .map(|(x, y)| (ox + x * s, oy + y * s))
+                    .collect();
+                match mode {
+                    1 => self.ppoly_aa_a(&pts, ink, *alpha),
+                    2 => self.pstroke_dashed(&pts, w, ink, 1.6 * s, 3.2 * s),
+                    _ => {
+                        for seg in pts.windows(2) {
+                            if *alpha >= 0.999 {
+                                self.pline_aa(seg[0].0, seg[0].1, seg[1].0, seg[1].1, w, ink);
+                            } else {
+                                self.pline_aa_a(seg[0].0, seg[0].1, seg[1].0, seg[1].1, w, ink, *alpha);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
+    /// 工具图标 —— 直接映射到参考版的 icon id（`screenshot-toolbar-v2` §附录 A）
+    fn icon_px(&mut self, cx: i32, cy: i32, t: Tool, ink: u32) {
+        let name = match t {
+            Tool::Select => "select",
+            Tool::Rect => "rect",
+            Tool::Ellipse => "ellipse",
+            Tool::Line => "line",
+            Tool::Arrow => "arrow",
+            Tool::Pen => "pen",
+            Tool::Marker => "marker",
+            Tool::Mosaic => "mosaic",
+            Tool::Blur => "blur",
+            Tool::Text => "text",
+            Tool::Number => "badge",
+            /* 参考稿没有橡皮（它的"清除"是撤销）。功能保留，图标先借 `cross`，
+               等参考稿补 `eraser` 再换一行。 */
+            Tool::Eraser => "cross",
+            Tool::Callout => "callout",
+            Tool::Block => "block",
+            Tool::Sticker => "sticker",
+            Tool::Check => "check",
+            Tool::Cross => "cross",
+            Tool::Image => "image",
+        };
+        self.draw_icon(cx as f32, cy as f32, 20.0, name, ink);
+    }
+
     /// 6 个动作图标（同一套线宽 1.8 与抗锯齿，别跟工具图标两种画风）
+    /// 动作图标 —— 同样走参考版的图标表
     fn act_px(&mut self, cx: i32, cy: i32, a: &str, ink: u32) {
-        let (x, y) = (cx as f32, cy as f32);
-        match a {
-            "undo" | "redo" => {
-                let s = if a == "undo" { -1.0 } else { 1.0 };
-                let (hx, hy) = (x + 5.5 * s, y - 5.5);
-                self.pline_aa(x - 5.5 * s, hy, hx, hy, 1.8, ink);
-                self.pline_aa(hx, hy, hx, y + 2.2, 1.8, ink);
-                self.ppoly_aa(
-                    &[(hx + 3.08 * s, hy), (hx - 1.98 * s, hy - 2.64), (hx - 1.98 * s, hy + 2.64)],
-                    ink,
-                );
-            }
-            "cancel" => {
-                self.pline_aa(x - 6.6, y - 6.6, x + 6.6, y + 6.6, 1.8, ink);
-                self.pline_aa(x + 6.6, y - 6.6, x - 6.6, y + 6.6, 1.8, ink);
-            }
-            "pin" => {
-                /* 斜置图钉（照 Snipaste）：菱形图钉帽 + 斜杆 + 底部短线。
-                   上一版是圆帽 —— 22px 下圆形读起来像放大镜。 */
-                self.ppoly_aa(
-                    &[(x + 4.2, y - 6.6), (x + 6.6, y - 4.2), (x + 4.2, y - 1.8), (x + 1.8, y - 4.2)],
-                    ink,
-                );
-                self.pline_aa(x + 3.0, y - 3.0, x - 4.6, y + 4.6, 1.8, ink);
-                self.pline_aa(x - 6.4, y + 7.2, x - 3.4, y + 7.2, 1.8, ink);
-            }
-            "save" => {
-                self.pframe_aa(x - 7.7, y - 7.7, x + 7.7, y + 7.7, 1.8, ink);
-                self.pfill((x - 3.85) as i32, (y - 6.6) as i32, (x + 3.85) as i32, (y - 1.1) as i32, ink);
-                self.pfill((x - 5.5) as i32, (y + 1.65) as i32, (x + 5.5) as i32, (y + 6.6) as i32, ink);
-            }
-            _ => {
-                /* copy：两个错开的方框 */
-                self.pframe_aa(x - 8.25, y - 8.25, x + 1.65, y + 1.65, 1.8, ink);
-                self.pframe_aa(x - 1.65, y - 1.65, x + 8.25, y + 8.25, 1.8, ink);
-            }
-        }
+        let name = match a {
+            "undo" => "undo",
+            "redo" => "redo",
+            "cancel" => "close",
+            "pin" => "pin",
+            "save" => "save",
+            "copy" => "copy",
+            "ocr" => "ocr",
+            "share" => "share",
+            "copymore" => "chevron",
+            _ => "copy",
+        };
+        self.draw_icon(cx as f32, cy as f32, 20.0, name, ink);
     }
 
     /// 量一段文字的像素宽高（`DT_CALCRECT`）。中文只能靠 GDI 量 ——
@@ -1955,8 +2967,25 @@ impl Ctx {
         }
     }
 
-    /// 气泡：鼠标停在主条哪个按钮上就提示哪个（平铺之后不再有面板遮挡问题）
+    /// 气泡：托盘展开时只提示托盘里的条目（贴托盘上沿），否则提示主条上悬停的那一项。
     fn draw_bar_tip(&mut self) {
+        if let Some(i) = self.open {
+            if let Some(t) = self.tray_hover {
+                if let Some(g) = self.group_of(i) {
+                    let tool = GROUPS[g][t];
+                    let cx = self.tray[0] + 5 + t as i32 * BTN_W + BTN_W / 2;
+                    /* 托盘在工具条上方时气泡贴托盘上沿；托盘翻到下方时贴工具条上沿，
+                       否则气泡会压住托盘本身。 */
+                    let bottom = if self.tray[1] < self.bar[1] {
+                        self.tray[1]
+                    } else {
+                        self.bar[1]
+                    };
+                    self.draw_tip(BarKind::Tool(tool), cx, bottom);
+                }
+            }
+            return;
+        }
         if let Some(i) = self.hover {
             let cx = self.bar_item_x(i) + bar_w(self.bar_item(i)) / 2;
             self.draw_tip(self.bar_item(i), cx, self.bar[1]);
@@ -1975,7 +3004,9 @@ impl Ctx {
             self.pframe(cx - 4, cy - 4, cx + 5, cy + 5, 1, 0x1B4FE0);
         }
         // 尺寸标签（文字只能是 GDI：中文/字形没法自己点像素）
-        let label = format!("{} × {} px", w, h);
+        /* v2 的 HUD：宽高 + 屏幕坐标（等宽数字靠字体本身；缩放比拿不到——
+           覆盖层全程物理像素，DPI 只在 main.rs 那边有）。 */
+        let label = format!("{} × {}   x {}  y {}", w, h, self.ox + x, self.oy + y);
         let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
         let wide: Vec<u16> = label.encode_utf16().collect();
         unsafe {
@@ -1999,7 +3030,16 @@ impl Ctx {
             let tw = (m.right - m.left).max(10);
             let th = (m.bottom - m.top).max(12);
             let lx = x;
-            let ly = if y > th + 12 { y - th - 8 } else { y + 4 };
+            /* 工具条翻到选区**上方**时，标签原来的位置会被它压住（bar 后画），
+               这种情况把标签挪进选区内侧顶部。 */
+            let bar_above = self.has_sel() && self.bar[1] + self.bar[3] <= y + 1;
+            let ly = if bar_above {
+                y + 6
+            } else if y > th + 12 {
+                y - th - 8
+            } else {
+                y + 4
+            };
             self.pfill(lx, ly, lx + tw + 10, ly + th + 6, 0x1A1A1A);
             SetTextColor(self.mem, 0xFFFFFF);
             let mut rc = RectPos {
@@ -2058,7 +3098,9 @@ impl Ctx {
 
     fn render(&mut self) {
         self.bar_layout();
-        self.opt_layout();
+        self.tray_layout();
+        self.menu_layout();
+        self.sw_layout();
         self.fill_base();
         self.draw_ops();
         /* 正在拖的那一笔：先 take 出来画（draw_op 要 &mut self，而 Op 在 self 里会冲突），
@@ -2073,8 +3115,9 @@ impl Ctx {
            中间，既挡住内容、又没有任何可用动作。框选之后才贴到选区下方。 */
         if self.has_sel() {
             self.draw_bar();
-            /* 选项行在主条下方，先画条再画它（两者不重叠，顺序只为读起来顺） */
-            self.draw_opt();
+            self.draw_tray();
+            self.draw_menu();
+            self.draw_palette();
             self.draw_bar_tip();
         }
         self.draw_keys();
@@ -2094,11 +3137,12 @@ impl Ctx {
         const PAD: i32 = 12;
         const CAP_H: i32 = 18;
 
-        let rows: [(&[&str], &str, &str); 5] = [
-            (&["Ctrl", "A"], "选中整屏", ""),
-            (&["↑", "↓", "←", "→"], "微调选区（按住 Shift 改大小）", ""),
-            (&["Ctrl", "C"], "复制到剪贴板", ""),
-            (&["Ctrl", "S"], "保存到截图库", "Ctrl+Shift+S 另存为…"),
+        let rows: [(&[&str], &str, &str); 6] = [
+            (&["悬停"], "组按钮展开更多工具", ""),
+            (&["滚轮"], "线条粗细（Shift 4px）", "[ ] 也能调"),
+            (&["F"], "形状填充", ""),
+            (&["Ctrl", "A"], "选中整屏", "↑↓←→ 微调"),
+            (&["Ctrl", "C"], "复制到剪贴板", "Ctrl+S 存到截图库"),
             (&["Esc"], "取消", "中键 贴图　　Ctrl+Z 撤销"),
         ];
         let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
@@ -2361,29 +3405,96 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
             c.commit_text();
             c.render();
         }
-        /* 第二行选项条先处理：它在主条下方、不属于选区。必须排在选区判定之前，
-           否则点色块会落成"在选区里落笔"，画出一条莫名其妙的标注。 */
-        if let Some(pick) = c.opt_hit(x, y) {
-            match pick {
-                OptPick::Color(c2) => c.color = c2,
-                OptPick::Width(w) => c.width = w,
-                OptPick::Brush(b) => c.brush = b,
+        /* ① 调色板：它是一块浮层，最优先命中。
+           点在面板内距/间隙上要"吃掉"，否则会顺手在选区里画一笔。 */
+        if c.palette {
+            if let Some(col) = c.sw_hit(x, y) {
+                c.color = col;
+                c.palette = false;
+                c.render();
+                return;
             }
+            if inside(c.sw, x, y) {
+                return;
+            }
+            /* 点在外面：**这里不急着关**。点的如果是颜色胶囊本身，下面 bar 分支会
+               toggle 成关闭；点的是画布，则由末尾"点到别处"统一收。否则会出现
+               "点胶囊想关、关了又立刻被 toggle 开"的抖动。 */
+        }
+        /* ② 托盘条目 */
+        if let Some(t) = c.tray_hit(x, y) {
+            let g = c.open.and_then(|i| c.group_of(i)).unwrap_or(0);
+            let tool = GROUPS[g][t];
+            /* 遮罩类有两个形态：再选一次同一个 = 切「矩形 / 画笔」（老手势保留） */
+            if matches!(tool, Tool::Mosaic | Tool::Blur) && c.tool == tool {
+                c.brush = !c.brush;
+            } else {
+                c.tool = tool;
+            }
+            c.face[g] = tool;
+            c.open = None;
+            c.tray_hover = None;
+            c.hover_due = None;
             c.render();
             return;
         }
-        // 主条（顺序见 BAR：选择…橡皮 | 撤销 重做 | 复制 贴图 保存 | 取消）
+        /* 下拉菜单：命中条目就交付；点在菜单外则收起（不吞这一下，继续往下走） */
+        if let Some(i) = c.menu_hit(x, y) {
+            let act = MENU_ITEMS[i].2;
+            c.menu_open = false;
+            deliver_to(c, act);
+            c.render();
+            if c.done.is_some() {
+                PostQuitMessage(0);
+            }
+            return;
+        }
+        if c.menu_open {
+            c.menu_open = false;
+            c.render();
+        }
+        // 主条：选择 | 5 组 | 颜色 粗细 填充 | 撤销 重做 | [复制|▾] | 取消
         if let Some(i) = c.bar_hit(x, y) {
             match c.bar_item(i) {
                 BarKind::Sep => {}
                 BarKind::Tool(t) => {
                     /* 遮罩类（马赛克 / 高斯模糊）有两个形态：拖矩形 / 当画笔涂。
-                       再点一次按钮切换（老手势保留），更直观的入口是第二行的形态按钮。 */
+                       再点一次同组工具切换（老手势保留）。 */
                     if matches!(t, Tool::Mosaic | Tool::Blur) && c.tool == t {
                         c.brush = !c.brush;
                     } else {
                         c.tool = t;
                     }
+                    if let Some(g) = Ctx::group_of_tool(t) {
+                        c.face[g] = t;
+                    }
+                    c.open = None;
+                    c.tray_hover = None;
+                    c.palette = false;
+                    c.hover_due = None;
+                }
+                BarKind::Group(g) => {
+                    if c.open == Some(i) {
+                        c.open = None;
+                        c.tray_hover = None;
+                    } else {
+                        /* 点组按钮 = 选中"上次用的那个"，同时展开托盘（无 hover 设备也能用） */
+                        c.tool = c.face[g];
+                        c.open = Some(i);
+                        c.palette = false;
+                    }
+                    c.hover_due = None;
+                }
+                BarKind::Chip(Chip::Color) => {
+                    c.palette = !c.palette;
+                    c.open = None;
+                    c.hover_due = None;
+                }
+                BarKind::Chip(Chip::Width) => {
+                    /* 单击不弹菜单：粗细只走滚轮 / [ ]（设计稿 §5.5） */
+                }
+                BarKind::Chip(Chip::Fill) => {
+                    c.fill = !c.fill;
                 }
                 BarKind::Act(a) => match a {
                     "undo" => {
@@ -2397,6 +3508,7 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
                         }
                     }
                     "copy" => deliver_to(c, "copy"),
+                    "copymore" => c.menu_open = !c.menu_open,
                     "save" => deliver_to(c, "save"),
                     "pin" => deliver_to(c, "peek"),
                     _ => c.done = Some(("cancel".into(), Vec::new(), [0.0; 4])),
@@ -2410,6 +3522,14 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
                 PostQuitMessage(0);
             }
             return;
+        }
+        /* ③ 点到别处：浮层收起（选区手势照常开始） */
+        if c.open.is_some() || c.palette || c.tray_hover.is_some() || c.hover_due.is_some() {
+            c.open = None;
+            c.tray_hover = None;
+            c.palette = false;
+            c.hover_due = None;
+            c.render();
         }
         if let Some(i) = c.handle_hit(x, y) {
             c.drag = Drag::Resize(i);
@@ -2435,6 +3555,18 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
             let n = c.number_next;
             c.number_next += 1;
             c.ops.push(Op::Number(x, y, n, c.color));
+            c.redo.clear();
+            c.render();
+            return;
+        }
+        /* 图章 / 贴纸同样是"点一下落一个"：拖拽对它没意义（参考稿 §5.4 的交互） */
+        if matches!(c.tool, Tool::Check | Tool::Cross | Tool::Sticker) && inside(sel, x, y) {
+            let k = match c.tool {
+                Tool::Check => Stamp::Check,
+                Tool::Cross => Stamp::Cross,
+                _ => Stamp::Smiley,
+            };
+            c.ops.push(Op::Stamp(x, y, c.color, k));
             c.redo.clear();
             c.render();
             return;
@@ -2589,6 +3721,10 @@ unsafe fn on_move(x: i32, y: i32) {
         }
         _ => {}
     }
+    /* 悬停状态机有截止时间就挂 20ms 计时器；到点由 WM_TIMER 落地 */
+    if c.hover_due.is_some() {
+        SetTimer(c.hwnd, 1, 20, 0);
+    }
 }
 
 unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isize {
@@ -2607,11 +3743,56 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
             on_move(lo(l), hi(l));
             0
         }
+        /* 悬停展开/收起的唯一落地口：到点才真的开/关，鼠标移动只改截止时间 */
+        WM_TIMER => {
+            let arm = {
+                let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
+                match g.as_mut() {
+                    Some(c) => {
+                        if c.tick() {
+                            c.render();
+                        }
+                        c.hover_due.is_some()
+                    }
+                    None => false,
+                }
+            };
+            if !arm {
+                KillTimer(h, 1);
+            }
+            0
+        }
+        /* 粗细：只在「粗细胶囊」上滚轮才生效（设计稿 §5.5，不弹菜单） */
+        WM_MOUSEWHEEL => {
+            let mut pt = PointI {
+                x: lo(l),
+                y: hi(l),
+            };
+            ScreenToClient(h, &mut pt);
+            let delta = (((w >> 16) & 0xFFFF) as i16) as i32;
+            let shift = GetKeyState(0x10) < 0;
+            let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(c) = g.as_mut() {
+                if let Some(r) = c.chip_rect(Chip::Width) {
+                    if inside(r, pt.x, pt.y) {
+                        let step = if shift { 4 } else { 1 };
+                        let d = if delta > 0 { step } else { -step };
+                        c.width = (c.width + d).clamp(W_MIN, W_MAX);
+                        c.render();
+                    }
+                }
+            }
+            0
+        }
         WM_RBUTTONDOWN => {
             let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(c) = g.as_mut() {
                 if c.sel.is_some() {
                     c.sel = None;
+                    c.open = None;
+                    c.tray_hover = None;
+                    c.palette = false;
+                    c.hover_due = None;
                     c.render();
                 } else {
                     c.done = Some(("cancel".into(), Vec::new(), [0.0; 4]));
@@ -2631,7 +3812,30 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                 let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(c) = g.as_mut() {
                     match w as u32 {
-                        0x1B => c.done = Some(("cancel".into(), Vec::new(), [0.0; 4])),
+                        0x1B => {
+                            /* 先关浮层，再谈退出：托盘/调色板开着时 Esc 只收浮层 */
+                            if c.palette || c.open.is_some() || c.hover_due.is_some() || c.menu_open {
+                                c.palette = false;
+                                c.open = None;
+                                c.tray_hover = None;
+                                c.hover_due = None;
+                                c.menu_open = false;
+                                c.render();
+                            } else {
+                                c.done = Some(("cancel".into(), Vec::new(), [0.0; 4]))
+                            }
+                        }
+                        /* [ ] 调粗细（Shift 4px），和滚轮同一套边界 */
+                        0xDB | 0xDD => {
+                            let step = if shift { 4 } else { 1 };
+                            let d = if w as u32 == 0xDD { step } else { -step };
+                            c.width = (c.width + d).clamp(W_MIN, W_MAX);
+                            c.render();
+                        }
+                        0x46 => {
+                            c.fill = !c.fill;
+                            c.render();
+                        }
                         0x5A if ctrl => {
                             if let Some(op) = c.ops.pop() {
                                 c.redo.push(op);
@@ -2653,6 +3857,27 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         0x53 if ctrl && shift => deliver_to(c, "saveas"),
                         0x53 if ctrl => deliver_to(c, "save"),
                         0x43 if ctrl => deliver_to(c, "copy"),
+                        /* 工具字母键（参考稿 §9）。**必须放在所有 `if ctrl` 分支之后**：
+                           Rust 的 match 从上往下匹配，裸 `0x43 =>` 写在前面会把
+                           Ctrl+C 截胡 —— 0.4.19 就是这个坑（复制、保存、全选全失效）。
+                           再加 `if !ctrl` 双保险。 */
+                        0x56 if !ctrl => c.pick_tool(Tool::Select),
+                        0x52 if !ctrl => c.pick_tool(Tool::Rect),
+                        0x45 if !ctrl => c.pick_tool(Tool::Ellipse),
+                        0x4C if !ctrl => c.pick_tool(Tool::Line),
+                        0x41 if !ctrl => c.pick_tool(Tool::Arrow),
+                        0x50 if !ctrl => c.pick_tool(Tool::Pen),
+                        0x48 if !ctrl => c.pick_tool(Tool::Marker),
+                        0x54 if !ctrl => c.pick_tool(Tool::Text),
+                        0x4E if !ctrl => c.pick_tool(Tool::Number),
+                        0x4B if !ctrl => c.pick_tool(Tool::Callout),
+                        0x4D if !ctrl => c.pick_tool(Tool::Mosaic),
+                        0x42 if !ctrl => c.pick_tool(Tool::Blur),
+                        0x47 if !ctrl => c.pick_tool(Tool::Block),
+                        0x53 if !ctrl => c.pick_tool(Tool::Sticker),
+                        0x58 if !ctrl => c.pick_tool(Tool::Check),
+                        0x43 if !ctrl => c.pick_tool(Tool::Cross),
+                        0x49 if !ctrl => c.pick_tool(Tool::Image),
                         // 方向键：微调选区；Shift+方向键改大小（网页版同手感）
                         0x25 | 0x26 | 0x27 | 0x28 => {
                             if let Some(mut r) = c.sel {
@@ -2808,6 +4033,8 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
             *g = Some(Box::new(Ctx {
                 w,
                 h,
+                ox: shot.x,
+                oy: shot.y,
                 pal: Palette::from_code(theme),
                 mem,
                 bits: bits as *mut u8,
@@ -2830,7 +4057,18 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
                 brush: false,
                 number_next: 1,
                 hover: None,
-                opt: [0; 4],
+                open: None,
+                tray: [0; 4],
+                tray_hover: None,
+                hover_due: None,
+                face: GROUP_DEFAULT,
+                more_hover: false,
+                menu_open: false,
+                menu: [0; 4],
+                palette: false,
+                sw: [0; 4],
+                fill: false,
+                hwnd,
                 keys: [0; 4],
                 editor: 0,
                 editing: None,
@@ -2959,6 +4197,8 @@ mod bar_preview {
         let c = Box::new(Ctx {
             w,
             h,
+            ox: 0,
+            oy: 0,
             pal,
             mem,
             bits: bits as *mut u8,
@@ -2981,7 +4221,15 @@ mod bar_preview {
             brush: false,
             number_next: 1,
             hover: None,
-            opt: [0; 4],
+            open: None,
+            tray: [0; 4],
+            tray_hover: None,
+            hover_due: None,
+            face: GROUP_DEFAULT,
+            palette: false,
+            sw: [0; 4],
+            fill: false,
+            hwnd: 0,
             keys: [0; 4],
             editor: 0,
             editing: None,
@@ -2992,7 +4240,7 @@ mod bar_preview {
 
     /// 主条总宽：6px 内距 + 所有项 + 末尾「取消」
     fn bar_total_w() -> i32 {
-        let mut bw = 6;
+        let mut bw = 10;
         for k in BAR {
             bw += bar_w(k);
         }
@@ -3086,33 +4334,66 @@ mod bar_preview {
     #[ignore = "导出工具栏预览图，人工看效果"]
     fn bar_preview() {
         unsafe {
-            let (w, h) = (1400i32, 520i32);
+            let (w, h) = (1500i32, 620i32);
             for (tag, pal) in [("dark", Palette::dark()), ("light", Palette::light())] {
                 let (mut c, bmp) = mk_ctx(w, h, pal);
                 paint_bg(&c, w, h);
 
-                /* 主条 + 选项行：一次看全 选中/悬停/平铺 三态，以及色板与粗细 */
+                /* 第一张：主条 + 展开的托盘（选中 / 悬停 / 组 / 胶囊 四态都看得到） */
                 c.sel = Some([0, 0, 40, 40]); // 只为了让 has_sel() 成立（预览不画选区框）
                 let bw = bar_total_w();
-                c.bar = [(w - bw) / 2, 120, bw, BAR_H];
-                /* 用马赛克当预览工具：它才会在第二行多出「矩形 / 画笔」形态按钮，
-                   一次把 形态 + 色板 + 粗细 三块都看全。 */
+                c.bar = [(w - bw) / 2, 280, bw, BAR_H];
                 c.tool = Tool::Mosaic;
-                c.hover = Some(7);
+                c.face[3] = Tool::Mosaic;
+                c.open = Some(5); // 第 4 组（遮挡 / 打码）
+                c.tray_layout();
+                c.tray_hover = Some(1);
+                c.hover = Some(13); // 橡皮擦
                 c.draw_bar();
-                c.opt_layout();
-                c.draw_opt();
+                c.draw_tray();
                 c.draw_bar_tip();
-                c.draw_keys();
 
                 let out = std::env::temp_dir().join(format!("am-bar-{tag}.bmp"));
                 let px = std::slice::from_raw_parts(c.bits, (w * h * 4) as usize);
                 write_bmp(&out, w, h, px);
 
-                /* 放大两块：贴图图钉（22px 下糊不糊）、马赛克（棋盘格认不认得出） */
+                /* 放大两块：复制主按钮（唯一实心）、颜色胶囊（19px 圆点） */
                 let (zy, zh) = (c.bar[1] - 6, BAR_H + 12);
-                write_zoom(&c, &format!("am-zoom-pin-{tag}.bmp"), c.bar_item_x(17) - 4, zy, 46, zh, 8, w, h);
-                write_zoom(&c, &format!("am-zoom-mosaic-{tag}.bmp"), c.bar_item_x(7) - 4, zy, 46, zh, 8, w, h);
+                write_zoom(
+                    &c,
+                    &format!("am-zoom-copy-{tag}.bmp"),
+                    c.bar_item_x(15) - 4,
+                    zy,
+                    46,
+                    zh,
+                    8,
+                    w,
+                    h,
+                );
+                write_zoom(
+                    &c,
+                    &format!("am-zoom-color-{tag}.bmp"),
+                    c.bar_item_x(7) - 4,
+                    zy,
+                    40,
+                    zh,
+                    8,
+                    w,
+                    h,
+                );
+
+                /* 第二张：调色板（重画一遍底，避免和托盘叠在一起） */
+                paint_bg(&c, w, h);
+                c.open = None;
+                c.tray_hover = None;
+                c.hover = Some(7);
+                c.palette = true;
+                c.sw_layout();
+                c.draw_bar();
+                c.draw_palette();
+                let out2 = std::env::temp_dir().join(format!("am-swatch-{tag}.bmp"));
+                let px2 = std::slice::from_raw_parts(c.bits, (w * h * 4) as usize);
+                write_bmp(&out2, w, h, px2);
                 println!("preview: {}", out.display());
 
                 DeleteDC(c.mem);
@@ -3121,73 +4402,54 @@ mod bar_preview {
         }
     }
 
-    /// 第二行「颜色 / 粗细」的命中回归（平铺后这条比组面板更关键：
-    /// 色块宽 20、间距 24，绘制与命中各算一遍坐标，差 1px 就点到旁边）。
+    /// 托盘与调色板的命中回归：绘制与命中共用 `tray` / `sw` 两块矩形，
+    /// 每一项中心都必须命回自己（差 1px 就是"点上去没反应"）。
     #[test]
-    fn opt_row_picks_color_and_width() {
+    fn tray_and_palette_hit_each_item() {
         unsafe {
-            let (mut c, bmp) = mk_ctx(1200, 400, Palette::dark());
-            c.sel = Some([40, 40, 300, 200]);
-            c.bar = [40, 100, bar_total_w(), BAR_H];
-            c.opt_layout();
-            let cy = c.opt[1] + BAR_H / 2;
+            let (mut c, bmp) = mk_ctx(1200, 620, Palette::dark());
+            c.sel = Some([40, 40, 500, 300]);
+            c.bar = [200, 420, bar_total_w(), BAR_H];
 
-            /* ① 每个色块的中心都命中自己 */
-            let mut cx = c.opt[0] + 8 + 26 + 8;
+            /* ① 四个组：逐个展开，托盘里每一项中心都命中自己 */
+            let group_is: Vec<usize> = (0..c.bar_len())
+                .filter(|i| matches!(c.bar_item(*i), BarKind::Group(_)))
+                .collect();
+            assert_eq!(group_is.len(), 4, "必须有 4 个折叠组");
+            for i in group_is {
+                let g = c.group_of(i).expect("组下标");
+                c.open = Some(i);
+                c.tray_layout();
+                assert!(c.tray[2] > 0, "组 {g} 的托盘没算出来");
+                let cy = c.tray[1] + c.tray[3] / 2;
+                for (k, _t) in GROUPS[g].iter().enumerate() {
+                    let cx = c.tray[0] + 5 + k as i32 * BTN_W + BTN_W / 2;
+                    assert_eq!(c.tray_hit(cx, cy), Some(k), "组 {g} 第 {k} 项没命中");
+                }
+                /* 托盘左侧 3px 内距不该命中任何条目 */
+                assert_eq!(c.tray_hit(c.tray[0] + 2, cy), None);
+            }
+
+            /* ② 调色板 21 格逐个命中 */
+            c.open = None;
+            c.palette = true;
+            c.sw_layout();
+            assert!(c.sw[2] > 0, "调色板矩形没算出来");
             for (i, want) in SWATCHES.iter().enumerate() {
-                assert_eq!(
-                    c.opt_hit(cx + 10, cy),
-                    Some(OptPick::Color(*want)),
-                    "第 {i} 个色块没命中"
-                );
-                cx += 24;
+                let col = i as i32 % SW_COLS;
+                let row = i as i32 / SW_COLS;
+                let x = c.sw[0] + SW_PAD + col * (SW_CELL + SW_GAP) + SW_CELL / 2;
+                let y = c.sw[1] + SW_PAD + row * (SW_CELL + SW_GAP) + SW_CELL / 2;
+                assert_eq!(c.sw_hit(x, y), Some(*want), "第 {i} 个色块没命中");
             }
+            /* 色块之间的缝不算命中 */
+            let gap = c.sw[0] + SW_PAD + SW_CELL + SW_GAP / 2;
+            assert_eq!(c.sw_hit(gap, c.sw[1] + SW_PAD + SW_CELL / 2), None);
 
-            /* ② 四档粗细逐个命中 */
-            cx += SEP_W;
-            for want in WIDTHS {
-                assert_eq!(
-                    c.opt_hit(cx + 15, cy),
-                    Some(OptPick::Width(want)),
-                    "粗细 {want} 没命中"
-                );
-                cx += 30;
-            }
-
-            /* ③ 空白处（最左侧内距、最右侧留白）不命中，免得误改颜色 */
-            assert_eq!(c.opt_hit(c.opt[0] + 2, cy), None);
-            assert_eq!(c.opt_hit(c.opt[0] + c.opt[2] - 2, cy), None);
-
-            /* ④ 换到遮罩类工具：第二行左端多出「矩形 / 画笔」，两段各命中各的，
-                  且色板整体右移（宽度重算过，坐标不能沿用上面那一套） */
-            c.tool = Tool::Mosaic;
-            c.opt_layout();
-            let cy2 = c.opt[1] + BAR_H / 2;
-            assert_eq!(
-                c.opt_hit(c.opt[0] + 8 + MODE_W / 2, cy2),
-                Some(OptPick::Brush(false)),
-                "左段应该是「矩形」"
-            );
-            assert_eq!(
-                c.opt_hit(c.opt[0] + 8 + MODE_W + MODE_W / 2, cy2),
-                Some(OptPick::Brush(true)),
-                "右段应该是「画笔」"
-            );
-            /* 形态段之后第一个色块仍在，说明右移量算对了 */
-            let first = c.opt[0] + 8 + MODE_W * 2 + SEP_W + 26 + 8;
-            assert_eq!(
-                c.opt_hit(first + 10, cy2),
-                Some(OptPick::Color(SWATCHES[0])),
-                "形态按钮把色板挤歪了"
-            );
-            /* 非遮罩工具不该有形态段：那一带点下去什么都不该发生 */
-            c.tool = Tool::Arrow;
-            c.opt_layout();
-            assert_eq!(c.opt_hit(c.opt[0] + 8 + MODE_W / 2, cy2), None);
-
-            /* ⑤ 没选区时整行不响应（它也不画） */
+            /* ③ 没选区：托盘与调色板都不响应（它们根本不画） */
             c.sel = None;
-            assert_eq!(c.opt_hit(c.opt[0] + 8 + 26 + 8 + 10, cy), None);
+            assert_eq!(c.tray_hit(c.tray[0] + 8, c.tray[1] + 8), None);
+            assert_eq!(c.sw_hit(c.sw[0] + SW_PAD + 8, c.sw[1] + SW_PAD + 8), None);
 
             DeleteDC(c.mem);
             DeleteObject(bmp);
@@ -3299,7 +4561,7 @@ mod bar_preview {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(acts, vec!["undo", "redo", "copy", "pin", "save", "cancel"]);
+            assert_eq!(acts, vec!["undo", "redo", "copy", "save", "pin", "cancel"]);
 
             /* ② 主条第 i 项中心必须命回第 i 项 */
             for i in 0..c.bar_len() {
@@ -3311,14 +4573,21 @@ mod bar_preview {
                 assert_eq!(c.bar_hit(cx, cy), Some(i), "主条第 {i} 项中心没命中自己");
             }
 
-            /* ③ 12 个工具全部平铺在一条上（没有组了），每个都能直接选中 */
-            let tools: Vec<Tool> = (0..c.bar_len())
-                .filter_map(|i| match c.bar_item(i) {
-                    BarKind::Tool(t) => Some(t),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(tools.len(), 12, "12 个工具必须都平铺在工具栏上");
+            /* ③ 12 个工具全部可达：选择与橡皮常驻，其余 10 个分在 4 个组里 */
+            let mut tools: Vec<Tool> = Vec::new();
+            let mut groups = 0;
+            for i in 0..c.bar_len() {
+                match c.bar_item(i) {
+                    BarKind::Tool(t) => tools.push(t),
+                    BarKind::Group(g) => {
+                        groups += 1;
+                        tools.extend(GROUPS[g].iter().copied());
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(groups, 4, "必须有 4 个折叠组");
+            assert_eq!(tools.len(), 12, "12 个工具都要在工具栏上（组里的也算）");
             for t in [
                 Tool::Select,
                 Tool::Rect,
@@ -3382,8 +4651,10 @@ mod bar_preview {
     #[test]
     fn text_panels_are_opaque() {
         unsafe {
-            let (mut c, bmp) = mk_ctx(1700, 520, Palette::dark());
+            let (mut c, bmp) = mk_ctx(1700, 640, Palette::dark());
             c.sel = Some([40, 40, 600, 300]);
+            c.open = Some(2);
+            c.palette = true;
             c.render();
             c.draw_keys(); // render 里已经画过，这里再画一次确保 keys 矩形是这一帧的
 
@@ -3401,7 +4672,8 @@ mod bar_preview {
                 assert_eq!(bad, 0, "{name} 有 {bad} 个像素 alpha != 255（真机上会透底）");
             };
             check(c.bar, "工具栏");
-            check(c.opt, "选项行");
+            check(c.tray, "托盘");
+            check(c.sw, "调色板");
             check(c.keys, "提示面板");
 
             DeleteDC(c.mem);
@@ -3414,7 +4686,7 @@ mod bar_preview {
     #[test]
     fn toolbar_only_appears_with_selection() {
         unsafe {
-            /* 画布要够宽：工具栏平铺后 672px，提示面板又在右下角，
+            /* 画布要够宽：工具栏约 570px，提示面板又在右下角，
                两者在窄画布上会重叠，数出来的像素就分不清是谁画的。 */
             let (mut c, bmp) = mk_ctx(1700, 500, Palette::dark());
 

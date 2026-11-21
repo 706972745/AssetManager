@@ -5632,52 +5632,190 @@ body.board-body #root {
 .board-anim.ready {
   opacity: 1;
 }
-/* 文字便签：画布上唯一一块暖色纸片。位置/宽度走内联 style，高度由文字撑开 */
+/* 文字便签（0.4.17 起是**纯文本框**）：没有纸片底色、没有边框和投影，只剩文字本身。
+   位置/宽高/字体/字号/颜色全走内联 style；宽高都存库，拖角缩放时字号跟着一起变。 */
 .board-note {
   position: absolute;
   /* 便签始终在图片上面（它是"贴在图上的标注"）；置顶图 3、便签 4、编辑中的 6 */
   z-index: 4;
-  min-height: 44px;
-  padding: 9px 11px;
-  border-radius: 4px;
-  background: #f6e7a8;
-  color: #2b2417;
-  font-size: 12.5px;
-  line-height: 1.5;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.12);
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.94);
+  line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 高度写死（可以拉），文字超出就溢出来 —— 宁可压到框外，也不许把字裁掉 */
+  overflow: visible;
   cursor: move;
   user-select: none;
   -webkit-user-select: none;
+  /* 占位细线：hover/选中才显形，平时不留边框 */
+  outline: 1px dashed transparent;
+  outline-offset: 2px;
+  transition: outline-color var(--t-quick, 120ms) ease;
+}
+.board-note:hover {
+  outline-color: rgba(255, 255, 255, 0.28);
+}
+/* 选中 / 多选里的成员：同一个蓝色边，和图片的 `.board-cell.sel` 一致 */
+.board-note.sel {
+  outline: 1.5px solid rgba(120, 170, 255, 0.95);
+  background: rgba(120, 170, 255, 0.06);
 }
 .board-note.editing {
   z-index: 6;
   cursor: text;
+  outline: 1.5px solid rgba(120, 170, 255, 0.7);
+  background: rgba(10, 12, 16, 0.55);
+}
+.board-note-text {
+  min-height: 1em;
 }
 .board-note-text.empty {
-  color: rgba(43, 36, 23, 0.38);
+  color: rgba(255, 255, 255, 0.35);
 }
 .board-note-input {
   display: block;
   width: 100%;
-  min-height: 26px;
+  height: 100%;
   padding: 0;
   border: none;
   outline: none;
   resize: none;
-  overflow: hidden;
+  overflow: auto;
   background: transparent;
   color: inherit;
   font: inherit;
   line-height: inherit;
+  letter-spacing: inherit;
   cursor: text;
   /* 画布整体 user-select:none，输入框必须自己开回来，否则选不了字 */
   user-select: text;
   -webkit-user-select: text;
 }
 .board-note-input::placeholder {
-  color: rgba(43, 36, 23, 0.38);
+  color: rgba(255, 255, 255, 0.35);
+}
+/* 组框（0.4.17）：多选 / 选中组时的虚线包围盒。**框本身不吃鼠标**，只有手柄吃，
+   否则整片画布都被这层挡住，点哪都不通。 */
+.board-selbox {
+  position: absolute;
+  pointer-events: none;
+  border: 1.5px dashed rgba(120, 170, 255, 0.8);
+  border-radius: 3px;
+  z-index: 7;
+}
+.board-selbox-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: #6fa8ff;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: nwse-resize;
+}
+/* 组内成员不显示自己的缩放手柄：缩放要整组一起做（拖组框那个角） */
+.board-cell.in-group .board-handle,
+.board-note.in-group .board-handle {
+  display: none;
+}
+.board-cell.sel {
+  box-shadow: 0 0 0 2px rgba(120, 170, 255, 0.9), 0 8px 22px rgba(0, 0, 0, 0.45);
+  z-index: 5;
+}
+/* 便签手柄：hover/选中才出现（和图片手柄同一条惯例） */
+.board-note .board-handle {
+  opacity: 0;
+}
+.board-note:hover .board-handle,
+.board-note.sel .board-handle,
+.board-note.editing .board-handle {
+  opacity: 1;
+}
+/* 文本框的字体工具条（0.4.17）：固定在窗口底部中央，不跟画布平移缩放。 */
+.board-notebar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: rgba(20, 20, 24, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(12px);
+  color: rgba(255, 255, 255, 0.86);
+  z-index: 12;
+}
+.board-notebar button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.board-notebar button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.board-notebar button.on {
+  background: rgba(120, 170, 255, 0.26);
+  color: #cfe3ff;
+}
+.board-notebar-font {
+  height: 24px;
+  max-width: 118px;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+.board-notebar-font option {
+  background: #1a1a1f;
+  color: #eee;
+}
+.board-notebar-size {
+  min-width: 22px;
+  text-align: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.68);
+}
+.board-notebar-sep {
+  width: 1px;
+  height: 14px;
+  margin: 0 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.board-notebar button.board-notebar-color {
+  width: 13px;
+  height: 13px;
+  min-width: 13px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+}
+.board-notebar button.board-notebar-color.def {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.board-notebar button.board-notebar-color.on {
+  outline: 2px solid #79c0ff;
+  outline-offset: 1px;
 }
 /* ---------------- 左侧图层面板（0.4.15） ----------------
    固定贴在左边（不挤压画布：画布本来就是全屏的），列出板上**所有**图片。

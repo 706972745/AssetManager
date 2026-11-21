@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ClipboardPaste, LayoutGrid, Layers, Maximize2, Minus, Plus, Type, X } from "lucide-react";
+import {
+  Bold as BoldIcon,
+  ClipboardPaste,
+  LayoutGrid,
+  Layers,
+  Maximize2,
+  Minus,
+  Plus,
+  Type,
+  X,
+} from "lucide-react";
 import { source } from "../data/source";
 import type { BoardNote } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
@@ -26,9 +36,17 @@ import { isOwnDrag } from "../lib/ownDrag";
  * （内嵌预览或系统缩略图），能出图就上板。真出不了（.txt / .json / 损坏文件）
  * 也不丢：留一张占位卡写着文件名，位置和手感跟真图一模一样。
  *
+ * 0.4.17 起多两件事：
+ * - **打组**：Shift/⌘ 点选多个（或点已组里的一员，整组跟着选），`Ctrl+G` 打组、
+ *   `Ctrl+Shift+G` 解组。组内任一成员被拖动 = 整组一起走；拖组框右下角 = 整组等比缩放。
+ *   组号落在 `board_items.grp` / `board_notes.grp` 上（同一板内同值即同组），**不单开一张表**。
+ * - **文本框**：文字便签不再是一块黄纸片 —— 只剩文字本身，可以换字体/字号/颜色/加粗，
+ *   拖右下角整体缩放时**字号跟着框一起变**。
+ *
  * 性能上只有一条铁律：**画布变换绝不走 React state**。
  * 2000 张图每帧 re-render 一次必卡；所以平移/缩放都是直接改 `transform`（ref + DOM），
  * 只有"哪几张在视口里"会 setState（rAF 节流），其余的连 `<img>` 都不挂 —— 不挂就不解码。
+ * 拖动同理：只改被拖元素（和同组成员）的 style，松手才写回 `pos` 并落库。
  */
 interface BoardItem {
   id: number;
@@ -77,9 +95,50 @@ const GAP = 18;
 const MARGIN = 600;
 const MIN_W = 40;
 const MAX_W = 2400;
-/** 便签默认尺寸（画布单位）。宽度固定，高度由内容撑开，只作为落库/可见性判断的估计值 */
+/** 便签默认尺寸（画布单位）。宽高都能拖，字号跟着框等比变 */
 const NOTE_W = 240;
 const NOTE_H = 120;
+/** 新便签的默认字号；`fs = 0` 的老数据用 `NOTE_FS_DEF`，重开板不会突然变大 */
+const NOTE_FS = 16;
+const NOTE_FS_DEF = 12.5;
+/** 便签缩放下限（宽，画布单位）：再小就没法双击点中了 */
+const NOTE_MIN_W = 48;
+
+/** 字体下拉：系统里常见的几家，选不到的会自动回退到系统默认（CSS 就是这么工作的） */
+const FONTS: [string, string][] = [
+  ["", "默认"],
+  ["Microsoft YaHei", "微软雅黑"],
+  ["PingFang SC", "苹方"],
+  ["Source Han Sans SC", "思源黑体"],
+  ["Source Han Serif SC", "思源宋体"],
+  ["SimHei", "黑体"],
+  ["SimSun", "宋体"],
+  ["KaiTi", "楷体"],
+  ["FangSong", "仿宋"],
+  ["DengXian", "等线"],
+  ["Arial", "Arial"],
+  ["Georgia", "Georgia"],
+  ["Times New Roman", "Times New Roman"],
+  ["Consolas", "Consolas"],
+  ["Impact", "Impact"],
+];
+/** 文字颜色的几个预设（空 = 默认浅色） */
+const NOTE_COLORS: [string, string][] = [
+  ["", "默认"],
+  ["#ffffff", "白"],
+  ["#ffd45e", "黄"],
+  ["#ff7b72", "红"],
+  ["#7ee787", "绿"],
+  ["#79c0ff", "蓝"],
+  ["#9e9e9e", "灰"],
+];
+
+/** 字体族名 → 带引号的 CSS 值（中文名/带空格的都要引号，末尾一定留系统回退） */
+function fontCss(font: string): string {
+  return font
+    ? `"${font}", "Microsoft YaHei", "PingFang SC", sans-serif`
+    : `"Microsoft YaHei", "PingFang SC", system-ui, sans-serif`;
+}
 /** 左侧图层面板宽度（画布单位 = CSS px）。**改这里要同步 `.board-layers` 的 width**：
  *  fit / 居中要靠它把"看得见的那块"往右偏，否则内容会被面板压住一截。 */
 const LAYERS_W = 208;
@@ -123,6 +182,12 @@ export function Board() {
   const notesRef = useRef<BoardNote[]>([]);
   /** 正在编辑的那张便签（nid）；null = 没有 */
   const [editId, setEditId] = useState<number | null>(null);
+  /* 选中集合（0.4.17）：key 和 `pos` 一致 —— 图片 id 正数、便签 `-nid` 负数。
+     打组只是把这个集合"黏"下来：点组里任一员时，整组成员自动进选区。 */
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const selRef = useRef<Set<number>>(new Set());
+  /** 成员 → 组号（0 / 不在表里 = 没打组）。只认后端，前端不自己发号 */
+  const [grpMap, setGrpMap] = useState<Map<number, number>>(new Map());
   /* 左侧图层面板（0.4.15）：列出板上**所有**图片，点一行 = 置顶 + 视口居中。
      面板默认展开，但只在展开时才渲染列表（2000 张的板不打开就不付这份 DOM 成本）。 */
   const [layersOpen, setLayersOpen] = useState(true);
@@ -157,6 +222,10 @@ export function Board() {
   useEffect(() => {
     notesRef.current = notes;
   }, [notes]);
+
+  useEffect(() => {
+    selRef.current = sel;
+  }, [sel]);
 
   /* Shift + 滚轮 = 挪**窗口**在屏幕上的位置（owner 2026-11-19）。
      它自己管 rAF 合帧与窗口几何缓存，所以整块板只建一次；挂载/卸载跟着组件走。 */
@@ -300,16 +369,29 @@ export function Board() {
     }
     let alive = true;
     void Promise.all([
-      source.boardLayout(board).catch(() => [] as [number, number, number, number, number][]),
-      source
-        .boardNotes(board)
-        .catch(() => [] as [number, number, number, number, number, string][]),
+      source.boardLayout(board).catch(() => [] as [number, number, number, number, number, number][]),
+      source.boardNotes(board).catch(() => [] as BoardNote[]),
     ]).then(([rows, ns]) => {
       if (!alive) return;
-      for (const [g, x, y, w, h] of rows) pos.current.set(g, { x, y, w, h });
+      const groups = new Map<number, number>();
+      for (const [g, x, y, w, h, grp] of rows) {
+        pos.current.set(g, { x, y, w, h });
+        if (grp) groups.set(g, grp);
+      }
       /* 便签的坐标进同一个 `pos`，key 用 `-nid`：图片 id 是正数，两边永不相撞 */
-      const list: BoardNote[] = ns.map(([nid, x, y, w, h, text]) => ({ nid, x, y, w, h, text }));
-      for (const n of list) pos.current.set(-n.nid, { x: n.x, y: n.y, w: n.w, h: n.h });
+      const list: BoardNote[] = ns.map((n) => ({
+        ...n,
+        font: n.font ?? "",
+        fs: n.fs ?? 0,
+        color: n.color ?? "",
+        bold: !!n.bold,
+        grp: n.grp ?? 0,
+      }));
+      for (const n of list) {
+        pos.current.set(-n.nid, { x: n.x, y: n.y, w: n.w, h: n.h });
+        if (n.grp) groups.set(-n.nid, n.grp);
+      }
+      setGrpMap(groups);
       notesRef.current = list;
       setNotes(list);
       layoutReady.current = true;
@@ -334,13 +416,13 @@ export function Board() {
     [boot?.board]
   );
 
-  /** 便签的位置记回库。文字从 `notesRef` 取 —— settle 里那个闭包不跟着 notes 重挂 */
+  /** 便签的位置/文字/外观记回库。文字与外观都从 `notesRef` 取 —— settle 里那个闭包不跟着 notes 重挂 */
   const noteRemember = useCallback(
     (nid: number) => {
       const board = boot?.board;
       const b = pos.current.get(-nid);
-      if (!board || !b) return;
-      const text = notesRef.current.find((n) => n.nid === nid)?.text ?? "";
+      const n = notesRef.current.find((x) => x.nid === nid);
+      if (!board || !b || !n) return;
       void source
         .boardNotePut(
           board,
@@ -349,11 +431,34 @@ export function Board() {
           Math.round(b.y),
           Math.round(b.w),
           Math.round(b.h),
-          text
+          n.text,
+          { font: n.font, fs: n.fs, color: n.color, bold: n.bold }
         )
         .catch(() => {});
     },
     [boot?.board]
+  );
+
+  /** 一批 key（图片正 / 便签负）一次性落库：组拖动、组缩放收尾走这里 */
+  const rememberMany = useCallback(
+    (keys: number[]) => {
+      const board = boot?.board;
+      if (!board) return;
+      const rows: [number, number, number, number, number][] = [];
+      const nids: number[] = [];
+      for (const k of keys) {
+        const b = pos.current.get(k);
+        if (!b) continue;
+        if (k > 0) {
+          rows.push([k, Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.h)]);
+        } else {
+          nids.push(-k);
+        }
+      }
+      if (rows.length) void source.boardPlace(board, rows).catch(() => {});
+      for (const nid of nids) noteRemember(nid);
+    },
+    [boot?.board, noteRemember]
   );
 
   /* ---------------- 文字便签（0.4.14） ---------------- */
@@ -370,12 +475,18 @@ export function Board() {
     const cy = (H / 2 - v.y) / v.k;
     const x = Math.round(cx - NOTE_W / 2);
     const y = Math.round(cy - NOTE_H / 2);
+    const look = { font: "", fs: NOTE_FS, color: "", bold: false };
     try {
-      const nid = await source.boardNotePut(board, null, x, y, NOTE_W, NOTE_H, "");
+      const nid = await source.boardNotePut(board, null, x, y, NOTE_W, NOTE_H, "", look);
       pos.current.set(-nid, { x, y, w: NOTE_W, h: NOTE_H });
-      notesRef.current = [...notesRef.current, { nid, x, y, w: NOTE_W, h: NOTE_H, text: "" }];
+      notesRef.current = [
+        ...notesRef.current,
+        { nid, x, y, w: NOTE_W, h: NOTE_H, text: "", ...look, grp: 0 },
+      ];
       setNotes(notesRef.current);
       setEditId(nid);
+      /* 新建的便签直接选中：底部那条字体工具条立刻可用，不用再点一下 */
+      setSel(new Set([-nid]));
     } catch (e) {
       setHint({ text: String(e), bad: true });
     }
@@ -392,9 +503,16 @@ export function Board() {
         notesRef.current = notesRef.current.filter((n) => n.nid !== nid);
         setNotes(notesRef.current);
         pos.current.delete(-nid);
+        setSel((old) => {
+          if (!old.has(-nid)) return old;
+          const n = new Set(old);
+          n.delete(-nid);
+          return n;
+        });
         if (board) void source.boardNoteDel(board, nid).catch(() => {});
         return;
       }
+      const cur = notesRef.current.find((n) => n.nid === nid);
       notesRef.current = notesRef.current.map((n) => (n.nid === nid ? { ...n, text } : n));
       setNotes(notesRef.current);
       if (board)
@@ -406,7 +524,10 @@ export function Board() {
             Math.round(b.y),
             Math.round(b.w),
             Math.round(b.h),
-            text
+            text,
+            cur
+              ? { font: cur.font, fs: cur.fs, color: cur.color, bold: cur.bold }
+              : { font: "", fs: NOTE_FS_DEF, color: "", bold: false }
           )
           .catch(() => {});
     },
@@ -423,6 +544,96 @@ export function Board() {
       if (board) void source.boardNoteDel(board, nid).catch(() => {});
     },
     [boot?.board]
+  );
+
+  /* ---------------- 选中 / 打组（0.4.17） ---------------- */
+
+  /** 把 key 扩展成「它所在组的全部成员」。没打组就它自己 */
+  const withGroup = useCallback(
+    (keys: Iterable<number>) => {
+      const out = new Set<number>();
+      const want = new Set<number>();
+      for (const k of keys) {
+        out.add(k);
+        const g = grpMap.get(k) ?? 0;
+        if (g) want.add(g);
+      }
+      if (want.size) for (const [k, g] of grpMap) if (want.has(g)) out.add(k);
+      return out;
+    },
+    [grpMap]
+  );
+
+  /** 打组：选区里至少两个成员。组号由后端发（MAX+1），前端只记下来 */
+  const doGroup = useCallback(async () => {
+    const board = boot?.board;
+    const keys = [...selRef.current];
+    if (!board) return;
+    if (keys.length < 2) {
+      setHint({ text: "先按住 Shift 点选两样以上，再按 Ctrl+G 打组", bad: true });
+      return;
+    }
+    try {
+      const g = await source.boardGroup(board, keys, -1);
+      setGrpMap((old) => {
+        const n = new Map(old);
+        for (const k of keys) n.set(k, g);
+        return n;
+      });
+      setHint({ text: `已打组（${keys.length} 个）：拖动任一成员整组一起走`, bad: false });
+    } catch (e) {
+      setHint({ text: String(e), bad: true });
+    }
+  }, [boot?.board]);
+
+  /** 解组：选区碰到的每个组，**整组**都拆开（不是只把点中的那一个吐出来） */
+  const doUngroup = useCallback(async () => {
+    const board = boot?.board;
+    if (!board) return;
+    const gs = new Set<number>();
+    for (const k of selRef.current) {
+      const g = grpMap.get(k) ?? 0;
+      if (g) gs.add(g);
+    }
+    if (!gs.size) {
+      setHint({ text: "选中的东西没有打组", bad: true });
+      return;
+    }
+    try {
+      let n = 0;
+      for (const g of gs) {
+        const members: number[] = [];
+        for (const [k, gg] of grpMap) if (gg === g) members.push(k);
+        await source.boardGroup(board, members, 0);
+        n += members.length;
+        setGrpMap((old) => {
+          const m = new Map(old);
+          for (const k of members) m.delete(k);
+          return m;
+        });
+      }
+      setHint({ text: `已解组（${gs.size} 组 / ${n} 个）`, bad: false });
+    } catch (e) {
+      setHint({ text: String(e), bad: true });
+    }
+  }, [boot?.board, grpMap]);
+
+  /** 改便签外观：立刻作用到 DOM + state + 落库（工具条每次点击走一遍） */
+  const setNoteLook = useCallback(
+    (nid: number, patch: Partial<Pick<BoardNote, "font" | "fs" | "color" | "bold">>) => {
+      notesRef.current = notesRef.current.map((n) => (n.nid === nid ? { ...n, ...patch } : n));
+      setNotes(notesRef.current);
+      const n = notesRef.current.find((x) => x.nid === nid);
+      const el = canvasRef.current?.querySelector<HTMLElement>(`[data-note="${nid}"]`);
+      if (n && el) {
+        el.style.fontSize = `${n.fs > 0 ? n.fs : NOTE_FS_DEF}px`;
+        el.style.fontFamily = fontCss(n.font);
+        el.style.color = n.color;
+        el.style.fontWeight = n.bold ? "700" : "400";
+      }
+      noteRemember(nid);
+    },
+    [noteRemember]
   );
 
   /* ---------------- 一键整理 ---------------- */
@@ -490,12 +701,26 @@ export function Board() {
     oy: number;
     mask: number;
   } | null>(null);
+  /** 拖动中的一个成员：起始盒子 + DOM。
+   *  `el` 可能是 null —— 组里**视口外**的成员没挂 `<img>`/便签节点，它照样要跟着走，
+   *  只是没有 DOM 可改（位置写进 `pos`，滚回视口时自然是对的）。 */
+  interface DragMember {
+    key: number;
+    box: Box;
+    el: HTMLElement | null;
+    /** 便签的起始字号（缩放时按比例乘） */
+    fs: number;
+  }
   const drag = useRef<{
-    kind: "move" | "size";
+    /** move/size = 单张；gmove/gsize = 整组（`members` 是所有成员） */
+    kind: "move" | "size" | "gmove" | "gsize";
     id: number;
     sx: number;
     sy: number;
     box: Box;
+    members: DragMember[];
+    /** gsize：组包围盒（左上角固定，等比缩放） */
+    gbox?: Box;
     /** 拖的是便签（`id` 是 `-nid`）：收尾要写 board_notes，不写 board_items */
     note?: boolean;
     /** 拖图只认左键（下面的 `e.button === 0` 已限定），所以恒为 1 —— 见 onDown 里的说明 */
@@ -504,6 +729,47 @@ export function Board() {
   const tick = useRef(0);
   /** Alt+滚轮改大小的落库定时器（停止滚动 400ms 后写一次） */
   const sizeSave = useRef(0);
+
+  /** 按 key 找画布里的元素（图片正 / 便签负） */
+  const elOf = (key: number) =>
+    canvasRef.current?.querySelector<HTMLElement>(
+      key > 0 ? `[data-img="${key}"]` : `[data-note="${-key}"]`
+    ) ?? null;
+
+  /** 一组 key 的包围盒（不在 `pos` 里的忽略）。组框、整组缩放都靠它 */
+  const bboxOf = (keys: Iterable<number>): Box | null => {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let any = false;
+    for (const k of keys) {
+      const b = pos.current.get(k);
+      if (!b) continue;
+      any = true;
+      x0 = Math.min(x0, b.x);
+      y0 = Math.min(y0, b.y);
+      x1 = Math.max(x1, b.x + b.w);
+      y1 = Math.max(y1, b.y + b.h);
+    }
+    return any ? { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) } : null;
+  };
+
+  /** 把「选中框」直接摆到当前选区包围盒上：拖动中位置在变，不能等 React 重渲染 */
+  const syncSelBox = () => {
+    const el = canvasRef.current?.querySelector<HTMLElement>(".board-selbox");
+    if (!el) return;
+    const bb = bboxOf(selRef.current);
+    if (!bb) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    el.style.left = `${bb.x}px`;
+    el.style.top = `${bb.y}px`;
+    el.style.width = `${bb.w}px`;
+    el.style.height = `${bb.h}px`;
+  };
 
   useEffect(() => {
     const root = rootRef.current;
@@ -571,6 +837,27 @@ export function Board() {
   useEffect(() => {
     /* 一次指针交互的**收尾**（松手 / 事件丢了 / 窗口失焦都走这里）。
        拖图收尾要把最终位置写回 `pos` 并落库；平移收尾只要清状态重算可见集。 */
+    /** 把一个成员的新盒子写进 `pos`；有 DOM 的顺手改 style（没有的就只是坐标跟着走） */
+    const applyMember = (m: DragMember, nb: Box, fs?: number) => {
+      pos.current.set(m.key, nb);
+      /* 字号下限 4：再小就成一条灰线了；**落库也写 clamp 后的值**，
+         否则重开板会和屏幕上的不一样 */
+      const fsv = fs == null ? undefined : Math.max(4, fs);
+      if (m.el) {
+        m.el.style.left = `${nb.x}px`;
+        m.el.style.top = `${nb.y}px`;
+        m.el.style.width = `${nb.w}px`;
+        m.el.style.height = `${nb.h}px`;
+        if (fsv != null) m.el.style.fontSize = `${fsv}px`;
+      }
+      if (fsv != null && m.key < 0) {
+        /* 便签字号跟着框变：写进 notes（渲染用），收尾统一 setNotes 一次 */
+        notesRef.current = notesRef.current.map((n) =>
+          n.nid === -m.key ? { ...n, fs: Math.round(fsv * 100) / 100 } : n
+        );
+      }
+    };
+
     const settle = () => {
       if (pan.current) {
         pan.current = null;
@@ -579,23 +866,12 @@ export function Board() {
       }
       const d = drag.current;
       if (!d) return;
-      const el = canvasRef.current?.querySelector<HTMLElement>(
-        d.note ? `[data-note="${-d.id}"]` : `[data-img="${d.id}"]`
-      );
-      if (el) {
-        pos.current.set(d.id, {
-          x: Math.round(parseFloat(el.style.left) || d.box.x),
-          y: Math.round(parseFloat(el.style.top) || d.box.y),
-          w: Math.round(parseFloat(el.style.width) || d.box.w),
-          h: Math.round(parseFloat(el.style.height) || d.box.h),
-        });
-      }
-      /* 便签的高度是 auto（由文字撑开），`style.height` 是空串 —— parseFloat 会给 NaN，
-         上面那行自动退回 d.box.h，够用。 */
-      if (d.note) noteRemember(-d.id);
-      else remember(d.id);
+      /* 位置在 `onMove` 里已经逐个写进 `pos` 了，这里只做两件事：落库 + 让 React 追一次 */
+      rememberMany(d.members.map((m) => m.key));
+      if (d.members.some((m) => m.key < 0)) setNotes(notesRef.current);
       drag.current = null;
       rootRef.current?.classList.remove("dragging-img");
+      syncSelBox();
       recompute();
     };
 
@@ -623,25 +899,60 @@ export function Board() {
       }
       const d = drag.current;
       if (!d) return;
-      const el = canvasRef.current?.querySelector<HTMLElement>(
-        d.note ? `[data-note="${-d.id}"]` : `[data-img="${d.id}"]`
-      );
-      if (!el) return;
-      if (d.kind === "move") {
-        el.style.left = `${d.box.x + (e.clientX - d.sx) / vp.current.k}px`;
-        el.style.top = `${d.box.y + (e.clientY - d.sy) / vp.current.k}px`;
-      } else {
-        /* 改大小：**保持比例**，取位移大的那个轴当主导，另一个按比例跟。
-           这样拖角往哪边推都自然，也不会把图拉变形。 */
-        const dx = (e.clientX - d.sx) / vp.current.k;
-        const dy = (e.clientY - d.sy) / vp.current.k;
-        const byW = d.box.w + dx;
-        const byH = (d.box.h + dy) * (d.box.w / d.box.h);
-        const w = Math.min(MAX_W, Math.max(MIN_W, Math.abs(dx) > Math.abs(dy) ? byW : byH));
-        const h = (w * d.box.h) / d.box.w;
-        el.style.width = `${w}px`;
-        el.style.height = `${h}px`;
+      const dx = (e.clientX - d.sx) / vp.current.k;
+      const dy = (e.clientY - d.sy) / vp.current.k;
+
+      if (d.kind === "gmove") {
+        /* 整组移动：每个成员各加同一份位移（各自起点 + 位移，不做累计 —— 不会漂） */
+        for (const m of d.members) {
+          applyMember(m, { ...m.box, x: m.box.x + dx, y: m.box.y + dy });
+        }
+        syncSelBox();
+        return;
       }
+      if (d.kind === "gsize") {
+        /* 整组等比缩放：锚点是组包围盒的左上角，取位移大的轴当主导。
+           图片的 w/h、便签的 w/h/字号一起乘 `s` —— 组内的相对位置和文字大小都不会走形。 */
+        const g = d.gbox;
+        if (!g) return;
+        const byW = (g.w + dx) / g.w;
+        const byH = (g.h + dy) / g.h;
+        const s = Math.min(20, Math.max(0.05, Math.abs(dx) > Math.abs(dy) ? byW : byH));
+        for (const m of d.members) {
+          applyMember(
+            m,
+            {
+              x: g.x + (m.box.x - g.x) * s,
+              y: g.y + (m.box.y - g.y) * s,
+              w: m.box.w * s,
+              h: m.box.h * s,
+            },
+            m.key < 0 ? m.fs * s : undefined
+          );
+        }
+        syncSelBox();
+        return;
+      }
+
+      const m = d.members[0];
+      if (!m) return;
+      if (d.kind === "move") {
+        applyMember(m, { ...d.box, x: d.box.x + dx, y: d.box.y + dy });
+        return;
+      }
+      /* 改大小：**保持比例**，取位移大的那个轴当主导，另一个按比例跟。
+         这样拖角往哪边推都自然，也不会把图拉变形。
+         便签的"比例"还带上字号：框放大一倍，字也大一倍。 */
+      const byW = d.box.w + dx;
+      const byH = (d.box.h + dy) * (d.box.w / d.box.h);
+      const floor = d.note ? NOTE_MIN_W : MIN_W;
+      const w = Math.min(MAX_W, Math.max(floor, Math.abs(dx) > Math.abs(dy) ? byW : byH));
+      const s = w / d.box.w;
+      applyMember(
+        m,
+        { x: d.box.x, y: d.box.y, w, h: d.box.h * s },
+        d.note ? m.fs * s : undefined
+      );
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", settle);
@@ -653,7 +964,7 @@ export function Board() {
       window.removeEventListener("mouseup", settle);
       window.removeEventListener("blur", settle);
     };
-  }, [applyVp, recompute, boxById, remember, noteRemember]);
+  }, [applyVp, recompute, rememberMany]);
 
   const onDown = (e: React.MouseEvent) => {
     if (e.button === 2) return; // 右键交给菜单
@@ -674,34 +985,86 @@ export function Board() {
        否则往便签里点一下，整张条就被挪走了。 */
     if (t.closest("textarea")) return;
     const noteEl = t.closest<HTMLElement>("[data-note]");
-    if (noteEl && e.button === 0) {
-      const nid = Number(noteEl.dataset.note);
-      drag.current = {
-        kind: "move",
-        id: -nid,
-        sx: e.clientX,
-        sy: e.clientY,
-        box: at(-nid),
-        note: true,
-        mask: 1,
-      };
-      rootRef.current?.classList.add("dragging-img");
-      e.preventDefault();
-      return;
-    }
     const handle = t.closest<HTMLElement>("[data-handle]");
+    const ghandle = t.closest<HTMLElement>("[data-group-handle]");
     const cell = t.closest<HTMLElement>("[data-img]");
-    if (cell && e.button === 0) {
-      const id = Number(cell.dataset.img);
-      /* 最近点的那张放到最顶层（需求原话：不需要 PS 那种层叠序，点谁谁在上面） */
-      setTopId(id);
-      const b = at(id);
+
+    /** 按 key 收集要一起动的成员。DOM 可能还没有（视口外的成员），照样进列表 */
+    const buildMembers = (keys: number[]): DragMember[] => {
+      const out: DragMember[] = [];
+      for (const k of keys) {
+        const box = pos.current.get(k);
+        if (!box) continue;
+        out.push({
+          key: k,
+          box,
+          el: elOf(k),
+          fs: k < 0 ? (notesRef.current.find((n) => n.nid === -k)?.fs || NOTE_FS_DEF) : 0,
+        });
+      }
+      return out;
+    };
+
+    /* 组框右下角 = 整组等比缩放。必须排在单张判定前面：手柄压在成员上面 */
+    if (ghandle && e.button === 0 && selRef.current.size > 1) {
+      const members = buildMembers([...selRef.current]);
+      const gbox = bboxOf(selRef.current);
+      if (members.length && gbox) {
+        drag.current = {
+          kind: "gsize",
+          id: members[0].key,
+          sx: e.clientX,
+          sy: e.clientY,
+          box: gbox,
+          members,
+          gbox,
+          mask: 1,
+        };
+        rootRef.current?.classList.add("dragging-img");
+        e.preventDefault();
+        return;
+      }
+    }
+
+    if ((noteEl || cell) && e.button === 0) {
+      const key = noteEl ? -Number(noteEl.dataset.note) : Number(cell!.dataset.img);
+      /* Shift / Ctrl / ⌘ = 加选减选。**这一下不启动拖动** ——
+         想多选却手一抖把它拖走，是这类画布最常见的怨气来源。 */
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        const hit = withGroup([key]);
+        const next = new Set(selRef.current);
+        const on = next.has(key);
+        for (const k of hit) {
+          if (on) next.delete(k);
+          else next.add(k);
+        }
+        selRef.current = next;
+        setSel(next);
+        e.preventDefault();
+        return;
+      }
+      /* 点中的东西已经在多选里 → 保持选区一起拖；否则选区换成它（或它所在的整组） */
+      const keep = selRef.current.has(key) && selRef.current.size > 1;
+      const next = keep ? selRef.current : withGroup([key]);
+      if (!keep) {
+        selRef.current = next;
+        setSel(next);
+      }
+      if (cell && !noteEl) {
+        /* 最近点的那张放到最顶层（需求原话：不需要 PS 那种层叠序，点谁谁在上面） */
+        setTopId(Number(cell.dataset.img));
+      }
+      const members = buildMembers([...next]);
+      if (!members.length) return;
+      const group = members.length > 1;
       drag.current = {
-        kind: handle ? "size" : "move",
-        id,
+        kind: group ? "gmove" : handle ? "size" : "move",
+        id: key,
         sx: e.clientX,
         sy: e.clientY,
-        box: b,
+        box: at(key),
+        members,
+        note: key < 0,
         /* 恒为 1：拖图只认左键（上面的 `e.button === 0` 已经限定），收尾判断只需问
            "左键还在不在"。这里**不能**照 pan 那样写 `e.buttons` —— 中键+左键和弦时
            会记成 5，之后只松开左键（buttons=4）时 `4 & 5 = 4 ≠ 0`，"还在按着"，
@@ -711,6 +1074,11 @@ export function Board() {
       rootRef.current?.classList.add("dragging-img");
       e.preventDefault();
       return;
+    }
+    /* 空白处按下：清空选区（再顺手平移画布） */
+    if (selRef.current.size) {
+      selRef.current = new Set();
+      setSel(selRef.current);
     }
     /* 中键按下去 WebView2 会在指针处插一个"自动滚动"锚点（那个四向箭头），
        画布跟着它滚会和我们的平移打架 —— 主流做法是直接吃掉默认行为
@@ -895,9 +1263,21 @@ export function Board() {
         }
         return;
       }
+      /* Ctrl+G / Ctrl+Shift+G = 打组 / 解组（0.4.17）。组内成员一起移动、一起缩放 */
+      if (mod && (e.key === "g" || e.key === "G")) {
+        e.preventDefault();
+        if (!e.repeat) void (e.shiftKey ? doUngroup() : doGroup());
+        return;
+      }
       if (e.key === "Escape") {
         if (menu) {
           setMenu(null);
+          return;
+        }
+        /* 有选区先清选区：Esc 的第一层语义是"取消选择"，第二层才是关板 */
+        if (selRef.current.size) {
+          selRef.current = new Set();
+          setSel(selRef.current);
           return;
         }
         void source.boardClose();
@@ -918,9 +1298,31 @@ export function Board() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, menu, reset100, active, items, paste, addNote]);
+  }, [fit, menu, reset100, active, items, paste, addNote, doGroup, doUngroup]);
 
   /* ---------------- 菜单 ---------------- */
+
+  /** 选区相关的菜单项（打组 / 解组）：多选或选中的是组时才出现 */
+  const groupMenu = (): CtxItem[] => {
+    const out: CtxItem[] = [];
+    if (sel.size > 1) {
+      out.push({
+        label: `打组（${sel.size} 个）`,
+        icon: "grid",
+        shortcut: "Ctrl+G",
+        action: () => void doGroup(),
+      });
+    }
+    if ([...sel].some((k) => grpMap.get(k))) {
+      out.push({
+        label: "解组",
+        icon: "grid",
+        shortcut: "Ctrl+Shift+G",
+        action: () => void doUngroup(),
+      });
+    }
+    return out.length ? [...out, { kind: "separator" }] : [];
+  };
 
   const menuItems: CtxItem[] = useMemo(() => {
     /* 便签的菜单只有两件事：改字、删掉 */
@@ -945,6 +1347,7 @@ export function Board() {
     const it = id != null ? items.find((x) => x.id === id) : null;
     if (!it) {
       return [
+        ...groupMenu(),
         {
           label: "添加文字便签",
           icon: "file",
@@ -1008,13 +1411,21 @@ export function Board() {
       { kind: "separator" },
       { label: "关闭这块灵感板", icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
     ];
-  }, [menu, items, notes, fit, reset100, paste, addNote, tidy, delNote]);
+  }, [menu, items, notes, fit, reset100, paste, addNote, tidy, delNote, sel, grpMap, doGroup, doUngroup]);
 
   if (!boot) {
     return <div className="board-miss">灵感板数据丢失，请回到主窗口重新打开</div>;
   }
 
   const shown = items.filter((it) => vis.has(it.id));
+  /* 选区包围盒：只在"多选 / 选中了组"时显示。拖动中由 `syncSelBox` 直接改 DOM */
+  const selBox = sel.size > 1 ? bboxOf(sel) : null;
+  /* 底部字体工具条作用的那张便签：选区里只有一张便签时 */
+  const lookNote = (() => {
+    if (sel.size !== 1) return null;
+    const k = [...sel][0];
+    return k < 0 ? (notes.find((n) => n.nid === -k) ?? null) : null;
+  })();
 
   return (
     <div
@@ -1060,7 +1471,7 @@ export function Board() {
             <div
               key={it.id}
               data-img={it.id}
-              className={`board-cell ${active === it.id ? "on" : ""} ${topId === it.id ? "top" : ""} ${broken.has(it.id) ? "broken" : ""}`}
+              className={`board-cell ${active === it.id ? "on" : ""} ${topId === it.id ? "top" : ""} ${sel.has(it.id) ? "sel" : ""} ${grpMap.get(it.id) ? "in-group" : ""} ${broken.has(it.id) ? "broken" : ""}`}
               style={{ left: b.x, top: b.y, width: b.w, height: b.h }}
               title={it.name}
               onMouseEnter={() => setActive(it.id)}
@@ -1118,18 +1529,28 @@ export function Board() {
           );
         })}
 
-        {/* 文字便签：和图片同住一块画布，跟着平移缩放一起走。
-            高度不写死（由文字撑开），落库的 h 只是个估计值 —— 只用于可见性判断。 */}
+        {/* 文字便签（0.4.17 起是"文本框"）：只剩文字本身，没有纸片底色、没有边框。
+            框的宽高都存库，拖右下角整体缩放时**字号跟着框一起变**。 */}
         {notes.map((n) => {
           const b = pos.current.get(-n.nid) ?? { x: n.x, y: n.y, w: n.w, h: n.h };
           const editing = editId === n.nid;
+          const fs = n.fs > 0 ? n.fs : NOTE_FS_DEF;
           return (
             <div
               key={`n${n.nid}`}
               data-note={n.nid}
-              className={`board-note ${editing ? "editing" : ""}`}
-              style={{ left: b.x, top: b.y, width: b.w }}
-              title={editing ? undefined : "双击改文字 · 拖动挪位置"}
+              className={`board-note ${editing ? "editing" : ""} ${sel.has(-n.nid) ? "sel" : ""} ${grpMap.get(-n.nid) ? "in-group" : ""}`}
+              style={{
+                left: b.x,
+                top: b.y,
+                width: b.w,
+                height: b.h,
+                fontSize: fs,
+                fontFamily: fontCss(n.font),
+                color: n.color || undefined,
+                fontWeight: n.bold ? 700 : 400,
+              }}
+              title={editing ? undefined : "双击改文字 · 拖动挪位置 · 右下角缩放"}
               onDoubleClick={(e) => {
                 /* 必须拦住：外层双击是「打开贴图 / fit」，会把便签一起带走 */
                 e.stopPropagation();
@@ -1143,17 +1564,6 @@ export function Board() {
                   autoFocus
                   spellCheck={false}
                   placeholder="写点什么…（Esc 保存，清空即删）"
-                  onFocus={(e) => {
-                    const el = e.currentTarget;
-                    el.style.height = "auto";
-                    el.style.height = `${el.scrollHeight}px`;
-                  }}
-                  onInput={(e) => {
-                    /* 随字数长高：便签本来是"贴一张纸条"，不该出现内部滚动条 */
-                    const el = e.currentTarget;
-                    el.style.height = "auto";
-                    el.style.height = `${el.scrollHeight}px`;
-                  }}
                   onBlur={(e) => commitNote(n.nid, e.currentTarget.value)}
                   onKeyDown={(e) => {
                     /* 打字期间不许触发全局快捷键（T 新便签 / Ctrl+V 粘图 / F 适应窗口） */
@@ -1169,9 +1579,21 @@ export function Board() {
                   {n.text || "双击写字"}
                 </div>
               )}
+              <span className="board-handle" data-handle title="拖动缩放（字号跟着变）" />
             </div>
           );
         })}
+
+        {/* 组框（0.4.17）：多选 / 选中组时出现的虚线框 + 右下角手柄。
+            框本身不吃鼠标事件（只有手柄吃），否则整片画布都点不动了。 */}
+        {selBox && (
+          <div
+            className="board-selbox"
+            style={{ left: selBox.x, top: selBox.y, width: selBox.w, height: selBox.h }}
+          >
+            <span className="board-selbox-handle" data-group-handle title="拖动缩放整组" />
+          </div>
+        )}
       </div>
 
       {/* 左侧图层面板（0.4.15）：板上所有图片按板内顺序列出来，点哪行就把哪张
@@ -1242,6 +1664,65 @@ export function Board() {
       )}
 
       {hint && <div className={`board-hint ${hint.bad ? "bad" : ""}`}>{hint.text}</div>}
+
+      {/* 文本框的字体工具条（0.4.17）：只在"恰好选中一张便签"时出现，
+          固定在底部中央 —— 不跟着画布平移缩放，所以永远点得到。 */}
+      {lookNote && (
+        <div className="board-notebar" onMouseDown={(e) => e.stopPropagation()}>
+          <select
+            className="board-notebar-font"
+            value={lookNote.font}
+            title="字体（系统里没装的字体会自动回退到默认）"
+            onChange={(e) => setNoteLook(lookNote.nid, { font: e.target.value })}
+          >
+            {FONTS.map(([v, label]) => (
+              <option key={v} value={v}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <span className="board-notebar-sep" />
+          <button
+            title="字号变小"
+            onClick={() =>
+              setNoteLook(lookNote.nid, {
+                fs: Math.max(6, Math.round(((lookNote.fs || NOTE_FS_DEF) / 1.15) * 10) / 10),
+              })
+            }
+          >
+            <Minus size={12} strokeWidth={1.9} />
+          </button>
+          <span className="mono board-notebar-size">{Math.round(lookNote.fs || NOTE_FS_DEF)}</span>
+          <button
+            title="字号变大"
+            onClick={() =>
+              setNoteLook(lookNote.nid, {
+                fs: Math.min(400, Math.round((lookNote.fs || NOTE_FS_DEF) * 1.15 * 10) / 10),
+              })
+            }
+          >
+            <Plus size={12} strokeWidth={1.9} />
+          </button>
+          <span className="board-notebar-sep" />
+          <button
+            className={lookNote.bold ? "on" : ""}
+            title="加粗"
+            onClick={() => setNoteLook(lookNote.nid, { bold: !lookNote.bold })}
+          >
+            <BoldIcon size={12} strokeWidth={2.1} />
+          </button>
+          <span className="board-notebar-sep" />
+          {NOTE_COLORS.map(([v, label]) => (
+            <button
+              key={v || "def"}
+              className={`board-notebar-color ${v ? "" : "def"} ${lookNote.color === v ? "on" : ""}`}
+              style={v ? { background: v } : undefined}
+              title={`文字颜色：${label}`}
+              onClick={() => setNoteLook(lookNote.nid, { color: v })}
+            />
+          ))}
+        </div>
+      )}
 
       {/* 左下角缩放条：固定在这一角（画布怎么平移缩放都不动它）。
           图层面板展开时往右让出它的宽度，否则会浮在列表上面。 */}

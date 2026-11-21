@@ -278,7 +278,7 @@ export interface BoardItemDto {
   raw: string;
 }
 
-/** 灵感板上的一张文字便签（位置/尺寸/文字都在注册库里，跟着板走） */
+/** 灵感板上的一张文字便签（位置/尺寸/文字/字体外观都在注册库里，跟着板走） */
 export interface BoardNote {
   nid: number;
   x: number;
@@ -286,6 +286,15 @@ export interface BoardNote {
   w: number;
   h: number;
   text: string;
+  /** 字体族名（空 = 系统默认） */
+  font: string;
+  /** 字号（画布单位；0 = 默认 12.5。拖角缩放时按比例跟着变） */
+  fs: number;
+  /** 文字颜色 `#rrggbb`（空 = 默认浅色） */
+  color: string;
+  bold: boolean;
+  /** 所属组（0 = 没打组；同一块板上相同的非零值 = 同一组） */
+  grp: number;
 }
 
 /** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
@@ -673,8 +682,8 @@ export interface Source {
     name: string,
     mode: "union" | "diff",
   ): Promise<[number, number, number]>;
-  /** 灵感板摆位：读上次摆的位置/尺寸（`[gid,x,y,w,h]`）。读不到就空 */
-  boardLayout(board: string): Promise<[number, number, number, number, number][]>;
+  /** 灵感板摆位：读上次摆的位置/尺寸/组（`[gid,x,y,w,h,grp]`）。读不到就空 */
+  boardLayout(board: string): Promise<[number, number, number, number, number, number][]>;
   /**
    * 往板上**拖文件进来**：只收已入库的（不在库里的如实报原因，不静默丢）。
    * 返回 `[能上板的条目, 不能上板的原因]`
@@ -685,9 +694,9 @@ export interface Source {
     board: string,
     rows: [number, number, number, number, number][],
   ): Promise<number>;
-  /** 灵感板便签：读这块板上所有文字注释 */
-  boardNotes(board: string): Promise<[number, number, number, number, number, string][]>;
-  /** 灵感板便签：新建（`nid = null`）或更新一张，返回 nid */
+  /** 灵感板便签：读这块板上所有文字注释（含字体外观与组号） */
+  boardNotes(board: string): Promise<BoardNote[]>;
+  /** 灵感板便签：新建（`nid = null`）或更新一张，返回 nid。`look = null` 保留原字体外观 */
   boardNotePut(
     board: string,
     nid: number | null,
@@ -696,9 +705,12 @@ export interface Source {
     w: number,
     h: number,
     text: string,
+    look: { font: string; fs: number; color: string; bold: boolean } | null,
   ): Promise<number>;
   /** 灵感板便签：删一张 */
   boardNoteDel(board: string, nid: number): Promise<number>;
+  /** 灵感板打组 / 解组：`grp = -1` 新建（后端发号并返回），`0` 解组 */
+  boardGroup(board: string, keys: number[], grp: number): Promise<number>;
   peekTop(on: boolean): Promise<boolean>;
   /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
   peekReady(): Promise<void>;

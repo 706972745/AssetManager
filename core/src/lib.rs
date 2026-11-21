@@ -2766,7 +2766,10 @@ pub struct SnapshotResolve {
 impl App {
     /// 灵感板摆位（0.1.18）：`board` = `tag:<标签>` / `snap:<快照 id>`。
     /// 只是视图记忆 —— 读不到就按瀑布流重排，不报错。
-    pub fn board_layout(&self, board: &str) -> Result<Vec<(i64, f64, f64, f64, f64)>, String> {
+    pub fn board_layout(
+        &self,
+        board: &str,
+    ) -> Result<Vec<(i64, f64, f64, f64, f64, i64)>, String> {
         reg::board_layout(&self.reg, board)
     }
 
@@ -2780,10 +2783,12 @@ impl App {
 
     /* ------ 灵感板文字便签（0.4.14） ------ */
 
-    pub fn board_notes(&self, board: &str) -> Result<Vec<(i64, f64, f64, f64, f64, String)>, String> {
+    pub fn board_notes(&self, board: &str) -> Result<Vec<reg::BoardNoteRow>, String> {
         reg::board_notes(&self.reg, board)
     }
 
+    /// 便签的新建/更新。`look` 传 `None` = 只挪位置，保留库里原有外观。
+    #[allow(clippy::too_many_arguments)]
     pub fn board_note_put(
         &self,
         board: &str,
@@ -2793,12 +2798,18 @@ impl App {
         w: f64,
         h: f64,
         text: &str,
+        look: Option<(&str, f64, &str, bool)>,
     ) -> Result<i64, String> {
-        reg::board_note_put(&self.reg, board, nid, x, y, w, h, text)
+        reg::board_note_put(&self.reg, board, nid, x, y, w, h, text, look)
     }
 
     pub fn board_note_del(&self, board: &str, nid: i64) -> Result<usize, String> {
         reg::board_note_del(&self.reg, board, nid)
+    }
+
+    /// 打组 / 解组（`grp == -1` 新建并返号，`<= 0` 解组）。key 正=图片 gid、负=便签 nid。
+    pub fn board_group_set(&self, board: &str, keys: &[i64], grp: i64) -> Result<i64, String> {
+        reg::board_group_set(&self.reg, board, keys, grp)
     }
 
     /* ---------------- 分组（0.4.4 起每库一份） ----------------
