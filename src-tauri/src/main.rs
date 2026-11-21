@@ -2441,13 +2441,28 @@ async fn spawn_peek(
        现在等前端把图画上去再 `am_peek_ready` 显示；下面还有兜底定时器，前端崩了也不会留个隐形窗口。 */
     .visible(false)
     .initialization_script(&script);
-    let win = b.build();
+    /* 必须走 `cdp_win`：AM_CDP=1 时主窗带了调试参数，这里不带就建不出来
+       （0x8007139F，见坑表 #42）。贴图是中键 / 工具栏 / 快捷键三条路唯一的出口，
+       漏这一处等于三条入口一起失效。 */
+    let win = cdp_win(b).build();
     // build() 失败**不能 `?` 提前返回**：窗口可能已经建了一半，错误又被前端 toast 吞掉
     let win = match win {
         Ok(w) => w,
         Err(e) => {
             if let Some(d) = LOG_DIR.get() {
                 log_runtime(d, &format!("peek build FAIL {e}"));
+            }
+            /* 新建的贴图没建成 → 把刚记下的那条撤回去。
+               不撤的话它会在下次开机的 `restore_peeks` 里重新冒出来：用户根本
+               没贴过的图凭空摆在屏幕上（2026-11-21 建窗失败就是这么攒出 3 条鬼
+               记录的）。`restore = true` 是「开机还原」，那种失败故意留着下次再试
+               （理由见 `restore_peeks` 里的注释），这里不碰。 */
+            if !restore {
+                {
+                    let mut g = peeks().lock().unwrap_or_else(|x| x.into_inner());
+                    g.retain(|r| r.label != rec.label);
+                }
+                save_peeks();
             }
             return Err(format!("无边框窗口创建失败：{e}"));
         }
@@ -2786,6 +2801,25 @@ static BOARD_SEQ: AtomicU64 = AtomicU64::new(1);
    创建直接失败（实测灵感板报 `0x8007139F 组或资源的状态不是执行请求操作的正确状态`）。
    发布路径不设这个环境变量，行为不变。 */
 const CDP_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222";
+
+/// **所有** WebView 窗口统一从这里过一道，别在各自建窗处手抄 if。
+///
+/// 为什么要有这个函数：`additional_browser_args` 是 **WebView2 environment 级**的，
+/// 主窗带了 `--remote-debugging-port`、新窗不带，建窗直接被拒 ——
+/// `0x8007139F 组或资源的状态不是执行请求操作的正确状态`（坑表 #42）。
+/// 2026-11-21 又栽了一次：灵感板记得带，**贴图窗（spawn_peek）漏了**，于是
+/// CDP 会话里中键 / 工具栏 / 快捷键三条贴图入口全报「无边框窗口创建失败」，
+/// 用户看到的就是"贴图整个坏了"。同一个坑不该踩第三遍，所以收成一个入口。
+fn cdp_win<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    b: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    if std::env::var("AM_CDP").as_deref() == Ok("1") {
+        b.additional_browser_args(CDP_ARGS)
+    } else {
+        b
+    }
+}
+
 /// label → 标签名。同一个标签重复点「打开灵感板」不该开第二块，聚焦已有那块。
 static BOARD_TAGS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
@@ -2919,7 +2953,7 @@ fn spawn_board(
     }
     let label = format!("board-{}", BOARD_SEQ.fetch_add(1, Ordering::Relaxed));
     let script = format!("window.__AM_BOARD__ = {boot};");
-    let mut bb = tauri::WebviewWindowBuilder::new(
+    let bb = tauri::WebviewWindowBuilder::new(
         app,
         &label,
         tauri::WebviewUrl::App("index.html".into()),
@@ -2934,11 +2968,8 @@ fn spawn_board(
     .resizable(true)
     .center()
     .initialization_script(&script);
-    /* 见 CDP_ARGS 的注释：主窗带了调试参数，这块板也必须带同一串，否则窗口建不出来 */
-    if std::env::var("AM_CDP").as_deref() == Ok("1") {
-        bb = bb.additional_browser_args(CDP_ARGS);
-    }
-    let win = bb
+    /* 见 `cdp_win`：主窗带了调试参数，这块板也必须带同一串，否则窗口建不出来 */
+    let win = cdp_win(bb)
         .build()
     .map_err(|e| {
         if let Some(d) = LOG_DIR.get() {
@@ -5537,7 +5568,9 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         log_runtime(d, &format!("snip t thumb={}ms", t_all.elapsed().as_millis()));
     }
     let script = format!("window.__AM_SNIP__ = {boot};");
-    let win = tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
+    /* 同贴图窗：AM_CDP=1 时这里也必须带同一串调试参数，否则建不出来（坑表 #42）。
+       默认走原生覆盖层，这条路只有 `AM_SNIP_WEBVIEW=1` 才会走，但同样是 WebView2 窗。 */
+    let win = cdp_win(tauri::WebviewWindowBuilder::new(&app, "snip", tauri::WebviewUrl::App("index.html".into()))
         .title("截图")
         .inner_size(vw as f64 / scale, vh as f64 / scale)
         .position(vx as f64 / scale, vy as f64 / scale)
@@ -5568,7 +5601,7 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         /* 排查开关：AM_SNIP_VISIBLE=1 时建出来就 visible（用来验证"先 show 再画"
            和"建窗即 visible" 对首帧时间有没有区别）。默认仍是先隐形、随后 show。 */
         .visible(std::env::var("AM_SNIP_VISIBLE").map(|v| v == "1").unwrap_or(false))
-        .initialization_script(&script)
+        .initialization_script(&script))
         .build()
         .map_err(|e| {
             if let Some(d) = LOG_DIR.get() {
