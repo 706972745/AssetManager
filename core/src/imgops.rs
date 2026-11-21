@@ -83,11 +83,12 @@ pub fn resized_to(src: &Path, dst: &Path, max_edge: u32) -> Res<(u32, u32, u64)>
                 .map_err(|e| format!("编码 JPEG 失败：{e}"))?;
             buf
         }
+        /* webp：单边上限 16383（libwebp 的硬限制）。原尺寸导出（max_edge = 0）
+           碰到超长图时以前会 panic —— `webp` crate 的 `encode()` 里是 unwrap。
+           现在走统一出口，报错让人换个格式，而不是把软件带走。 */
         "webp" => {
             let rgb = image::DynamicImage::ImageRgba8(out).to_rgb8();
-            webp::Encoder::from_rgb(rgb.as_raw(), rgb.width(), rgb.height())
-                .encode(88.0)
-                .to_vec()
+            crate::thumb::webp_encode(rgb.as_raw(), rgb.width(), rgb.height(), 88.0)?
         }
         /* png 与其他：PNG 最安全（带 alpha、无损） */
         _ => {

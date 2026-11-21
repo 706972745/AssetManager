@@ -22,6 +22,29 @@ use crate::db::{self, Res};
 /// 缩略图统一格式：WebP（q=80）。改这里就要同步 `src-tauri` 的 content-type 与界面文案。
 pub const THUMB_EXT: &str = "webp";
 const WEBP_QUALITY: f32 = 80.0;
+/// libwebp 的**单边硬上限**：16383 编得出来，16384 直接 `VP8_ENC_ERROR_BAD_DIMENSION`。
+///
+/// 这个数字以前没人当回事，于是 1024 档的 `px * 16 = 16384` 正好压在线上 ——
+/// 1080×22197 那种长截图一进 1024 档，整块板子连带进程一起没了（2026-11-21 闪退）。
+pub const WEBP_MAX_SIDE: u32 = 16383;
+
+/// WebP 编码的**唯一出口**：尺寸不合规就返回 Err，绝不 panic。
+///
+/// 为什么必须包一层：`webp` crate 的 `Encoder::encode()` 内部是
+/// `encode_simple(...).unwrap()`（见其 `encoder.rs:59`），libwebp 一报错就 panic；
+/// 而缩略图是在工作线程里编的，panic 会顺着"不能 unwind 的帧"直接把**进程**带走。
+/// 一张图编不出来最多是不显示，没有理由让整个软件退出。
+pub fn webp_encode(rgb: &[u8], w: u32, h: u32, quality: f32) -> Res<Vec<u8>> {
+    if w == 0 || h == 0 || w > WEBP_MAX_SIDE || h > WEBP_MAX_SIDE {
+        return Err(format!(
+            "WebP 尺寸越界：{w}×{h}（单边必须在 1..={WEBP_MAX_SIDE} 之间）"
+        ));
+    }
+    webp::Encoder::from_rgb(rgb, w, h)
+        .encode_simple(false, quality)
+        .map(|m| m.to_vec())
+        .map_err(|e| format!("WebP 编码失败（{w}×{h}）：{e:?}"))
+}
 /// 解码后像素上限：一张 80 MP 的图 ≈ 320 MB RGB，再高就是进程自杀。
 const MAX_PIXELS: u64 = 80_000_000;
 
@@ -189,8 +212,7 @@ impl ThumbStore {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         // WebP 编码（libwebp 自带，纯 C 静态链接，不额外要 cmake）
-        let mem = webp::Encoder::from_rgb(thumb.as_raw(), thumb.width(), thumb.height())
-            .encode(WEBP_QUALITY);
+        let mem = webp_encode(thumb.as_raw(), thumb.width(), thumb.height(), WEBP_QUALITY)?;
         // 原子写：先写 .tmp 再改名，避免半张图被读到
         let tmp = out.with_extension(format!("{}.tmp", THUMB_EXT));
         {
@@ -253,7 +275,10 @@ fn fit_dims(ow: u32, oh: u32, px: u32, fit_short: bool) -> (u32, u32) {
         px as f32 / long as f32
     };
     scale = scale.min(1.0); // 不放大
-    let cap = px.saturating_mul(16) as f32;
+    /* 极端长图的兜底：短边按档位放大会把长边推到天上，所以再压一道"长边不超过 px*16"。
+       上限必须同时让过 libwebp 的 16383 —— 1024 档的 px*16 正好是 16384，
+       正好越界一格（见 `WEBP_MAX_SIDE` 的注释）。 */
+    let cap = px.saturating_mul(16).min(WEBP_MAX_SIDE) as f32;
     if long as f32 * scale > cap {
         scale = cap / long as f32;
     }
@@ -578,5 +603,36 @@ mod tests {
         assert!(extreme_aspect(1080, 11942), "长截图必须认成极端比例");
         assert!(extreme_aspect(8000, 600), "全景图同理");
         assert!(!extreme_aspect(1080, 1920), "手机竖屏截图不算极端");
+    }
+
+    /// 1024 档的 16× 封顶是 16384 —— 正好比 libwebp 的上限多 1 像素。
+    /// 1080×22197 这种长截图以前就被夹到 16384，然后编码失败 panic 掉整个进程。
+    #[test]
+    fn fit_dims_never_crosses_webp_limit() {
+        for px in [256u32, 384, 512, 1024] {
+            for (w, h) in [(1080u32, 22197u32), (200, 10000), (8000, 600)] {
+                let (nw, nh) = fit_dims(w, h, px, true);
+                assert!(
+                    nw.max(nh) <= WEBP_MAX_SIDE,
+                    "{w}×{h} @{px} 档被算成 {nw}×{nh}，越过 WebP 上限"
+                );
+            }
+        }
+        // 长边正好压在线上：这一档以前出来的就是 16384
+        assert_eq!(fit_dims(1080, 22197, 1024, true), (797, WEBP_MAX_SIDE));
+    }
+
+    /// 编码出口必须"报错"而不是"崩"：越界尺寸返回 Err，正常尺寸照旧出图。
+    #[test]
+    fn webp_encode_refuses_oversize() {
+        assert!(webp_encode(&[0u8; 30], 10, 1, 80.0).is_ok(), "10×1 应该编得出来");
+
+        let zero = webp_encode(&[], 0, 10, 80.0);
+        assert!(zero.is_err(), "0 宽必须报错");
+
+        let tall = vec![0u8; (WEBP_MAX_SIDE as usize + 1) * 3];
+        let over = webp_encode(&tall, WEBP_MAX_SIDE + 1, 1, 80.0);
+        assert!(over.is_err(), "16384 宽必须报错，不能 panic");
+        assert!(format!("{}", over.unwrap_err()).contains("越界"));
     }
 }
