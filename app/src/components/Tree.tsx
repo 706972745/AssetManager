@@ -127,6 +127,36 @@ export function Tree({
   /** 已经拉过子列表的目录（`refreshKey` 变化时整体作废） */
   const loaded = useRef<Set<number>>(new Set());
 
+  /* 0.4.24：侧栏默认收在视口左侧外，鼠标进左边缘 10px 才滑出来（覆盖网格，不挤压）。
+     owner 2026-11-21：素材库不是每分钟都在点，但图要一直看得多。
+
+     ⚠️ 用 document 级 pointermove 看坐标，**不能只挂 onPointerEnter/Leave**：
+     侧栏滑出后会盖住那条热区，指针其实"从没进入侧栏"，离开时 leave 也不会来，
+     结果就是滑出来之后再也收不回去（2026-11-21 实测踩过，自动化测试里 autoClose=false）。 */
+  const [railOpen, setRailOpen] = useState(false);
+  const railTimer = useRef<number | null>(null);
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      const keepOpen = e.clientX <= 10 || (!!t && !!t.closest(".tree"));
+      if (keepOpen) {
+        if (railTimer.current !== null) {
+          window.clearTimeout(railTimer.current);
+          railTimer.current = null;
+        }
+        setRailOpen(true);
+        return;
+      }
+      if (railTimer.current !== null) window.clearTimeout(railTimer.current);
+      railTimer.current = window.setTimeout(() => setRailOpen(false), 240);
+    };
+    document.addEventListener("pointermove", onMove, true);
+    return () => {
+      document.removeEventListener("pointermove", onMove, true);
+      if (railTimer.current !== null) window.clearTimeout(railTimer.current);
+    };
+  }, []);
+
   const nodesRef = useRef<Map<number, DirNode>>(new Map());
   const [sectionOpen, setSectionOpen] = useState(true);
   const [hover, setHover] = useState<number | null>(null);
@@ -620,7 +650,7 @@ export function Tree({
   const userLibCount = userRoots.length;
 
   return (
-    <aside className="tree">
+      <aside className={`tree ${railOpen ? "is-open" : ""}`}>
       <div className="tree-scroll scroll-hot">
         <div className="tree-section">
           <div className="tree-heading-row">
@@ -743,6 +773,6 @@ export function Tree({
           <kbd className="side-kbd">?</kbd>
         </div>
       </div>
-    </aside>
+      </aside>
   );
 }
