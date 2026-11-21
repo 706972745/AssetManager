@@ -5559,6 +5559,14 @@ body.board-body #root {
 .board-root.dragging-img {
   cursor: default;
 }
+/* 空白处平时就是抓手（提示"这里能拖动画布"，按中键拖）；按下变攥拳。
+   以前只有按下那一刻才变，站在画布上完全看不出这块能拖。 */
+.board-root {
+  cursor: grab;
+}
+.board-root.marquee {
+  cursor: crosshair;
+}
 
 .board-canvas {
   position: absolute;
@@ -5633,40 +5641,38 @@ body.board-body #root {
   opacity: 1;
 }
 /* 文字便签（0.4.17 起是**纯文本框**）：没有纸片底色、没有边框和投影，只剩文字本身。
-   位置/宽高/字体/字号/颜色全走内联 style；宽高都存库，拖角缩放时字号跟着一起变。 */
+   关键一条：**不设 width/height，也不许自动折行** —— 框就是文字多大，
+   **只有用户自己敲回车才换行**（双击进编辑时突然折成两行是 2026-11-21 修掉的问题）。 */
 .board-note {
   position: absolute;
   /* 便签始终在图片上面（它是"贴在图上的标注"）；置顶图 3、便签 4、编辑中的 6 */
   z-index: 4;
-  padding: 2px 4px;
+  width: max-content;
+  padding: 1px 3px;
   border-radius: 3px;
   background: transparent;
   color: rgba(255, 255, 255, 0.94);
-  line-height: 1.35;
-  white-space: pre-wrap;
-  word-break: break-word;
-  /* 高度写死（可以拉），文字超出就溢出来 —— 宁可压到框外，也不许把字裁掉 */
+  line-height: 1.3;
+  /* `pre`：保留空格与手动换行，**不软折行** */
+  white-space: pre;
   overflow: visible;
   cursor: move;
   user-select: none;
   -webkit-user-select: none;
-  /* 占位细线：hover/选中才显形，平时不留边框 */
-  outline: 1px dashed transparent;
-  outline-offset: 2px;
-  transition: outline-color var(--t-quick, 120ms) ease;
+  /* 选中/悬停只是给文字底下垫一层淡色，**不画框** —— 画框就会出现"大框套一行字" */
+  transition: background-color var(--t-quick, 120ms) ease;
 }
 .board-note:hover {
-  outline-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.06);
 }
-/* 选中 / 多选里的成员：同一个蓝色边，和图片的 `.board-cell.sel` 一致 */
 .board-note.sel {
-  outline: 1.5px solid rgba(120, 170, 255, 0.95);
-  background: rgba(120, 170, 255, 0.06);
+  background: rgba(120, 170, 255, 0.18);
 }
 .board-note.editing {
   z-index: 6;
   cursor: text;
-  outline: 1.5px solid rgba(120, 170, 255, 0.7);
+  /* 编辑态必须看得见可输入范围，这里才给一圈细边 */
+  box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.55);
   background: rgba(10, 12, 16, 0.55);
 }
 .board-note-text {
@@ -5677,25 +5683,39 @@ body.board-body #root {
 }
 .board-note-input {
   display: block;
-  width: 100%;
-  height: 100%;
+  min-width: 150px;
+  min-height: 1.4em;
   padding: 0;
   border: none;
   outline: none;
   resize: none;
-  overflow: auto;
+  overflow: hidden;
   background: transparent;
   color: inherit;
   font: inherit;
   line-height: inherit;
   letter-spacing: inherit;
+  white-space: pre;
   cursor: text;
+  /* 尺寸跟着内容走：不写死 width，也不让 textarea 自己软折行
+     （`field-sizing: content` 是 Chromium 123+ 的能力，WebView2 这边够用） */
+  field-sizing: content;
   /* 画布整体 user-select:none，输入框必须自己开回来，否则选不了字 */
   user-select: text;
   -webkit-user-select: text;
 }
 .board-note-input::placeholder {
   color: rgba(255, 255, 255, 0.35);
+}
+/* 框选矩形（0.4.23）：左键在空白处拖出来的选择框。fixed 定位，坐标直接用 clientX/Y */
+.board-marquee {
+  position: fixed;
+  display: none;
+  border: 1px solid rgba(120, 170, 255, 0.9);
+  background: rgba(120, 170, 255, 0.12);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 8;
 }
 /* 组框（0.4.17）：多选 / 选中组时的虚线包围盒。**框本身不吃鼠标**，只有手柄吃，
    否则整片画布都被这层挡住，点哪都不通。 */
@@ -5728,7 +5748,12 @@ body.board-body #root {
   z-index: 5;
 }
 /* 便签手柄：hover/选中才出现（和图片手柄同一条惯例） */
+/* 便签手柄贴着字块的角，做小一点 —— 它只是"拖这里能放大缩小"，不该抢戏 */
 .board-note .board-handle {
+  right: -4px;
+  bottom: -4px;
+  width: 9px;
+  height: 9px;
   opacity: 0;
 }
 .board-note:hover .board-handle,
@@ -5774,21 +5799,115 @@ body.board-body #root {
   background: rgba(120, 170, 255, 0.26);
   color: #cfe3ff;
 }
-.board-notebar-font {
+/* 字体按钮（0.4.24）：点开带搜索的弹层，不用原生 select —— 本机装了上千款字体，
+   select 的滚动条根本没法用 */
+.board-notebar button.board-notebar-fontbtn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  max-width: 132px;
   height: 24px;
-  max-width: 118px;
-  padding: 0 4px;
+  padding: 0 6px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.08);
-  color: inherit;
+  font-size: 12px;
+}
+.board-notebar button.board-notebar-fontbtn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.board-notebar-fontname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-fontpop {
+  position: fixed;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  max-height: 360px;
+  border-radius: 10px;
+  background: rgba(20, 20, 24, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(14px);
+  z-index: 13;
+  overflow: hidden;
+}
+.board-fontpop-q {
+  flex: 0 0 auto;
+  height: 28px;
+  margin: 8px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #eee;
   font-size: 12px;
   outline: none;
+}
+.board-fontpop-q:focus {
+  border-color: rgba(120, 170, 255, 0.6);
+}
+.board-fontpop-list {
+  flex: 1 1 auto;
+  /* flex 子项默认 `min-height:auto`，不给 0 的话它会被内容撑开、把滚动条顶没 */
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 8px;
+}
+.board-fontpop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  /* 有些艺术字体字形会上下伸出字面（装饰笔画），不裁掉就会压到下一行上 */
+  overflow: hidden;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 13px;
+  line-height: 1.15;
+  text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
-.board-notebar-font option {
-  background: #1a1a1f;
-  color: #eee;
+.board-fontpop-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.board-fontpop-row.on {
+  background: rgba(120, 170, 255, 0.2);
+  color: #dbe9ff;
+}
+.board-fontpop-tag {
+  margin-left: auto;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.34);
+}
+.board-fontpop-sep {
+  margin: 6px 8px 4px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.38);
+}
+.board-fontpop-more {
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.36);
+  text-align: center;
 }
 .board-notebar-size {
   min-width: 22px;
@@ -5921,6 +6040,30 @@ body.board-body #root {
 }
 .board-layer.on .board-layer-name {
   color: #cfe0ff;
+}
+/* 文字行（0.4.24）：没有缩略图，用一个 T 方块占位 —— 和图片行同一套高度/内距，
+   混排时不会突然"矮一截" */
+.board-layer-t {
+  font-size: 12px;
+  letter-spacing: 0;
+  color: #cfe0ff;
+  background: rgba(120, 170, 255, 0.16);
+  box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.3);
+}
+.board-layer-note .board-layer-name {
+  color: rgba(255, 255, 255, 0.82);
+}
+.board-layer-meta {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  color: rgba(255, 255, 255, 0.38);
+}
+.board-layers-empty {
+  padding: 22px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.34);
+  text-align: center;
 }
 .board-layer-top {
   flex: 0 0 auto;

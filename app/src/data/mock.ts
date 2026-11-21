@@ -562,6 +562,9 @@ export const mockSource: Source = {
   async boardGroup() {
     return 0;
   },
+  async systemFonts() {
+    return [];
+  },
   async boardAddPaths() {
     return [[], ["浏览器预览模式没有素材库"]];
   },

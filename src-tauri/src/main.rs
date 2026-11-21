@@ -18,6 +18,7 @@ use tauri::http::{header, Response};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 mod snip_native;
+mod sysfont;
 
 /// 检查更新 / 下载 / 校验 / 静默安装（照 FontManager 那一套搬过来，
 /// 仓库名与安装形态判据换成本仓的）。
@@ -3113,6 +3114,12 @@ fn am_board_group(
     grp: i64,
 ) -> Result<i64, String> {
     lock(&state).board_group_set(&board, &keys, grp)
+}
+
+/// 本机已安装的字体族（灵感板文本框的字体下拉用）。枚举一次后缓存。
+#[tauri::command]
+fn am_system_fonts() -> Vec<String> {
+    sysfont::system_fonts().to_vec()
 }
 
 /// 往灵感板上**拖文件进来**（P2.8）：只收已经入库的那几张。
@@ -6914,6 +6921,7 @@ fn main() {
             am_board_note_put,
             am_board_note_del,
             am_board_group,
+            am_system_fonts,
             am_board_add_paths,
             am_board_paste,
             am_coll_list,

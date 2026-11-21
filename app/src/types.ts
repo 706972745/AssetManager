@@ -711,6 +711,8 @@ export interface Source {
   boardNoteDel(board: string, nid: number): Promise<number>;
   /** 灵感板打组 / 解组：`grp = -1` 新建（后端发号并返回），`0` 解组 */
   boardGroup(board: string, keys: number[], grp: number): Promise<number>;
+  /** 本机已安装的字体族名（灵感板文本框的字体下拉） */
+  systemFonts(): Promise<string[]>;
   peekTop(on: boolean): Promise<boolean>;
   /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
   peekReady(): Promise<void>;

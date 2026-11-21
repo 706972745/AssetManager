@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bold as BoldIcon,
+  ChevronDown,
   ClipboardPaste,
   LayoutGrid,
   Layers,
@@ -95,14 +96,13 @@ const GAP = 18;
 const MARGIN = 600;
 const MIN_W = 40;
 const MAX_W = 2400;
-/** 便签默认尺寸（画布单位）。宽高都能拖，字号跟着框等比变 */
+/** 新便签的初始落点尺寸（画布单位）。**渲染时不设宽高** —— 实框由文字撑开，
+    这两个数只用来"放哪儿"，量一次就被真实尺寸覆盖 */
 const NOTE_W = 240;
 const NOTE_H = 120;
 /** 新便签的默认字号；`fs = 0` 的老数据用 `NOTE_FS_DEF`，重开板不会突然变大 */
 const NOTE_FS = 16;
 const NOTE_FS_DEF = 12.5;
-/** 便签缩放下限（宽，画布单位）：再小就没法双击点中了 */
-const NOTE_MIN_W = 48;
 
 /** 字体下拉：系统里常见的几家，选不到的会自动回退到系统默认（CSS 就是这么工作的） */
 const FONTS: [string, string][] = [
@@ -132,6 +132,8 @@ const NOTE_COLORS: [string, string][] = [
   ["#79c0ff", "蓝"],
   ["#9e9e9e", "灰"],
 ];
+/** 常用字体（排在下拉最上面）；本机装了的字体另外从后端枚举，见 `am_system_fonts` */
+const COMMON_FONT_VALS = new Set(FONTS.map(([v]) => v).filter(Boolean));
 
 /** 字体族名 → 带引号的 CSS 值（中文名/带空格的都要引号，末尾一定留系统回退） */
 function fontCss(font: string): string {
@@ -188,6 +190,11 @@ export function Board() {
   const selRef = useRef<Set<number>>(new Set());
   /** 成员 → 组号（0 / 不在表里 = 没打组）。只认后端，前端不自己发号 */
   const [grpMap, setGrpMap] = useState<Map<number, number>>(new Map());
+  /** 本机已安装的字体族（后端枚举一次）；空数组 = 还没拿到，下拉只显示常用那几款 */
+  const [sysFonts, setSysFonts] = useState<string[]>([]);
+  /** 字体选择弹层（本机动辄上千款字体，原生 select 滚不动，改成带搜索的弹层） */
+  const [fontPop, setFontPop] = useState(false);
+  const [fontQ, setFontQ] = useState("");
   /* 左侧图层面板（0.4.15）：列出板上**所有**图片，点一行 = 置顶 + 视口居中。
      面板默认展开，但只在展开时才渲染列表（2000 张的板不打开就不付这份 DOM 成本）。 */
   const [layersOpen, setLayersOpen] = useState(true);
@@ -226,6 +233,43 @@ export function Board() {
   useEffect(() => {
     selRef.current = sel;
   }, [sel]);
+
+  /* 本机字体：只问一次，失败就让下拉停在"常用"那几款（不影响任何功能） */
+  useEffect(() => {
+    void source
+      .systemFonts()
+      .then((list) => setSysFonts(Array.isArray(list) ? list : []))
+      .catch(() => {});
+  }, []);
+
+  /* 字体弹层：点面板外面就收起（点里面由面板自己 stopPropagation 挡住） */
+  useEffect(() => {
+    if (!fontPop) return;
+    const h = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest(".board-fontpop") && !t.closest(".board-notebar-fontbtn")) setFontPop(false);
+    };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [fontPop]);
+
+  /* 便签的"框"就是文字本身的尺寸（CSS 不设宽高），渲染完量一次写进 `pos` ——
+     组框、整组缩放、落库都要真实大小。`offsetWidth` 是布局尺寸，不吃画布 transform。 */
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    for (const n of notes) {
+      const el = cv.querySelector<HTMLElement>(`[data-note="${n.nid}"]`);
+      if (!el) continue;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const b = pos.current.get(-n.nid);
+      if (!b || !w || !h) continue;
+      if (Math.abs(b.w - w) > 0.5 || Math.abs(b.h - h) > 0.5) {
+        pos.current.set(-n.nid, { ...b, w, h });
+      }
+    }
+  }, [notes]);
 
   /* Shift + 滚轮 = 挪**窗口**在屏幕上的位置（owner 2026-11-19）。
      它自己管 rAF 合帧与窗口几何缓存，所以整块板只建一次；挂载/卸载跟着组件走。 */
@@ -295,20 +339,41 @@ export function Board() {
     [applyVp, recompute, layersOpen]
   );
 
-  /** 按内容包围盒 fit 进窗口并居中 */
-  const fit = useCallback(() => fitTo(cw, ch), [fitTo, cw, ch]);
+  /** 内容包围盒：图片瀑布流 + 便签。
+   *  便签不参与「一键整理」，但**必须算进 fit** —— 否则 F / 自动适应之后便签会飞到视野外。 */
+  const fitSize = useMemo(() => {
+    let w = cw;
+    let h = ch;
+    for (const n of notes) {
+      const b = pos.current.get(-n.nid) ?? { x: n.x, y: n.y, w: n.w, h: n.h };
+      w = Math.max(w, b.x + b.w);
+      h = Math.max(h, b.y + b.h);
+    }
+    return { w, h };
+  }, [notes, cw, ch]);
 
-  /** 把某张图挪到视口正中（装不下才缩）。图层面板点一行走这里 */
-  const focusItem = useCallback(
-    (id: number) => {
+  /** 按内容包围盒 fit 进窗口并居中 */
+  const fit = useCallback(() => fitTo(fitSize.w, fitSize.h), [fitTo, fitSize]);
+
+  /** 把某个成员（图片 id 正 / 便签 `-nid` 负）挪到视口正中（装不下才缩）。
+   *  图层面板点一行走这里 —— 图片和文字走同一条路。 */
+  const focusAt = useCallback(
+    (key: number) => {
       const root = rootRef.current;
       if (!root) return;
       const pad = layersOpen ? LAYERS_W : 0;
       const W = (root.clientWidth || 1200) - pad;
       const H = root.clientHeight || 800;
-      const b = pos.current.get(id) ?? boxById.get(id) ?? { x: 0, y: 0, w: CW, h: CW };
+      let b =
+        pos.current.get(key) ??
+        (key > 0 ? boxById.get(key) : undefined) ?? { x: 0, y: 0, w: CW, h: CW };
+      if (key < 0) {
+        /* 便签的尺寸以 DOM 为准（改字号后 pos 里那份会过期） */
+        const el = elOf(key);
+        if (el?.offsetWidth) b = { ...b, w: el.offsetWidth, h: el.offsetHeight };
+      }
       const v = vp.current;
-      /* 只在"这张装不下"时才改 k：用户当前缩放手感不该被一次点击重置 */
+      /* 只在"这个装不下"时才改 k：用户当前缩放手感不该被一次点击重置 */
       const need = Math.min(1, (W * 0.86) / Math.max(1, b.w), (H * 0.86) / Math.max(1, b.h));
       const k = need < v.k ? Math.max(0.04, need) : v.k;
       v.k = k;
@@ -711,6 +776,12 @@ export function Board() {
     /** 便签的起始字号（缩放时按比例乘） */
     fs: number;
   }
+  /**
+   * 框选（0.4.23）：**左键在空白处拖出的矩形**（中键才是平移）。
+   * `active` = 已经拖过 3px，没到 3px 就松手当作"点空白清选区"。
+   */
+  const marq = useRef<{ sx: number; sy: number; add: boolean; active: boolean } | null>(null);
+  const marqRef = useRef<HTMLDivElement | null>(null);
   const drag = useRef<{
     /** move/size = 单张；gmove/gsize = 整组（`members` 是所有成员） */
     kind: "move" | "size" | "gmove" | "gsize";
@@ -736,7 +807,8 @@ export function Board() {
       key > 0 ? `[data-img="${key}"]` : `[data-note="${-key}"]`
     ) ?? null;
 
-  /** 一组 key 的包围盒（不在 `pos` 里的忽略）。组框、整组缩放都靠它 */
+  /** 一组 key 的包围盒（不在 `pos` 里的忽略）。组框、整组缩放都靠它。
+   *  便签的 `pos.w/h` 是上一次量的，可能刚改过字体还没更新 —— 直接从 DOM 取当前值。 */
   const bboxOf = (keys: Iterable<number>): Box | null => {
     let x0 = Infinity;
     let y0 = Infinity;
@@ -744,8 +816,13 @@ export function Board() {
     let y1 = -Infinity;
     let any = false;
     for (const k of keys) {
-      const b = pos.current.get(k);
-      if (!b) continue;
+      const raw = pos.current.get(k);
+      if (!raw) continue;
+      let b = raw;
+      if (k < 0) {
+        const el = elOf(k);
+        if (el?.offsetWidth) b = { ...raw, w: el.offsetWidth, h: el.offsetHeight };
+      }
       any = true;
       x0 = Math.min(x0, b.x);
       y0 = Math.min(y0, b.y);
@@ -776,10 +853,11 @@ export function Board() {
     if (!root) return;
 
     const onWheel = (e: WheelEvent) => {
-      /* 左侧图层面板里的滚轮 = 滚那个列表，不是缩放画布。
-         必须在 `preventDefault` **之前**放行，否则列表滚不动。 */
+      /* 面板里的滚轮 = 滚那个列表，不是缩放画布。
+         必须在 `preventDefault` **之前**放行，否则列表滚不动 ——
+         字体弹层（0.4.24）踩过这个：一千多款字体，滚轮全被画布吃了。 */
       const tgt = e.target instanceof HTMLElement ? e.target : null;
-      if (tgt?.closest(".board-layers")) return;
+      if (tgt?.closest(".board-layers") || tgt?.closest(".board-fontpop")) return;
       e.preventDefault();
       /* Shift + 滚轮 = **把这个窗口挪到屏幕上别的位置**（owner 原话："按住 shift 滚轮
          不松，可以随意拖动窗口到任意位置"）。它既不是缩放画布、也不是平移画布内容，
@@ -837,21 +915,22 @@ export function Board() {
   useEffect(() => {
     /* 一次指针交互的**收尾**（松手 / 事件丢了 / 窗口失焦都走这里）。
        拖图收尾要把最终位置写回 `pos` 并落库；平移收尾只要清状态重算可见集。 */
-    /** 把一个成员的新盒子写进 `pos`；有 DOM 的顺手改 style（没有的就只是坐标跟着走） */
+    /** 把一个成员的新盒子写进 `pos`；有 DOM 的顺手改 style（没有的就只是坐标跟着走）。
+     *  **便签只改位置和字号** —— 它的宽高由文字决定，写死 width/height 就变成"大框套小字"了。 */
     const applyMember = (m: DragMember, nb: Box, fs?: number) => {
       pos.current.set(m.key, nb);
-      /* 字号下限 4：再小就成一条灰线了；**落库也写 clamp 后的值**，
-         否则重开板会和屏幕上的不一样 */
       const fsv = fs == null ? undefined : Math.max(4, fs);
       if (m.el) {
         m.el.style.left = `${nb.x}px`;
         m.el.style.top = `${nb.y}px`;
-        m.el.style.width = `${nb.w}px`;
-        m.el.style.height = `${nb.h}px`;
+        if (m.key > 0) {
+          m.el.style.width = `${nb.w}px`;
+          m.el.style.height = `${nb.h}px`;
+        }
         if (fsv != null) m.el.style.fontSize = `${fsv}px`;
       }
       if (fsv != null && m.key < 0) {
-        /* 便签字号跟着框变：写进 notes（渲染用），收尾统一 setNotes 一次 */
+        /* 便签字号跟着缩放走：写进 notes（渲染用），收尾统一 setNotes 一次 */
         notesRef.current = notesRef.current.map((n) =>
           n.nid === -m.key ? { ...n, fs: Math.round(fsv * 100) / 100 } : n
         );
@@ -864,9 +943,21 @@ export function Board() {
         rootRef.current?.classList.remove("panning");
         recompute();
       }
+      if (marq.current) {
+        marq.current = null;
+        rootRef.current?.classList.remove("marquee");
+        if (marqRef.current) marqRef.current.style.display = "none";
+      }
       const d = drag.current;
       if (!d) return;
       /* 位置在 `onMove` 里已经逐个写进 `pos` 了，这里只做两件事：落库 + 让 React 追一次 */
+      for (const m of d.members) {
+        /* 便签的尺寸是文字决定的：落库前量一次，别把上一轮字号留下的旧宽高写进去 */
+        if (m.key < 0 && m.el) {
+          const b = pos.current.get(m.key);
+          if (b) pos.current.set(m.key, { ...b, w: m.el.offsetWidth, h: m.el.offsetHeight });
+        }
+      }
       rememberMany(d.members.map((m) => m.key));
       if (d.members.some((m) => m.key < 0)) setNotes(notesRef.current);
       drag.current = null;
@@ -897,6 +988,49 @@ export function Board() {
         applyVp();
         return;
       }
+      /* 框选：矩形只改 DOM（不走 React），命中集合变了才更新选区 */
+      const mq = marq.current;
+      if (mq) {
+        const x = Math.min(mq.sx, e.clientX);
+        const y = Math.min(mq.sy, e.clientY);
+        const w = Math.abs(e.clientX - mq.sx);
+        const h = Math.abs(e.clientY - mq.sy);
+        const box = marqRef.current;
+        if (box) {
+          box.style.left = `${x}px`;
+          box.style.top = `${y}px`;
+          box.style.width = `${w}px`;
+          box.style.height = `${h}px`;
+        }
+        if (!mq.active && w + h > 3) {
+          mq.active = true;
+          rootRef.current?.classList.add("marquee");
+        }
+        if (mq.active) {
+          const root = rootRef.current;
+          if (root) {
+            const r = root.getBoundingClientRect();
+            const v = vp.current;
+            /* 屏幕矩形 → 画布矩形（框选永远按"碰到就算"，和 Adobe AI 一致） */
+            const cx0 = (x - r.left - v.x) / v.k;
+            const cy0 = (y - r.top - v.y) / v.k;
+            const cx1 = (x + w - r.left - v.x) / v.k;
+            const cy1 = (y + h - r.top - v.y) / v.k;
+            const next = new Set<number>();
+            if (mq.add) for (const k of selRef.current) next.add(k);
+            for (const [k, b] of pos.current) {
+              if (b.x + b.w >= cx0 && b.x <= cx1 && b.y + b.h >= cy0 && b.y <= cy1) next.add(k);
+            }
+            const same =
+              next.size === selRef.current.size && [...next].every((k) => selRef.current.has(k));
+            if (!same) {
+              selRef.current = next;
+              setSel(next);
+            }
+          }
+        }
+        return;
+      }
       const d = drag.current;
       if (!d) return;
       const dx = (e.clientX - d.sx) / vp.current.k;
@@ -921,12 +1055,14 @@ export function Board() {
         for (const m of d.members) {
           applyMember(
             m,
-            {
-              x: g.x + (m.box.x - g.x) * s,
-              y: g.y + (m.box.y - g.y) * s,
-              w: m.box.w * s,
-              h: m.box.h * s,
-            },
+            m.key < 0
+              ? { ...m.box, x: g.x + (m.box.x - g.x) * s, y: g.y + (m.box.y - g.y) * s }
+              : {
+                  x: g.x + (m.box.x - g.x) * s,
+                  y: g.y + (m.box.y - g.y) * s,
+                  w: m.box.w * s,
+                  h: m.box.h * s,
+                },
             m.key < 0 ? m.fs * s : undefined
           );
         }
@@ -941,18 +1077,27 @@ export function Board() {
         return;
       }
       /* 改大小：**保持比例**，取位移大的那个轴当主导，另一个按比例跟。
-         这样拖角往哪边推都自然，也不会把图拉变形。
-         便签的"比例"还带上字号：框放大一倍，字也大一倍。 */
+         这样拖角往哪边推都自然，也不会把图拉变形。 */
+      if (d.note) {
+        /* 便签没有"框"可拉：拖角 = 改字号，文字变大、框自己跟着长 */
+        const s = Math.max(
+          0.05,
+          Math.min(
+            40,
+            1 +
+              (Math.abs(dx) > Math.abs(dy)
+                ? dx / Math.max(24, d.box.w)
+                : dy / Math.max(24, d.box.h))
+          )
+        );
+        applyMember(m, d.box, m.fs * s);
+        return;
+      }
       const byW = d.box.w + dx;
       const byH = (d.box.h + dy) * (d.box.w / d.box.h);
-      const floor = d.note ? NOTE_MIN_W : MIN_W;
-      const w = Math.min(MAX_W, Math.max(floor, Math.abs(dx) > Math.abs(dy) ? byW : byH));
+      const w = Math.min(MAX_W, Math.max(MIN_W, Math.abs(dx) > Math.abs(dy) ? byW : byH));
       const s = w / d.box.w;
-      applyMember(
-        m,
-        { x: d.box.x, y: d.box.y, w, h: d.box.h * s },
-        d.note ? m.fs * s : undefined
-      );
+      applyMember(m, { x: d.box.x, y: d.box.y, w, h: d.box.h * s });
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", settle);
@@ -993,14 +1138,14 @@ export function Board() {
     const buildMembers = (keys: number[]): DragMember[] => {
       const out: DragMember[] = [];
       for (const k of keys) {
-        const box = pos.current.get(k);
-        if (!box) continue;
-        out.push({
-          key: k,
-          box,
-          el: elOf(k),
-          fs: k < 0 ? (notesRef.current.find((n) => n.nid === -k)?.fs || NOTE_FS_DEF) : 0,
-        });
+        const raw = pos.current.get(k);
+        if (!raw) continue;
+        const el = elOf(k);
+        const fs = k < 0 ? (notesRef.current.find((n) => n.nid === -k)?.fs || NOTE_FS_DEF) : 0;
+        /* 便签的宽高跟着文字走：以 DOM 当前量为准，`pos` 里的可能是上一轮字号留下的 */
+        const box =
+          k < 0 && el?.offsetWidth ? { ...raw, w: el.offsetWidth, h: el.offsetHeight } : raw;
+        out.push({ key: k, box, el, fs });
       }
       return out;
     };
@@ -1075,28 +1220,47 @@ export function Board() {
       e.preventDefault();
       return;
     }
-    /* 空白处按下：清空选区（再顺手平移画布） */
-    if (selRef.current.size) {
-      selRef.current = new Set();
-      setSel(selRef.current);
+    /* 空白处按下（0.4.23 改手感，照 Adobe AI）：
+       **左键 = 框选**，**中键按住拖 = 平移画布**。
+       左键不再平移 —— 那块空白是"拉一个框把东西圈起来"的地方。 */
+    if (e.button === 1) {
+      /* 中键按下去 WebView2 会在指针处插一个"自动滚动"锚点（那个四向箭头），
+         画布跟着它滚会和我们的平移打架 —— 主流做法是直接吃掉默认行为
+         （仓库里 `Snip.tsx:537` 就是同一条惯例）。 */
+      e.preventDefault();
+      pan.current = {
+        sx: e.clientX,
+        sy: e.clientY,
+        ox: vp.current.x,
+        oy: vp.current.y,
+        /* 按下那一刻的位掩码原样记下来：左键=1、中键=4，鼠标侧键是 8/16。
+           以前写死 `e.button === 1 ? 4 : 1`，侧键起手会拿到 1 → 下一帧
+           `buttons & 1` 为 0 就被判成"已松手"，光标闪一下。 */
+        mask: e.buttons || 4,
+      };
+      rootRef.current?.classList.add("panning");
+      /* `.panning` 的清除统一交给上面那个 effect 的 `settle`（mouseup / 丢事件 / 失焦
+         三种收尾都经它），这里不再另挂一个 once 监听 —— 两条路清同一个状态容易不同步。 */
+      return;
     }
-    /* 中键按下去 WebView2 会在指针处插一个"自动滚动"锚点（那个四向箭头），
-       画布跟着它滚会和我们的平移打架 —— 主流做法是直接吃掉默认行为
-       （仓库里 `Snip.tsx:537` 就是同一条惯例）。只对中键做，左键不动。 */
-    if (e.button === 1) e.preventDefault();
-    pan.current = {
-      sx: e.clientX,
-      sy: e.clientY,
-      ox: vp.current.x,
-      oy: vp.current.y,
-      /* 按下那一刻的位掩码原样记下来：左键=1、中键=4，鼠标侧键是 8/16。
-         以前写死 `e.button === 1 ? 4 : 1`，侧键起手会拿到 1 → 下一帧
-         `buttons & 1` 为 0 就被判成"已松手"，光标闪一下。 */
-      mask: e.buttons || (e.button === 1 ? 4 : 1),
-    };
-    rootRef.current?.classList.add("panning");
-    /* `.panning` 的清除统一交给上面那个 effect 的 `settle`（mouseup / 丢事件 / 失焦
-       三种收尾都经它），这里不再另挂一个 once 监听 —— 两条路清同一个状态容易不同步。 */
+    if (e.button === 0) {
+      /* 框选：起点记在屏幕坐标里，命中判定时再换算回画布坐标 */
+      marq.current = { sx: e.clientX, sy: e.clientY, add: e.shiftKey, active: false };
+      if (!e.shiftKey && selRef.current.size) {
+        selRef.current = new Set();
+        setSel(selRef.current);
+      }
+      const box = marqRef.current;
+      if (box) {
+        box.style.display = "block";
+        box.style.left = `${e.clientX}px`;
+        box.style.top = `${e.clientY}px`;
+        box.style.width = "0px";
+        box.style.height = "0px";
+      }
+      e.preventDefault();
+      return;
+    }
   };
 
   /* ---------------- 粘贴（Ctrl+V）：落盘截图目录 + 入库 + 打上这块板的标签 ---------------- */
@@ -1418,6 +1582,23 @@ export function Board() {
   }
 
   const shown = items.filter((it) => vis.has(it.id));
+  /** 图层面板的行：**图片 + 文字**，按画布上的视觉顺序（先上后下、同一行从左到右）排。
+   *  以前只列图片 —— 文字便签在板上却不在图层里，找起来只能靠眼睛扫画布。 */
+  const layerRows = useMemo(() => {
+    type Row = { key: number; y: number; x: number; img?: BoardItem; note?: BoardNote };
+    const rows: Row[] = [];
+    for (const it of items) {
+      const b = pos.current.get(it.id) ?? boxById.get(it.id);
+      rows.push({ key: it.id, y: b?.y ?? 0, x: b?.x ?? 0, img: it });
+    }
+    for (const n of notes) {
+      const b = pos.current.get(-n.nid) ?? { x: n.x, y: n.y };
+      rows.push({ key: -n.nid, y: b.y, x: b.x, note: n });
+    }
+    rows.sort((a, b) => Math.round(a.y / 80) - Math.round(b.y / 80) || a.x - b.x);
+    return rows;
+    /* `layersOpen` 进依赖：重新打开面板时按当前位置重排一次 */
+  }, [items, notes, boxById, layersOpen]);
   /* 选区包围盒：只在"多选 / 选中了组"时显示。拖动中由 `syncSelBox` 直接改 DOM */
   const selBox = sel.size > 1 ? bboxOf(sel) : null;
   /* 底部字体工具条作用的那张便签：选区里只有一张便签时 */
@@ -1426,6 +1607,28 @@ export function Board() {
     const k = [...sel][0];
     return k < 0 ? (notes.find((n) => n.nid === -k) ?? null) : null;
   })();
+  /* 本机字体里剔掉"常用"那几款：下拉里不该出现两遍同一个字体 */
+  const extraFonts = useMemo(() => sysFonts.filter((f) => !COMMON_FONT_VALS.has(f)), [sysFonts]);
+  /* 便签上的字体名可能不在上面任何一组里（别的机器设的 / 字体后来卸了）——
+     不补一条 option 的话，下拉会显示空白，看起来像"字体丢了" */
+  const strayFont =
+    lookNote?.font && !COMMON_FONT_VALS.has(lookNote.font) && !extraFonts.includes(lookNote.font)
+      ? lookNote.font
+      : "";
+  /* 字体搜索：常用排在前面，本机的全部字体跟在后面（每行用自己的字体渲染自己名字） */
+  const fontHits = useMemo(() => {
+    const q = fontQ.trim().toLowerCase();
+    const common: { v: string; label: string }[] = [
+      { v: "", label: "默认" },
+      ...FONTS.filter(([v]) => v).map(([v, label]) => ({ v, label })),
+    ];
+    const hitC = q
+      ? common.filter((o) => o.label.toLowerCase().includes(q) || o.v.toLowerCase().includes(q))
+      : common;
+    const all = extraFonts.map((f) => ({ v: f, label: f }));
+    const hitA = q ? all.filter((o) => o.label.toLowerCase().includes(q)) : all;
+    return { common: hitC, all: hitA };
+  }, [fontQ, extraFonts]);
 
   return (
     <div
@@ -1449,10 +1652,11 @@ export function Board() {
         const t = e.target as HTMLElement;
         const cell = t.closest<HTMLElement>("[data-img]");
         const note = t.closest<HTMLElement>("[data-note]");
-        /* 图层面板里的行也能右键：菜单用的是同一份"这张图"的菜单（打开/另存/定位） */
+        /* 图层面板里的行也能右键：图片用"这张图"的菜单，文字行用便签菜单（改字/删掉） */
         const layer = t.closest<HTMLElement>("[data-layer]");
-        if (!cell && !note && t.closest(".board-layers") && !layer) {
-          // 面板空白处：没有可作用于的图，直接不弹（否则会弹出"画布"菜单，语义是错的）
+        const layerNote = t.closest<HTMLElement>("[data-layer-note]");
+        if (!cell && !note && t.closest(".board-layers") && !layer && !layerNote) {
+          // 面板空白处：没有可作用于的对象，直接不弹（否则会弹出"画布"菜单，语义是错的）
           setMenu(null);
           return;
         }
@@ -1460,7 +1664,11 @@ export function Board() {
           x: e.clientX,
           y: e.clientY,
           id: cell ? Number(cell.dataset.img) : layer ? Number(layer.dataset.layer) : null,
-          note: note ? Number(note.dataset.note) : undefined,
+          note: note
+            ? Number(note.dataset.note)
+            : layerNote
+              ? Number(layerNote.dataset.layerNote)
+              : undefined,
         });
       }}
     >
@@ -1529,8 +1737,9 @@ export function Board() {
           );
         })}
 
-        {/* 文字便签（0.4.17 起是"文本框"）：只剩文字本身，没有纸片底色、没有边框。
-            框的宽高都存库，拖右下角整体缩放时**字号跟着框一起变**。 */}
+        {/* 文字便签（0.4.17 起是"文本框"）：**框就是文字本身的尺寸** —— 不设 width/height，
+            由内容撑开。所以没有"一个大框套着一行字"的观感，选中也只是文字底下淡淡一层。
+            缩放 = 改字号（字变大 → 框自己变大），不做"拉框裁字"。 */}
         {notes.map((n) => {
           const b = pos.current.get(-n.nid) ?? { x: n.x, y: n.y, w: n.w, h: n.h };
           const editing = editId === n.nid;
@@ -1543,8 +1752,6 @@ export function Board() {
               style={{
                 left: b.x,
                 top: b.y,
-                width: b.w,
-                height: b.h,
                 fontSize: fs,
                 fontFamily: fontCss(n.font),
                 color: n.color || undefined,
@@ -1563,6 +1770,9 @@ export function Board() {
                   defaultValue={n.text}
                   autoFocus
                   spellCheck={false}
+                  /* wrap=off：**只有回车才换行**。默认的 textarea 会按容器宽度软折行，
+                     双击进编辑时一行字突然变两行，看起来像"文字被改了"。 */
+                  wrap="off"
                   placeholder="写点什么…（Esc 保存，清空即删）"
                   onBlur={(e) => commitNote(n.nid, e.currentTarget.value)}
                   onKeyDown={(e) => {
@@ -1596,42 +1806,85 @@ export function Board() {
         )}
       </div>
 
-      {/* 左侧图层面板（0.4.15）：板上所有图片按板内顺序列出来，点哪行就把哪张
-          置顶并平移到视口正中。**不做 PS 那种"列表上方压下方"的层叠语义** ——
-          列表顺序只表示"板上有哪些图"，层级只认"最近点了谁"。 */}
+      {/* 框选矩形（0.4.23）：左键在空白处拖出来的那个框。
+          用 ref 直接改 style（拖动中每帧 setState 会让整块画布重渲染）。 */}
+      <div className="board-marquee" ref={marqRef} />
+
+      {/* 左侧图层面板（0.4.15，0.4.24 起**图片与文字都在里面**）：
+          列表按画布上的视觉顺序排（先上后下、同一行从左到右），点一行 = 选中并在视口居中，
+          文字行双击直接改字。**不做 PS 那种"列表上方压下方"的层叠语义** ——
+          层级只认"最近点了谁"。 */}
       {layersOpen && (
         <div className="board-layers" onMouseDown={(e) => e.stopPropagation()}>
           <div className="board-layers-head">
             <Layers size={13} strokeWidth={1.8} className="board-layers-icon" />
             <span className="board-layers-title">图层</span>
-            <span className="mono board-layers-count">{items.length}</span>
+            <span className="mono board-layers-count" title="图片数 · 文字数">
+              {items.length}
+              {notes.length ? `+${notes.length}` : ""}
+            </span>
             <button title="收起图层面板（L）" onClick={() => setLayersOpen(false)}>
               <X size={12} strokeWidth={1.9} />
             </button>
           </div>
           <div className="board-layers-list">
-            {items.map((it) => (
-              <div
-                key={it.id}
-                data-layer={it.id}
-                className={`board-layer ${topId === it.id ? "on" : ""}`}
-                title={`${it.name}\n点一下 = 置顶并居中`}
-                onClick={() => {
-                  setTopId(it.id);
-                  focusItem(it.id);
-                }}
-              >
-                {broken.has(it.id) ? (
-                  <span className="board-layer-ph mono">
-                    {(it.name.split(".").pop() || "?").toUpperCase().slice(0, 4)}
+            {!layerRows.length && <div className="board-layers-empty">板上还没有东西</div>}
+            {layerRows.map((r) => {
+              if (r.img) {
+                const it = r.img;
+                return (
+                  <div
+                    key={it.id}
+                    data-layer={it.id}
+                    className={`board-layer ${sel.has(it.id) ? "on" : ""}`}
+                    title={`${it.name}\n点一下 = 选中并居中`}
+                    onClick={() => {
+                      setTopId(it.id);
+                      const n = new Set([it.id]);
+                      selRef.current = n;
+                      setSel(n);
+                      focusAt(it.id);
+                    }}
+                  >
+                    {broken.has(it.id) ? (
+                      <span className="board-layer-ph mono">
+                        {(it.name.split(".").pop() || "?").toUpperCase().slice(0, 4)}
+                      </span>
+                    ) : (
+                      <img src={it.src} alt="" draggable={false} loading="lazy" decoding="async" />
+                    )}
+                    <span className="board-layer-name">{it.name}</span>
+                    {topId === it.id && <span className="board-layer-top">顶</span>}
+                  </div>
+                );
+              }
+              const n = r.note!;
+              const preview = n.text.replace(/\s+/g, " ").trim();
+              return (
+                <div
+                  key={`n${n.nid}`}
+                  data-layer-note={n.nid}
+                  className={`board-layer board-layer-note ${sel.has(-n.nid) ? "on" : ""}`}
+                  title={`${preview || "（空文字）"}\n点 = 选中并居中 · 双击 = 改字`}
+                  onClick={() => {
+                    const s = new Set([-n.nid]);
+                    selRef.current = s;
+                    setSel(s);
+                    focusAt(-n.nid);
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setEditId(n.nid);
+                  }}
+                >
+                  <span className="board-layer-ph board-layer-t">T</span>
+                  <span className="board-layer-name">{preview || "（空文字）"}</span>
+                  <span className="board-layer-meta mono">
+                    {Math.round(n.fs || NOTE_FS_DEF)}
                   </span>
-                ) : (
-                  <img src={it.src} alt="" draggable={false} loading="lazy" decoding="async" />
-                )}
-                <span className="board-layer-name">{it.name}</span>
-                {topId === it.id && <span className="board-layer-top">顶</span>}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1669,18 +1922,22 @@ export function Board() {
           固定在底部中央 —— 不跟着画布平移缩放，所以永远点得到。 */}
       {lookNote && (
         <div className="board-notebar" onMouseDown={(e) => e.stopPropagation()}>
-          <select
-            className="board-notebar-font"
-            value={lookNote.font}
-            title="字体（系统里没装的字体会自动回退到默认）"
-            onChange={(e) => setNoteLook(lookNote.nid, { font: e.target.value })}
+          {/* 字体按钮：点开带搜索的弹层。本机装了上千款字体，原生 select 拉不动 */}
+          <button
+            className="board-notebar-fontbtn"
+            title={`字体：常用 + 本机已安装${extraFonts.length ? `（${extraFonts.length} 款）` : ""}`}
+            onClick={() => {
+              setFontQ("");
+              setFontPop((v) => !v);
+            }}
           >
-            {FONTS.map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </select>
+            <span className="board-notebar-fontname">
+              {lookNote.font
+                ? (FONTS.find(([v]) => v === lookNote.font)?.[1] ?? lookNote.font)
+                : "默认"}
+            </span>
+            <ChevronDown size={11} strokeWidth={2} />
+          </button>
           <span className="board-notebar-sep" />
           <button
             title="字号变小"
@@ -1721,6 +1978,72 @@ export function Board() {
               onClick={() => setNoteLook(lookNote.nid, { color: v })}
             />
           ))}
+        </div>
+      )}
+
+      {/* 字体选择弹层：搜索 + 每行用自己的字体渲染自己名字（选之前就能看到长什么样）。
+          本机一千多款字体全列出来会卡，先渲染 200 条，剩下的靠继续输入缩小范围。 */}
+      {lookNote && fontPop && (
+        <div className="board-fontpop" onMouseDown={(e) => e.stopPropagation()}>
+          <input
+            className="board-fontpop-q"
+            autoFocus
+            spellCheck={false}
+            placeholder={`搜索 ${extraFonts.length + FONTS.length - 1} 款字体…`}
+            value={fontQ}
+            onChange={(e) => setFontQ(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setFontPop(false);
+              }
+            }}
+          />
+          <div className="board-fontpop-list">
+            {fontHits.common.map((o) => (
+              <button
+                key={o.v || "def"}
+                className={`board-fontpop-row ${lookNote.font === o.v ? "on" : ""}`}
+                style={{ fontFamily: fontCss(o.v) }}
+                onClick={() => {
+                  setNoteLook(lookNote.nid, { font: o.v });
+                  setFontPop(false);
+                }}
+              >
+                {o.label}
+                {o.v && <span className="board-fontpop-tag mono">{o.v}</span>}
+              </button>
+            ))}
+            {fontHits.all.length > 0 && <div className="board-fontpop-sep">本机已安装</div>}
+            {fontHits.all.slice(0, 200).map((o) => (
+              <button
+                key={o.v}
+                className={`board-fontpop-row ${lookNote.font === o.v ? "on" : ""}`}
+                style={{ fontFamily: fontCss(o.v) }}
+                title={o.v}
+                onClick={() => {
+                  setNoteLook(lookNote.nid, { font: o.v });
+                  setFontPop(false);
+                }}
+              >
+                {o.label}
+              </button>
+            ))}
+            {fontHits.all.length > 200 && (
+              <div className="board-fontpop-more">
+                还有 {fontHits.all.length - 200} 款 —— 继续输入缩小范围
+              </div>
+            )}
+            {!fontHits.common.length && !fontHits.all.length && (
+              <div className="board-fontpop-more">没有匹配的字体</div>
+            )}
+            {strayFont && (
+              <div className="board-fontpop-more">
+                当前字体「{strayFont}」不在本机字体列表里，显示时会回退
+              </div>
+            )}
+          </div>
         </div>
       )}
 

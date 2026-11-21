@@ -59,6 +59,8 @@ const RIGHT: Group[] = [
       { keys: ["Ctrl", "C"], label: "复制原文件", hint: "CF_HDROP，粘出来是文件不是位图" },
       { keys: ["Ctrl", "Z"], label: "撤销上一步文件操作" },
       { keys: ["T"], label: "给选中的素材打标签", hint: "多选则整批一起打" },
+      { keys: ["右键"], label: "在鼠标旁看这张图的详情", hint: "点外部或 Esc 关掉" },
+      { keys: ["Shift", "右键"], label: "打开原来的右键菜单", hint: "打开 / 贴图 / 分组 / 重命名…" },
     ],
   },
   {

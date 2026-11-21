@@ -257,6 +257,7 @@ export const tauriSource: Source = {
   boardNoteDel: (board, nid) => invoke!<number>("am_board_note_del", { board, nid }),
   /** 打组 / 解组：`grp = -1` 新建（后端发号并返回），`0` 解组 */
   boardGroup: (board, keys, grp) => invoke!<number>("am_board_group", { board, keys, grp }),
+  systemFonts: () => invoke!<string[]>("am_system_fonts"),
   boardAddPaths: (paths) =>
     invoke!<[BoardItemDto[], string[]]>("am_board_add_paths", { paths }),
   peekTop: (on) => invoke!<boolean>("am_peek_top", { on }),
