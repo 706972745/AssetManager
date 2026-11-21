@@ -522,7 +522,7 @@ fn bar_label(k: BarKind) -> (&'static str, &'static str) {
         BarKind::Tool(t) => tool_label(t),
         BarKind::Group(g) => (
             GROUP_NAMES.get(g).copied().unwrap_or(""),
-            "悬停展开 · 还有更多",
+            "点一下 = 当前工具 · 悬停展开更多",
         ),
         BarKind::Chip(Chip::Color) => ("标注颜色", "点开调色板"),
         BarKind::Chip(Chip::Width) => ("线条粗细", "滚轮 / [ ] 调节"),
@@ -698,6 +698,9 @@ struct Ctx {
     menu_open: bool,
     /// 下拉矩形（绘制与命中共用）
     menu: [i32; 4],
+    /// 下拉里悬停的条目（0..MENU_ITEMS）。**没有它，菜单里鼠标移过去毫无反馈** ——
+    /// owner 2026-11-21 的截图报的就是这个：三行长得一模一样，看不出要交付哪一条。
+    menu_hover: Option<usize>,
     /// 调色板展开状态与它的矩形
     palette: bool,
     sw: [i32; 4],
@@ -1915,7 +1918,10 @@ impl Ctx {
     }
 
     fn sw_hit(&self, x: i32, y: i32) -> Option<u32> {
-        if !self.palette || !inside(self.sw, x, y) {
+        /* 和 `bar_hit` 同一条原则：**没选区时这些东西根本不画，就不该命中** ——
+           否则会点到屏幕上一块看不见的色板。回归测试早就这么断言了
+           （`tray_and_palette_hit_each_item` 第 ③ 段），只是实现里漏了这一条。 */
+        if !self.palette || !self.has_sel() || !inside(self.sw, x, y) {
             return None;
         }
         let lx = x - self.sw[0] - SW_PAD;
@@ -2673,6 +2679,12 @@ impl Ctx {
         let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
         for (i, (label, key, _, icon)) in MENU_ITEMS.iter().enumerate() {
             let iy = y + 5 + i as i32 * (MENU_ITEM_H + MENU_GAP);
+            /* 悬停底：和托盘条目同一套（居中、圆角、`pal.hover`）——
+               不给反馈的话三行长得一模一样，用户不知道点下去会交付哪一条
+               （owner 2026-11-21 截图报的"没有鼠标移过去的效果"）。 */
+            if self.menu_hover == Some(i) {
+                self.pfill_round(x + 5, iy, x + w - 5, iy + MENU_ITEM_H, 8, self.pal.hover);
+            }
             /* 原型 `.menu-item`：左内距 9、图标 16、图标与文字间距 9 */
             self.draw_icon(
                 x as f32 + 17.0,
@@ -3442,6 +3454,7 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
         if let Some(i) = c.menu_hit(x, y) {
             let act = MENU_ITEMS[i].2;
             c.menu_open = false;
+            c.menu_hover = None;
             deliver_to(c, act);
             c.render();
             if c.done.is_some() {
@@ -3451,6 +3464,7 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
         }
         if c.menu_open {
             c.menu_open = false;
+            c.menu_hover = None;
             c.render();
         }
         // 主条：选择 | 5 组 | 颜色 粗细 填充 | 撤销 重做 | [复制|▾] | 取消
@@ -3474,15 +3488,15 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
                     c.hover_due = None;
                 }
                 BarKind::Group(g) => {
-                    if c.open == Some(i) {
-                        c.open = None;
-                        c.tray_hover = None;
-                    } else {
-                        /* 点组按钮 = 选中"上次用的那个"，同时展开托盘（无 hover 设备也能用） */
-                        c.tool = c.face[g];
-                        c.open = Some(i);
-                        c.palette = false;
-                    }
+                    /* 点组按钮 = **一定选中**该组当前那个工具（默认工具 / 上次用的），并收起托盘。
+                       以前这里写成"托盘已经开着就只收托盘"，而悬浮 110ms 就会把托盘打开 ——
+                       于是"先悬浮、再点"的人永远选不中，表现就是"这些按钮点不了/无法选中，
+                       必须悬浮后再从折叠里挑"（owner 2026-11-21 报的）。
+                       换组里的别的工具走悬浮（110ms 展开），这条手势本来就有。 */
+                    c.tool = c.face[g];
+                    c.open = None;
+                    c.tray_hover = None;
+                    c.palette = false;
                     c.hover_due = None;
                 }
                 BarKind::Chip(Chip::Color) => {
@@ -3508,7 +3522,11 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
                         }
                     }
                     "copy" => deliver_to(c, "copy"),
-                    "copymore" => c.menu_open = !c.menu_open,
+                    "copymore" => {
+                        c.menu_open = !c.menu_open;
+                        /* 每次开合都清一次：否则重开时还留着上次那一行的高亮 */
+                        c.menu_hover = None;
+                    }
                     "save" => deliver_to(c, "save"),
                     "pin" => deliver_to(c, "peek"),
                     _ => c.done = Some(("cancel".into(), Vec::new(), [0.0; 4])),
@@ -3651,6 +3669,13 @@ unsafe fn on_move(x: i32, y: i32) {
     let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
     let Some(c) = g.as_mut() else { return };
     if c.update_bar_hover(x, y) {
+        c.render();
+    }
+    /* 「复制 ▾」下拉的悬停：它挂在条下方，坐标不落在 bar/tray 上，所以单独记
+       `menu_hover`（`menu_hit` 里已经排掉了 1px 缝隙，和点击用的是同一套几何）。 */
+    let mh = c.menu_hit(x, y);
+    if mh != c.menu_hover {
+        c.menu_hover = mh;
         c.render();
     }
     match c.drag {
@@ -3820,6 +3845,7 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                                 c.tray_hover = None;
                                 c.hover_due = None;
                                 c.menu_open = false;
+                                c.menu_hover = None;
                                 c.render();
                             } else {
                                 c.done = Some(("cancel".into(), Vec::new(), [0.0; 4]))
@@ -3857,6 +3883,11 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         0x53 if ctrl && shift => deliver_to(c, "saveas"),
                         0x53 if ctrl => deliver_to(c, "save"),
                         0x43 if ctrl => deliver_to(c, "copy"),
+                        /* Ctrl+P：菜单里写着「贴到桌面 Ctrl+P」，但这颗键**从来没人接**
+                           （0.4.24 实测：菜单能点、Ctrl+P 按了没反应）。用户报的
+                           "快捷键贴图用不了"里有一半就是它。必须放在 `0x50 if !ctrl`
+                           （画笔）之前，否则又是一次"裸键截胡 Ctrl 组合"（见下面那条注释）。 */
+                        0x50 if ctrl => deliver_to(c, "peek"),
                         /* 工具字母键（参考稿 §9）。**必须放在所有 `if ctrl` 分支之后**：
                            Rust 的 match 从上往下匹配，裸 `0x43 =>` 写在前面会把
                            Ctrl+C 截胡 —— 0.4.19 就是这个坑（复制、保存、全选全失效）。
@@ -4065,6 +4096,7 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
                 more_hover: false,
                 menu_open: false,
                 menu: [0; 4],
+                menu_hover: None,
                 palette: false,
                 sw: [0; 4],
                 fill: false,
@@ -4234,6 +4266,13 @@ mod bar_preview {
             editor: 0,
             editing: None,
             done: None,
+            /* 工具栏 v3 新增的三个字段（分裂按钮的下拉）：测试用的 Ctx 也得给初值，
+               否则 `cargo test` 直接编不过 —— 0.4.23 加字段时漏了这一处，
+               0.4.24 才发现（测试红了没人看，等于没有测试）。 */
+            more_hover: false,
+            menu_open: false,
+            menu: [0; 4],
+            menu_hover: None,
         });
         (c, bmp)
     }
@@ -4411,11 +4450,11 @@ mod bar_preview {
             c.sel = Some([40, 40, 500, 300]);
             c.bar = [200, 420, bar_total_w(), BAR_H];
 
-            /* ① 四个组：逐个展开，托盘里每一项中心都命中自己 */
+            /* ① 五个组：逐个展开，托盘里每一项中心都命中自己 */
             let group_is: Vec<usize> = (0..c.bar_len())
                 .filter(|i| matches!(c.bar_item(*i), BarKind::Group(_)))
                 .collect();
-            assert_eq!(group_is.len(), 4, "必须有 4 个折叠组");
+            assert_eq!(group_is.len(), 5, "必须有 5 个折叠组");
             for i in group_is {
                 let g = c.group_of(i).expect("组下标");
                 c.open = Some(i);
@@ -4561,7 +4600,13 @@ mod bar_preview {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(acts, vec!["undo", "redo", "copy", "save", "pin", "cancel"]);
+            /* 0.4.23 工具栏 v3：`保存` / `贴图` 并进了「复制 ▾」分裂按钮的右段，
+               主条上现在的动作是 undo / redo / copy / copymore / cancel。
+               这条断言原来写的是 v2 的 `…"save","pin"…`，改版后没人更新 → 一直红。 */
+            assert_eq!(
+                acts,
+                vec!["undo", "redo", "copy", "copymore", "cancel"]
+            );
 
             /* ② 主条第 i 项中心必须命回第 i 项 */
             for i in 0..c.bar_len() {
@@ -4586,8 +4631,9 @@ mod bar_preview {
                     _ => {}
                 }
             }
-            assert_eq!(groups, 4, "必须有 4 个折叠组");
-            assert_eq!(tools.len(), 12, "12 个工具都要在工具栏上（组里的也算）");
+            /* 0.4.23 起是 5 个折叠组（形状 / 画笔 / 文字 / 遮挡 / 素材），共 17 个工具 */
+            assert_eq!(groups, 5, "必须有 5 个折叠组");
+            assert_eq!(tools.len(), 17, "17 个工具都要在工具栏上（组里的也算）");
             for t in [
                 Tool::Select,
                 Tool::Rect,
@@ -4600,7 +4646,9 @@ mod bar_preview {
                 Tool::Blur,
                 Tool::Text,
                 Tool::Number,
-                Tool::Eraser,
+                /* 橡皮擦不在这个列表里：0.4.23 工具栏 v3 之后它**没有任何入口**
+                   （不在 BAR、不在 GROUPS、也没有键位），已报给 owner 决定去留。
+                   在这之前别把它写进断言，否则测试会假装它在。 */
             ] {
                 assert!(tools.contains(&t), "{t:?} 不在工具栏上");
             }
