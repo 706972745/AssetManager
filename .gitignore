@@ -53,3 +53,9 @@ Thumbs.db
 /docs/reports/
 
 tools/_*.bmp
+
+# ===== 本机临时脚本 / 缓存（qa 期的探针，不进公库）=====
+qa-tmp/
+app/qa-tmp/
+__pycache__/
+*.pyc
