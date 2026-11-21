@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS collection_assets (
   added_at INTEGER NOT NULL,
   PRIMARY KEY (collection_id, asset_gid)
 );
-CREATE INDEX IF NOT EXISTS idx_collection_assets_gid ON collection_assets(asset_gid);
+/* 这里的索引**不能写进上面这段批量脚本**：一个库里已经有一张同名但结构不同的
+   `collection_assets`（0.4.4 起库 db 里那份用 `asset_id`）时，`CREATE TABLE IF NOT EXISTS`
+   会静默跳过，紧接着按 `asset_gid` 建索引就报 `no such column`。见 `open()` 里的条件建索引。 */
 
 /* 灵感板的摆位（0.1.18）：板上每张图的**位置与尺寸**，跨库存在（一块板可以横跨几个库）。
    `board` = `tag:<标签名>` / `snap:<快照 id>`；`gid` 是全局素材 id。
@@ -110,6 +112,21 @@ CREATE TABLE IF NOT EXISTS board_items (
   h REAL NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (board, gid)
+) WITHOUT ROWID;
+
+/* 灵感板上的**文字便签**（0.4.14）：板上随手写的注释，位置/尺寸/文字都在这里。
+   和 board_items 一样只是视图记忆，删掉不丢任何素材；
+   `nid` 在一板内唯一（后端按 MAX(nid)+1 发号），前端用负数当 key 与图片 gid 区分。 */
+CREATE TABLE IF NOT EXISTS board_notes (
+  board TEXT NOT NULL,
+  nid INTEGER NOT NULL,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  w REAL NOT NULL,
+  h REAL NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (board, nid)
 ) WITHOUT ROWID;
 
 "#;
@@ -129,6 +146,17 @@ pub fn open(path: &Path) -> Res<Connection> {
         if cols.iter().any(|c| c == "group_id") {
             c.execute("CREATE INDEX IF NOT EXISTS idx_tags_group ON tags(group_id)", [])
                 .map_err(|e| e.to_string())?;
+        }
+    }
+    /* 同一个道理：`collection_assets` 可能已经是库 db 那一版（列叫 `asset_id`），
+       只有确认列真的叫 `asset_gid` 才建索引 —— 否则打开就报 `no such column`。 */
+    if let Some(cols) = columns(&c, "collection_assets")? {
+        if cols.iter().any(|c| c == "asset_gid") {
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_collection_assets_gid ON collection_assets(asset_gid)",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     db::migrate_versioned(&c)?;
@@ -872,6 +900,66 @@ pub fn board_place(c: &Connection, board: &str, rows: &[(i64, f64, f64, f64, f64
     Ok(n)
 }
 
+/* ------ 灵感板文字便签（0.4.14） ------ */
+
+/// 一块板上的全部便签：`(nid, x, y, w, h, text)`，按创建顺序（nid 升序）。
+pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<(i64, f64, f64, f64, f64, String)>> {
+    let mut st = c
+        .prepare("SELECT nid, x, y, w, h, text FROM board_notes WHERE board = ?1 ORDER BY nid")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(params![board], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// 新建或更新一张便签。`nid = None` 表示新建（发号 `MAX(nid)+1`），返回最终 nid。
+pub fn board_note_put(
+    c: &Connection,
+    board: &str,
+    nid: Option<i64>,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    text: &str,
+) -> Res<i64> {
+    let nid = match nid {
+        Some(n) if n > 0 => n,
+        _ => {
+            let max: i64 = c
+                .query_row(
+                    "SELECT COALESCE(MAX(nid), 0) FROM board_notes WHERE board = ?1",
+                    params![board],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            max + 1
+        }
+    };
+    c.execute(
+        "INSERT INTO board_notes (board, nid, x, y, w, h, text, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(board, nid) DO UPDATE SET
+           x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h,
+           text=excluded.text, updated_at=excluded.updated_at",
+        params![board, nid, x, y, w, h, text, db::now_ts()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(nid)
+}
+
+/// 删一张便签。
+pub fn board_note_del(c: &Connection, board: &str, nid: i64) -> Res<usize> {
+    c.execute(
+        "DELETE FROM board_notes WHERE board = ?1 AND nid = ?2",
+        params![board, nid],
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +1011,41 @@ mod tests {
         // 删库行不碰别的库
         remove_lib_row(&c, "E:/lib-a").unwrap();
         assert_eq!(lib_roots(&c).unwrap(), vec!["E:/lib-b"]);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 便签：发号、改写、删、**板之间互不串**
+    #[test]
+    fn board_notes_roundtrip() {
+        let d = tmp("notes");
+        let c = open(&d.join("index.db")).unwrap();
+
+        let a = board_note_put(&c, "tag:参考", None, 10.0, 20.0, 240.0, 120.0, "第一张").unwrap();
+        let b = board_note_put(&c, "tag:参考", None, 30.0, 40.0, 240.0, 90.0, "第二张").unwrap();
+        assert!(b > a, "新便签要拿到更大的 nid");
+
+        let rows = board_notes(&c, "tag:参考").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].5, "第一张");
+        assert_eq!(rows[1].1, 30.0);
+
+        // 同一个 nid 再写一次 = 更新，不是多一行
+        board_note_put(&c, "tag:参考", Some(a), 11.0, 21.0, 260.0, 140.0, "改过").unwrap();
+        let rows = board_notes(&c, "tag:参考").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].5, "改过");
+        assert_eq!(rows[0].3, 260.0);
+
+        // 别的板看不到这条
+        assert!(board_notes(&c, "snap:7").unwrap().is_empty());
+        // 别的板上发的号从 1 重新开始
+        let o = board_note_put(&c, "snap:7", None, 0.0, 0.0, 240.0, 120.0, "别的板").unwrap();
+        assert_eq!(o, 1);
+
+        assert_eq!(board_note_del(&c, "tag:参考", a).unwrap(), 1);
+        assert_eq!(board_notes(&c, "tag:参考").unwrap().len(), 1);
+        assert_eq!(board_note_del(&c, "tag:参考", a).unwrap(), 0);
 
         let _ = std::fs::remove_dir_all(&d);
     }

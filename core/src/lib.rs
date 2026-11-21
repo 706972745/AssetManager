@@ -85,6 +85,13 @@ pub struct App {
     /// 快照 → 全局 id 的换算缓存：`快照 id → (updated_at, ids)`。
     /// 列表按快照筛时每翻一页都要这批 id，重算哈希太贵；快照一改（updated_at 变）就作废。
     snap_ids_cache: std::sync::Mutex<std::collections::HashMap<i64, (i64, Vec<i64>)>>,
+    /// **内置库**（软件自己的截图目录）的根路径，由壳层在启动时注入。
+    ///
+    /// core 不该知道 exe 装在哪 —— 判定规则（同名 `screenshots` + 同级有 exe）
+    /// 留在 `src-tauri`（`is_builtin_root`），这里只认结果。
+    /// 用途只有一个：读标签 / 分组 / 快照时把内置库**合并**进当前库的视图
+    /// （owner 2026-11-20：内置库的数据一直在，且与选择的库合并；素材不混）。
+    pub builtin_roots: Vec<String>,
 }
 
 /// 缓存目录是否真的可写：建得出来、也写得进去才算。
@@ -166,6 +173,7 @@ impl App {
             thumbs,
             current: None,
             snap_ids_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            builtin_roots: Vec::new(),
         };
         /* 老库文件还在数据目录里飘着 → 搬到各自库根的 `.AssetManager/lib.db`。
            必须在 reload 之前做：搬完注册行里记的路径才是新位置。 */
@@ -174,7 +182,15 @@ impl App {
         app.seed_tags_into_existing_libs();
         app.migrate_thumbs_into_libs();
         app.migrate_snapshots_into_libs();
+        /* 分组从「注册库跨库一份」拆成「每库一份」（0.4.4）。必须排在 reload 之后：
+           拆的时候要知道库里有哪些库、每张素材归谁。 */
+        app.migrate_collections_into_libs();
         app.current = app.libs.first().map(|l| l.id);
+
+        /* 清掉历史遗留的空壳（0.4.7，owner 2026-11-20："空的分组/快照/标签就消失，
+           当前这个库如果是 0 的，就应该删除"）。宽限 5 分钟：
+           "新建分组 → 再拖图进去"是正常流程，建完就被清掉会让人以为没建成功。 */
+        let _ = app.prune_empty_shelves(EMPTY_SHELF_GRACE);
 
         /* 库文件夹图标：每次启动给所有已登记的库对齐一遍。
            系统清理（比如磁盘清理删了 desktop.ini）、换机、库搬家之后靠这一遍自愈。
@@ -265,6 +281,44 @@ impl App {
             .ok_or_else(|| "这个素材已经不属于任何库了（可能刚被移除）".to_string())
     }
 
+    /// 壳层在启动时告诉 core「哪几个根是内置库（截图目录）」。见 `builtin_roots` 字段。
+    pub fn set_builtin_roots(&mut self, roots: Vec<String>) {
+        self.builtin_roots = roots;
+    }
+
+    fn is_builtin_lib(&self, root: &str) -> bool {
+        let r = norm_path(root);
+        self.builtin_roots.iter().any(|b| norm_path(b) == r)
+    }
+
+    /// **界面能看见的库** = 当前库 + 内置库。
+    ///
+    /// owner 2026-11-20 的口径：内置库（截图）的数据"一直都在"，并且和当前选择的库
+    /// **合并**显示；非内置库之间严格分开。注意这里只用于**元数据**
+    /// （标签 / 标签分组 / 分组 / 快照）—— 素材网格不合并：截图还是切到"截图"才看。
+    fn view_libs(&self) -> Vec<&Lib> {
+        let cur = self.cur_lib().map(|l| l.id);
+        let mut out: Vec<&Lib> = Vec::new();
+        for l in &self.libs {
+            if Some(l.id) == cur || self.is_builtin_lib(&l.root) {
+                out.push(l);
+            }
+        }
+        out
+    }
+
+    /// 读标签体系要扫的连接：正常是「当前库 + 内置库」，
+    /// **一个库都没有**时才退注册库（那里只有 0.3.9 之前的老标签，用来兜底显示）。
+    /// bool = 这个连接是不是真实素材库（假的就没有使用数可算）。
+    fn tag_sources(&self) -> Vec<(&rusqlite::Connection, bool)> {
+        let libs = self.view_libs();
+        if libs.is_empty() {
+            vec![(&self.reg, false)]
+        } else {
+            libs.into_iter().map(|l| (&l.conn, true)).collect()
+        }
+    }
+
     /// 全局 id → 所在库的连接（写元数据 / 出缩略图都走这一句，
     /// 别让上层自己 `libs.iter().find(...)` —— 少一处就能少一处拿错库）
     pub fn conn_for(&self, g: i64) -> Result<&rusqlite::Connection, String> {
@@ -311,6 +365,21 @@ impl App {
             }
         }
         best.map(|(_, id)| id)
+    }
+
+    /// 当前选中的库（启动时对齐持久化的活动库；都没有就是 `None`）。
+    pub fn current_lib_id(&self) -> Option<i64> {
+        self.current
+    }
+
+    /// 库的显示名 = 库根最后一段目录名。导出文件名要靠它区分不同库
+    /// （`userdata-时间戳` 两个库导出来会同名，用户根本分不清哪份是哪份）。
+    pub fn lib_label(&self, id: i64) -> Option<String> {
+        self.libs
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| Path::new(&l.root).file_name())
+            .map(|n| n.to_string_lossy().to_string())
     }
 
     /* ------------------------------------------------------------ 库管理 */
@@ -775,15 +844,21 @@ impl App {
         let needle = text.trim().trim_start_matches('#').trim().to_string();
         q.search_tag_ids = None;
 
-        /* 分组筛选（0.2.x）：成员是**全局 asset id**，按库号拆成各库的库内 id。
-           拆完每个库只查自己那一批 —— 跨库分组也能一次查对，不用把三个库全扫一遍。 */
+        /* 分组筛选（0.4.4：分组跟着库走）：传进来的是**全局**分组 id，
+           拆出库号直接查那个库 —— 不用再拼全局成员表。 */
         let coll_ids: Option<std::collections::HashMap<i64, Vec<i64>>> = match q.collection {
             Some(cid) => {
-                let gids = reg::coll_gids(&self.reg, cid)?;
+                let (lib_id, local) = ungid(cid);
                 let mut m: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
-                for g in gids {
-                    let (lib_id, local) = ungid(g);
-                    m.entry(lib_id).or_default().push(local);
+                match self.lib(lib_id) {
+                    Ok(l) => {
+                        let ids = db::coll_ids(&l.conn, local)?;
+                        if !ids.is_empty() {
+                            m.insert(lib_id, ids);
+                        }
+                    }
+                    /* 库刚被移除：空结果，不能把整库素材都列出来 */
+                    Err(_) => {}
                 }
                 Some(m)
             }
@@ -859,7 +934,15 @@ impl App {
         };
 
         let mut all: Vec<model::Asset> = Vec::new();
-        for l in &self.libs {
+        /* 合并分页只发生在**当前库内部**（0.4.5，owner 2026-11-20："全部都要隔离"）。
+           以前这里遍历所有库：一按标签/快照/颜色筛，A 库的图就和 B 库混在同一页，
+           用户看到的就是"切了库也没用，数据还是合在一起的"。
+           没有当前库（启动瞬间还没对齐）才退回全部库，避免列表空白。 */
+        let targets: Vec<&Lib> = match self.current {
+            Some(id) => self.libs.iter().filter(|l| l.id == id).collect(),
+            None => self.libs.iter().collect(),
+        };
+        for l in &targets {
             let mut q2 = q.clone();
             q2.dir_id = None;
             let (tids, trule) = lib_tag_lookup(&l.conn, tag_name.as_deref());
@@ -1071,33 +1154,39 @@ impl App {
         self.cur_lib().map(|l| &l.conn).unwrap_or(&self.reg)
     }
 
-    /// 手工标签 + 使用数（**当前库**）。
-    /// 规则标签（T34）的计数现场算 —— 规则是"活"的，没有可数的关联行。
+    /// 手工标签 + 使用数（**当前库 + 内置库合并**，按名字去重）。
+    ///
+    /// 同名标签在两个库里是两条独立记录（id 空间各自一套），这里按**名字**合计数，
+    /// 颜色 / 分组以**先扫到的那个库**（也就是当前库）为准 —— 否则切库时标签颜色会跳。
+    /// 规则标签（T34）的计数现场算：规则是"活"的，没有可数的关联行。
     pub fn tags(&self) -> Result<Vec<model::TagCount>, String> {
-        let c = self.tag_conn();
-        let meta = reg::tags_meta(c)?;
-        let has_lib = self.cur_lib().is_some();
-        let mut counts: HashMap<i64, i64> = if has_lib {
-            db::counts_by_tag(c)?.into_iter().collect()
-        } else {
-            HashMap::new()
-        };
-        let mut out = Vec::new();
-        for t in &meta {
-            let mut n = counts.remove(&t.id).unwrap_or(0);
-            if let Some(rule) = t.rule.as_deref().and_then(reg::parse_rule) {
-                if has_lib {
-                    n = db::count_rule(c, &rule)?;
-                } else {
-                    n = 0;
+        let mut out: Vec<model::TagCount> = Vec::new();
+        let mut at: HashMap<String, usize> = HashMap::new();
+        for (c, real) in self.tag_sources() {
+            let meta = reg::tags_meta(c)?;
+            let mut counts: HashMap<i64, i64> = if real {
+                db::counts_by_tag(c)?.into_iter().collect()
+            } else {
+                HashMap::new()
+            };
+            for t in &meta {
+                let mut n = counts.remove(&t.id).unwrap_or(0);
+                if let Some(rule) = t.rule.as_deref().and_then(reg::parse_rule) {
+                    n = if real { db::count_rule(c, &rule)? } else { 0 };
+                }
+                match at.get(&t.name).copied() {
+                    Some(i) => out[i].count += n,
+                    None => {
+                        at.insert(t.name.clone(), out.len());
+                        out.push(model::TagCount {
+                            name: t.name.clone(),
+                            count: n,
+                            color: t.color.clone(),
+                            group: t.group.clone(),
+                        });
+                    }
                 }
             }
-            out.push(model::TagCount {
-                name: t.name.clone(),
-                count: n,
-                color: t.color.clone(),
-                group: t.group.clone(),
-            });
         }
         // 排序口径与 0.5.0 一致：先按分组（未分组最后），组内按命中数降序
         let group_rank: HashMap<String, i64> = self
@@ -1117,28 +1206,58 @@ impl App {
         Ok(out)
     }
 
-    /// 自动标签 + 使用数（当前库；规则推导只认这一份数据）
+    /// 自动标签 + 使用数（**当前库 + 内置库合并**：自动标签是从素材列实时聚合的，
+    /// 合并后内置库那 22 张截图也会算进「png / 小图」这类计数里）
     pub fn auto_tags(&self) -> Result<Vec<model::TagCount>, String> {
-        match self.cur_lib() {
-            Some(l) => db::auto_tag_counts(&l.conn),
-            None => Ok(Vec::new()),
+        let mut out: Vec<model::TagCount> = Vec::new();
+        let mut at: HashMap<String, usize> = HashMap::new();
+        for (c, real) in self.tag_sources() {
+            if !real {
+                continue;
+            }
+            for t in db::auto_tag_counts(c)? {
+                match at.get(&t.name).copied() {
+                    Some(i) => out[i].count += t.count,
+                    None => {
+                        at.insert(t.name.clone(), out.len());
+                        out.push(t);
+                    }
+                }
+            }
         }
+        Ok(out)
     }
 
+    /// 标签分组（**当前库 + 内置库合并**，按分组名求和）
     pub fn groups(&self) -> Result<Vec<model::TagGroup>, String> {
-        let c = self.tag_conn();
-        let meta = reg::tags_meta(c)?;
-        let has_lib = self.cur_lib().is_some();
-        let counts: HashMap<i64, i64> = if has_lib {
-            db::counts_by_tag(c)?.into_iter().collect()
-        } else {
-            HashMap::new()
-        };
-        let rows = reg::groups(c, &meta, &counts)?;
-        Ok(rows
-            .into_iter()
-            .map(|g| model::TagGroup { name: g.name, color: g.color, count: g.count, tags: g.tags })
-            .collect())
+        let mut out: Vec<model::TagGroup> = Vec::new();
+        let mut at: HashMap<String, usize> = HashMap::new();
+        for (c, real) in self.tag_sources() {
+            let meta = reg::tags_meta(c)?;
+            let counts: HashMap<i64, i64> = if real {
+                db::counts_by_tag(c)?.into_iter().collect()
+            } else {
+                HashMap::new()
+            };
+            for g in reg::groups(c, &meta, &counts)? {
+                match at.get(&g.name).copied() {
+                    Some(i) => {
+                        out[i].count += g.count;
+                        out[i].tags += g.tags;
+                    }
+                    None => {
+                        at.insert(g.name.clone(), out.len());
+                        out.push(model::TagGroup {
+                            name: g.name,
+                            color: g.color,
+                            count: g.count,
+                            tags: g.tags,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 一批素材各自的标签名（`id` 是全局 id）。
@@ -1391,9 +1510,19 @@ impl App {
     /* ---------------------------------------------------------- 导出 / 复制 */
 
     /// 用户数据导出（T13）：库根 + 每个素材的"用户层"字段（评分/备注/来源/标签）。
-    pub fn export_userdata(&self) -> Result<String, String> {
+    ///
+    /// `only`：**只导这一个库**（0.4.5，owner 2026-11-20："按库导"）。
+    /// `None` 保留给命令行与测试（全部库合并一份，界面不再走这条路）。
+    ///
+    /// 只导一个库时，`libs` 数组也只有它 —— 导入端据此只会登记这一个根，
+    /// 不会把别的库顺带挂进来（这正是"数据跟着库走"的一半）。
+    pub fn export_userdata(&self, only: Option<i64>) -> Result<String, String> {
+        let targets: Vec<&Lib> = match only {
+            Some(id) => vec![self.lib(id)?],
+            None => self.libs.iter().collect(),
+        };
         let mut items: Vec<serde_json::Value> = Vec::new();
-        for l in &self.libs {
+        for l in &targets {
             /* 标签 id 是**每个库自己**的（0.3.9），名字必须按这个库的表换算 */
             let name_of: HashMap<i64, String> =
                 reg::tags_meta(&l.conn)?.into_iter().map(|t| (t.id, t.name)).collect();
@@ -1419,12 +1548,13 @@ impl App {
                 }));
             }
         }
+        let roots: Vec<String> = targets.iter().map(|l| l.root.clone()).collect();
         let doc = serde_json::json!({
             "app": "AssetManager",
             "version": env!("CARGO_PKG_VERSION"),
             "exportedAt": db::now_ts(),
             "note": "索引可重建；这份文件只保留用户层数据（库根 / 评分 / 备注 / 来源 / 标签）",
-            "libs": self.lib_roots()?,
+            "libs": roots,
             "assets": items,
         });
         serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
@@ -1730,6 +1860,238 @@ impl App {
         }
         z.finish()?;
         Ok((n, skipped))
+    }
+
+    /// 整库导成**普通 zip**：原图按库内相对路径摆，库数据全塞进 `_AssetManager/`。
+    ///
+    /// 和 `export_package`（`.P-AssetManager`）**两个入口都留着，不要合并**，语义不同：
+    /// - 那个是**给本软件双击导回**的（清单是我们自己的机器格式，后缀走文件关联）；
+    /// - 这个是**给人用的**：换机备份、发给同事、扔进任何解压软件都能开。
+    ///
+    /// 因此软件数据不能撒在素材目录里 —— 全部放进 `_AssetManager/` 一个子目录：
+    /// `manifest.json`（人可读的元数据）+ `index.db`（该库索引文件的忠实副本，完整权威）。
+    /// 解压出来素材区是干净的，删掉 `_AssetManager/` 就是一堆干净的图片。
+    ///
+    /// **分包**：zip32 没有 ZIP64，单包 4 GB / 65535 条目是硬上限（`ZipWriter` 越界会报错）。
+    /// 这里按 `max_bytes` / `max_entries` 贪心装填，装满就换下一个包；
+    /// 单个文件本身就超过 `max_bytes` 的如实计数跳过 —— 不静默丢，也不让整次导出失败。
+    ///
+    /// 文件清单以**索引**为准（`missing = 0` 的行），逐个确认磁盘上还在；
+    /// 不在的计入 `skipped`。没被扫描进索引的文件不在这里 —— 导前先扫一遍。
+    pub fn export_library_zip(
+        &self,
+        lib_root: &str,
+        out_dir: &Path,
+        stem: &str,
+        max_bytes: u64,
+        max_entries: u64,
+        index_db: Option<&Path>,
+    ) -> Result<LibraryZip, String> {
+        let lib_id = self
+            .libs
+            .iter()
+            .find(|l| norm_path(&l.root) == norm_path(lib_root))
+            .map(|l| l.id)
+            .ok_or_else(|| format!("这个素材库没有登记：{lib_root}"))?;
+        let l = self.lib(lib_id)?;
+        let lib_name = Path::new(&l.root)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "素材库".into());
+        let root = norm_keep_case(&l.root);
+
+        /* 不肯往库里写：包落在库里 = 库凭空变大几 GB，下次扫描还会把 zip 当成新文件，
+           用户看到的就是"我什么都没干，图变多了"。宁可让他另选一个文件夹 */
+        let out_n = norm_path(&out_dir.to_string_lossy());
+        let root_n = norm_path(&l.root);
+        if out_n == root_n || out_n.starts_with(&format!("{root_n}\\")) {
+            return Err(
+                "导出的包不能放在素材库自己里面（库会变大，下次扫描还会把包当成素材）。请换一个文件夹。"
+                    .into(),
+            );
+        }
+
+        /* ---------- ① 清单：先收集，再决定分包（zip 头里不能回填总数） ---------- */
+        let name_of: HashMap<i64, String> = reg::tags_meta(&l.conn)?
+            .into_iter()
+            .map(|t| (t.id, t.name))
+            .collect();
+        let mut manual: HashMap<i64, Vec<String>> = HashMap::new();
+        for (aid, tids) in db::all_asset_tags(&l.conn)? {
+            let names: Vec<String> = tids
+                .iter()
+                .filter_map(|t| name_of.get(t).cloned())
+                .filter(|n| !autotag::is_auto_tag(n))
+                .collect();
+            if !names.is_empty() {
+                manual.insert(aid, names);
+            }
+        }
+
+        struct Plan {
+            path: PathBuf,
+            rel: String,
+            size: u64,
+        }
+        let mut plan: Vec<Plan> = Vec::new();
+        let mut oversized = 0usize;
+        /* 明细只在小库时进清单：百万级把 100 万行塞进一个 json，光序列化就几百 MB 内存，
+           而完整数据本来就在 index.db 里 —— 有权威副本，就不做人可读的重复 */
+        let mut detail: Vec<serde_json::Value> = Vec::new();
+        let rows = db::pack_rows(&l.conn)?;
+        let total_rows = rows.len();
+        for (id, dir, name, size, _mtime, w, h, rating, note) in rows {
+            let full = join_path(&dir, &name);
+            let p = PathBuf::from(&full);
+            /* 索引里的 size 可能是旧的，分包要按**磁盘上真实**的大小算，否则分片会悄悄超限 */
+            let Ok(meta) = std::fs::metadata(&p) else {
+                continue; // 不在原位 → 计入 skipped
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Some(rel) = rel_to(&root, &full) else {
+                continue;
+            };
+            if meta.len() > max_bytes {
+                oversized += 1;
+                continue;
+            }
+            if detail.len() < ASSET_LIST_LIMIT {
+                detail.push(serde_json::json!({
+                    "rel": rel,
+                    "size": size,
+                    "w": w,
+                    "h": h,
+                    "rating": rating,
+                    "note": note,
+                    "tags": manual.remove(&id).unwrap_or_default(),
+                }));
+            }
+            plan.push(Plan { path: p, rel, size: meta.len() });
+        }
+        let skipped = total_rows.saturating_sub(plan.len() + oversized);
+
+        /* ---------- ② manifest.json：人可读的库级数据 ---------- */
+        /* null = 素材超过上限，明细不重复写（完整数据在 index.db） */
+        let assets_json = if plan.len() <= ASSET_LIST_LIMIT {
+            serde_json::Value::Array(detail)
+        } else {
+            serde_json::Value::Null
+        };
+        let tags_json: Vec<serde_json::Value> = reg::tags_meta(&l.conn)?
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "color": t.color,
+                    "group": t.group,
+                    "autoRule": t.rule,
+                })
+            })
+            .collect();
+        let snaps_json: Vec<serde_json::Value> = reg::snapshots(&l.conn)?
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "count": s.count,
+                    "createdAt": s.created_at,
+                    "updatedAt": s.updated_at,
+                })
+            })
+            .collect();
+        let meta_dir = LIB_META_DIR;
+        let has_db = index_db.map(|p| p.is_file()).unwrap_or(false);
+        let manifest = serde_json::json!({
+            "app": "AssetManager",
+            "version": env!("CARGO_PKG_VERSION"),
+            "format": "library-zip/1",
+            "exportedAt": db::now_ts(),
+            "lib": { "name": lib_name, "root": l.root },
+            "note": "原图按库内相对路径摆放；本目录是软件数据，不属于素材，删掉不影响图片。\
+                     完整元数据（评分/备注/标签/分组/快照）以 index.db 为准。",
+            "counts": { "files": plan.len(), "skipped": skipped, "oversized": oversized },
+            "metaDir": meta_dir,
+            "indexDb": if has_db { serde_json::json!(format!("{meta_dir}/index.db")) } else { serde_json::Value::Null },
+            "tags": tags_json,
+            "snapshots": snaps_json,
+            /* null = 素材太多，明细不重复写一遍（index.db 里有全量） */
+            "assets": assets_json,
+        });
+        let manifest_text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        /* 每个分片都带一份清单（几十 KB），part1 额外带 index.db：
+           拿到任意一片都知道这包里是什么、还差几片 */
+        let meta_entries = 1 + usize::from(has_db);
+
+        /* ---------- ③ 贪心分包并落盘 ---------- */
+        let manifest_name = format!("{meta_dir}/manifest.json");
+        let db_name = format!("{meta_dir}/index.db");
+        /* 一个都没有就别产出"只有清单"的空包：用户会以为备份成功了 */
+        if plan.is_empty() {
+            return Err(
+                "这个素材库里没有能找到原图的素材（文件都不在原位）。先重扫一次再导出。".into(),
+            );
+        }
+        /* 余量按上限的比例取，不能死用 32 MB：分片上限调小时它是负贡献（一张都装不下） */
+        let headroom = PART_HEADROOM.min(max_bytes / 8);
+        let mut parts: Vec<LibraryZipPart> = Vec::new();
+        let mut written = 0usize;
+        let mut i = 0usize;
+        while i < plan.len() {
+            let part_no = parts.len() + 1;
+            let name = format!("{stem}-part{part_no}.zip");
+            let path = out_dir.join(&name);
+            let mut z = snapshot::ZipWriter::create(&path)?;
+            z.add_bytes(&manifest_name, manifest_text.as_bytes())?;
+            if part_no == 1 {
+                if let Some(db) = index_db.filter(|p| p.is_file()) {
+                    z.add_file(db, &db_name)?;
+                }
+            }
+            let start_i = i;
+            let mut entries = meta_entries;
+            while i < plan.len() {
+                let it = &plan[i];
+                let full = z.offset() + it.size + headroom > max_bytes;
+                let too_many = entries + 1 > max_entries as usize;
+                /* **本片的第一张无论如何先装进去**：否则上限偏小时每片都装 0 张、
+                   i 原地不动，这个 while 就转不出去了 */
+                if i > start_i && (full || too_many) {
+                    break;
+                }
+                z.add_file(&it.path, &it.rel)?;
+                entries += 1;
+                i += 1;
+            }
+            let bytes = z.finish()?;
+            let n = i - start_i;
+            written += n;
+            parts.push(LibraryZipPart {
+                path: path.to_string_lossy().to_string(),
+                name,
+                files: n,
+                bytes,
+            });
+        }
+
+        /* 只有一个包时不要 `-part1` 这种尾巴：用户要的是「库名-20261120.zip」 */
+        if parts.len() == 1 {
+            let only = &mut parts[0];
+            let nice = format!("{stem}.zip");
+            let nice_path = out_dir.join(&nice);
+            if std::fs::rename(&only.path, &nice_path).is_ok() {
+                only.path = nice_path.to_string_lossy().to_string();
+                only.name = nice;
+            }
+        }
+        Ok(LibraryZip {
+            dir: out_dir.to_string_lossy().to_string(),
+            parts,
+            files: written,
+            skipped,
+            oversized,
+        })
     }
 
     /// 按资产包清单回填「评分 / 备注 / 标签」——**只加不删**。
@@ -2227,6 +2589,125 @@ pub struct PackageRestore {
     pub tagged: usize,
 }
 
+/// 一个库的「素材 id → 标签名列表」。整库算一次，供移动搬运复用。
+fn all_tag_names(c: &rusqlite::Connection) -> Result<HashMap<i64, Vec<String>>, String> {
+    let name_of: HashMap<i64, String> =
+        reg::tags_meta(c)?.into_iter().map(|t| (t.id, t.name)).collect();
+    let mut m: HashMap<i64, Vec<String>> = HashMap::new();
+    for (aid, tids) in db::all_asset_tags(c)? {
+        m.insert(
+            aid,
+            tids.iter().filter_map(|t| name_of.get(t).cloned()).collect(),
+        );
+    }
+    Ok(m)
+}
+
+/// 一个库的「素材 id → 分组名列表」。
+fn all_coll_names(c: &rusqlite::Connection) -> Result<HashMap<i64, Vec<String>>, String> {
+    let mut m: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut st = c
+        .prepare(
+            "SELECT ca.asset_id, c.name FROM collection_assets ca
+             JOIN collections c ON c.id = ca.collection_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows.flatten() {
+        m.entry(row.0).or_default().push(row.1);
+    }
+    Ok(m)
+}
+
+/// 空壳清理的宽限（秒）：刚建出来的标签/分组/快照先留着。
+///
+/// 不做宽限的话，"新建分组 → 拖图进去"这个最正常的流程会在两步之间被清掉：
+/// 用户会看到分组刚出现又消失，结论必然是"这功能坏了"。
+pub const EMPTY_SHELF_GRACE: i64 = 300;
+
+/// 一次空壳清理的结果（启动时打日志用）。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneStat {
+    pub tags: usize,
+    pub colls: usize,
+    pub snaps: usize,
+}
+
+/// 移动一张素材时要带走的"人写的东西"（0.4.5，见 `App::capture_carry`）。
+///
+/// 存**名字**而不是 id：标签和分组跟着库走，跨库时对方的 id 空间完全是另一套，
+/// 只有名字能对应上。颜色/规则这类定义以目标库已有的为准（不搬"标签本身"）。
+#[derive(Clone, Debug, Default)]
+pub struct AssetCarry {
+    pub from: String,
+    /// 内容哈希（快照条目按它搬）
+    pub hash: Option<String>,
+    pub rating: i64,
+    pub note: String,
+    pub source_url: String,
+    pub tags: Vec<String>,
+    pub colls: Vec<String>,
+}
+
+/// 搬运结果：给界面 toast 说清"带走了多少东西"。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarryStat {
+    /// 真正搬运成功的素材数
+    pub carried: usize,
+    /// 重建的标签关联条数
+    pub tags: usize,
+    /// 重建的分组成员条数
+    pub colls: usize,
+    /// 迁到目标库的快照条目数
+    pub snaps: usize,
+    /// 目标库没找到对应行（扫描还没跟上）而跳过的
+    pub skipped: usize,
+}
+
+/// 整库 zip 里放软件数据的那个目录名。
+///
+/// 用一个带下划线的固定名字，是为了在素材堆里一眼认出来"这不是我的图"；
+/// 解压后删掉它，剩下的就是干净的素材树。
+pub const LIB_META_DIR: &str = "_AssetManager";
+
+/// 清单里最多写多少条素材明细。超过就只留库级数据 ——
+/// 50 万条明细序列化要几百 MB 内存，而完整数据已经在 `index.db` 里了。
+const ASSET_LIST_LIMIT: usize = 20_000;
+
+/// 分包时给中心目录 + 最后一条文件头留的余量（32 MB）。
+/// 不贴 4 GB 硬撞：`ZipWriter` 越界是**报错**，宁可早一点换包。
+const PART_HEADROOM: u64 = 32 * 1024 * 1024;
+
+/// 整库 zip 的一个分片。
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryZipPart {
+    pub path: String,
+    /// 文件名（给界面拼提示用，不用再切路径）
+    pub name: String,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// 整库 zip 的结果：分了几片、装了多少张、跳过了多少。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryZip {
+    /// 落在哪个文件夹
+    pub dir: String,
+    pub parts: Vec<LibraryZipPart>,
+    /// 真正进包的素材数（所有分片之和）
+    pub files: usize,
+    /// 索引里有、磁盘上找不到的条数
+    pub skipped: usize,
+    /// 单个文件就超过单包上限、装不进去的条数
+    pub oversized: usize,
+}
+
 /// 归并排序的比较器：**必须和 SQL 的 ORDER BY 一致**（含 id 倒序），
 /// 否则跨库合并出来的页会在边界处重复或漏条。
 fn cmp_assets(a: &model::Asset, b: &model::Asset, sort: &str) -> std::cmp::Ordering {
@@ -2297,54 +2778,92 @@ impl App {
         reg::board_place(&self.reg, board, rows)
     }
 
-    /* ---------------- 分组（0.2.x） ----------------
-       分组 = 用户自己攒的「一撮素材」，跨库存在（注册库里存的是全局 asset id）。
-       与标签的分工：标签是属性（一张图可以有多个），分组是收纳（侧栏里点名要看的那一批）。 */
+    /* ------ 灵感板文字便签（0.4.14） ------ */
 
-    /// 分组清单 + **真实计数**。
-    ///
-    /// 计数必须按"素材现在还在不在"重算：注册库里的成员行不知道别的库删了东西，
-    /// 直接拿行数当数字，侧栏会显示 12 项、点进去只有 9 张（用户只会说"分组坏了"）。
-    pub fn coll_list(&self) -> Result<Vec<reg::CollRow>, String> {
-        let mut rows = reg::collections(&self.reg)?;
-        for r in &mut rows {
-            let gids = reg::coll_gids(&self.reg, r.id)?;
-            r.count = self.count_gids(&gids)? as i64;
-        }
-        Ok(rows)
+    pub fn board_notes(&self, board: &str) -> Result<Vec<(i64, f64, f64, f64, f64, String)>, String> {
+        reg::board_notes(&self.reg, board)
     }
 
-    fn count_gids(&self, gids: &[i64]) -> Result<usize, String> {
-        use std::collections::HashMap;
-        let mut per: HashMap<i64, Vec<i64>> = HashMap::new();
-        for g in gids {
-            let (lib, local) = ungid(*g);
-            per.entry(lib).or_default().push(local);
+    pub fn board_note_put(
+        &self,
+        board: &str,
+        nid: Option<i64>,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        text: &str,
+    ) -> Result<i64, String> {
+        reg::board_note_put(&self.reg, board, nid, x, y, w, h, text)
+    }
+
+    pub fn board_note_del(&self, board: &str, nid: i64) -> Result<usize, String> {
+        reg::board_note_del(&self.reg, board, nid)
+    }
+
+    /* ---------------- 分组（0.4.4 起每库一份） ----------------
+       分组 = 用户自己攒的「一撮素材」。以前住在注册库、成员是**全局** asset id
+       （一个分组能横跨几个库，切库时纹丝不动）；现在跟着库走，成员是本库 id。
+       与标签的分工：标签是属性（一张图可以有多个），分组是收纳（侧栏点名要看的那一批）。 */
+
+    /// 分组清单 + **真实计数**（当前库 + 内置库合并；id 一律换成全局 id 给前端）。
+    ///
+    /// 计数按"素材现在还在不在"重算：库里留着 `missing=1` 的行，
+    /// 直接拿行数当数字，侧栏会显示 12 项、点进去只有 9 张（用户只会说"分组坏了"）。
+    pub fn coll_list(&self) -> Result<Vec<reg::CollRow>, String> {
+        let mut out: Vec<reg::CollRow> = Vec::new();
+        for l in self.view_libs() {
+            for r in db::coll_list(&l.conn)? {
+                let ids = db::coll_ids(&l.conn, r.id)?;
+                let count = self.count_local(&l.conn, &ids)? as i64;
+                out.push(reg::CollRow {
+                    id: gid(l.id, r.id),
+                    name: r.name,
+                    created_at: r.created_at,
+                    count,
+                });
+            }
         }
-        let mut n = 0usize;
-        for (lib, ids) in per {
-            let Ok(l) = self.lib(lib) else { continue };
-            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!("SELECT COUNT(*) FROM assets WHERE missing = 0 AND id IN ({ph})");
-            let mut st = l.conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let c: i64 = st
-                .query_row(rusqlite::params_from_iter(ids.iter()), |r| r.get(0))
-                .map_err(|e| e.to_string())?;
-            n += c as usize;
+        /* 与单库内部同一口径：建得早的在前 */
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    /// 一批**库内 id** 里真正还在的素材数
+    fn count_local(&self, c: &rusqlite::Connection, ids: &[i64]) -> Result<usize, String> {
+        if ids.is_empty() {
+            return Ok(0);
         }
-        Ok(n)
+        let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT COUNT(*) FROM assets WHERE missing = 0 AND id IN ({ph})");
+        let mut st = c.prepare(&sql).map_err(|e| e.to_string())?;
+        let n: i64 = st
+            .query_row(rusqlite::params_from_iter(ids.iter()), |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        Ok(n as usize)
+    }
+
+    /// 分组 id → (库, 库内 id)。对外一律用全局 id。
+    fn coll_split(&self, id: i64) -> Result<(&Lib, i64), String> {
+        let (lib_id, local) = ungid(id);
+        let l = self.lib(lib_id)?;
+        Ok((l, local))
     }
 
     pub fn coll_create(&mut self, name: &str) -> Result<i64, String> {
-        reg::coll_create(&self.reg, name)
+        let l = self.cur_lib().ok_or_else(|| "还没有素材库".to_string())?;
+        let local = db::coll_create(&l.conn, name)?;
+        Ok(gid(l.id, local))
     }
 
     pub fn coll_rename(&mut self, id: i64, name: &str) -> Result<(), String> {
-        reg::coll_rename(&self.reg, id, name)
+        let (l, local) = self.coll_split(id)?;
+        db::coll_rename(&l.conn, local, name)
     }
 
     pub fn coll_delete(&mut self, id: i64) -> Result<(), String> {
-        reg::coll_delete(&self.reg, id)
+        let (l, local) = self.coll_split(id)?;
+        db::coll_delete(&l.conn, local)
     }
 
     /// 某个标签下的全部全局 id。
@@ -2379,17 +2898,287 @@ impl App {
         Ok(out)
     }
 
+    /// 往分组里放素材。**只接受这个分组所属库的素材** —— 别的库的 id 直接忽略：
+    /// 分组跟着库走之后，"当前库的分组"不该再装进另一库的图（那正是这轮要消掉的混乱）。
+    /// 返回真正新增的条数，界面按它报「加了 N 张」。
     pub fn coll_add(&mut self, id: i64, ids: &[i64]) -> Result<usize, String> {
-        reg::coll_add(&self.reg, id, ids)
+        let (lib_id, coll) = ungid(id);
+        let l = self.lib(lib_id)?;
+        let locals: Vec<i64> = ids
+            .iter()
+            .filter_map(|g| {
+                let (lb, local) = ungid(*g);
+                (lb == lib_id).then_some(local)
+            })
+            .collect();
+        if locals.is_empty() {
+            return Ok(0);
+        }
+        db::coll_add(&l.conn, coll, &locals)
     }
 
     pub fn coll_remove(&mut self, id: i64, ids: &[i64]) -> Result<usize, String> {
-        reg::coll_remove(&self.reg, id, ids)
+        let (lib_id, coll) = ungid(id);
+        let l = self.lib(lib_id)?;
+        let locals: Vec<i64> = ids
+            .iter()
+            .filter_map(|g| {
+                let (lb, local) = ungid(*g);
+                (lb == lib_id).then_some(local)
+            })
+            .collect();
+        if locals.is_empty() {
+            return Ok(0);
+        }
+        db::coll_remove(&l.conn, coll, &locals)
     }
 
-    /// 这张素材在哪些分组里（详情面板 / 右键菜单用）
-    pub fn coll_of(&self, gid: i64) -> Result<Vec<i64>, String> {
-        reg::coll_of(&self.reg, gid)
+    /// 这张素材在哪些分组里（详情面板 / 右键菜单用）—— 返回**全局分组 id**
+    pub fn coll_of(&self, asset: i64) -> Result<Vec<i64>, String> {
+        let (lib_id, local) = ungid(asset);
+        let l = self.lib(lib_id)?;
+        Ok(db::coll_of(&l.conn, local)?.into_iter().map(|c| gid(lib_id, c)).collect())
+    }
+
+    /// 清掉**空壳**：没有任何素材关联的标签 / 分组 / 快照（0.4.7）。
+    ///
+    /// owner 2026-11-20："空的分组/快照/标签就消失，不需要显示出来…
+    /// 而当前这个库如果没有的是 0 的，就应该删除。"
+    ///
+    /// 三条边界，都是"不删会出事 / 删错更出事"的地方：
+    /// - **只动当前库自己那份**：别的库有同名条目时互不影响，切过去照样看得到
+    ///   （这正是 owner 说的"换到其他库再显示出来"）；
+    /// - **规则标签不删**：`auto_rule` 是用户配的自动规则，命中数本来就可能是 0，
+    ///   删掉等于把配置弄丢；
+    /// - **宽限内的不删**：新建分组/快照后还没来得及往里放东西时，先留着。
+    pub fn prune_empty_shelves(&self, grace_secs: i64) -> Result<PruneStat, String> {
+        let cutoff = db::now_ts() - grace_secs;
+        let mut st = PruneStat::default();
+        for l in &self.libs {
+            /* ① 标签：没有 asset_tags 关联就是空壳。规则标签不在此列 */
+            let n = l
+                .conn
+                .execute(
+                    "DELETE FROM tags
+                     WHERE created_at < ?1
+                       AND (auto_rule IS NULL OR TRIM(auto_rule) = '')
+                       AND id NOT IN (SELECT tag_id FROM asset_tags)",
+                    rusqlite::params![cutoff],
+                )
+                .map_err(|e| e.to_string())?;
+            st.tags += n;
+
+            /* ② 分组：成员行有 `ON DELETE CASCADE`，素材一删成员行就没了，
+                   所以 `count == 0` 就是真空，不用再判"素材还在不在" */
+            for row in db::coll_list(&l.conn)? {
+                if row.count == 0 && row.created_at < cutoff && db::coll_delete(&l.conn, row.id).is_ok()
+                {
+                    st.colls += 1;
+                }
+            }
+
+            /* ③ 快照：条目数 0 才算空。有条目但图找不到的**不删** ——
+                   那是"书签还在、原图搬走了"，属于用户还要的东西 */
+            for snap in reg::snapshots(&l.conn)? {
+                if snap.count == 0
+                    && snap.created_at < cutoff
+                    && reg::snapshot_delete(&l.conn, snap.id).is_ok()
+                {
+                    st.snaps += 1;
+                }
+            }
+        }
+        Ok(st)
+    }
+
+    /* ---------------- 移动时的用户数据搬运（0.4.5） ----------------
+       为什么必须有这一段：`db::sync_dir` 对"磁盘上不存在的行"是**直接 DELETE**，
+       而 asset_tags 靠外键级联、分组成员也在同一个库的 collection_assets 里。
+       所以文件一换目录（哪怕只是同库换子目录），那条记录带着标签/评分/备注/分组一起消失，
+       目标目录新建出来的行是一张白纸。跨库时更糟：源库删行、目标库建行，两边都不认账。
+
+       做法照"搬运行李"：移动**之前**把要带走的东西抓成 AssetCarry（此时行还在），
+       移动 + 重扫**之后**再按目标路径写回去。抓/写分开是硬约束 ——
+       重扫发生在中间，先抓后写才不会抓到已被删掉的行。
+
+       快照条目按**内容哈希**搬：条目本来就是 hash 身份，不依赖库内 id，
+       所以从源库快照删掉、在目标库同名快照里插一条就能"跟着走"，不会留下找不到的死条目。 */
+
+    /// 移动前抓下来的"人写的东西"（结构体定义在模块级 `AssetCarry`）。
+    ///
+    /// 支持两种入口：**单个文件**，或**整个目录**（拖文件夹跨库时 `FsOps` 的 `pairs`
+    /// 只记顶层目录，里面的图得靠 `db::assets_under` 展开，否则全丢）。
+    pub fn capture_carry(&self, paths: &[String]) -> Result<Vec<AssetCarry>, String> {
+        let mut out = Vec::new();
+        /* 每个库只算一次「素材 → 标签名 / 分组名」：
+           拖 200 张时逐张扫全库标签表就是 200 次全表查询 */
+        let mut tag_cache: HashMap<i64, HashMap<i64, Vec<String>>> = HashMap::new();
+        let mut coll_cache: HashMap<i64, HashMap<i64, Vec<String>>> = HashMap::new();
+
+        for p in paths {
+            let Some(lib_id) = self.lib_for_path(p) else {
+                continue;
+            };
+            let Ok(l) = self.lib(lib_id) else { continue };
+            if !tag_cache.contains_key(&lib_id) {
+                tag_cache.insert(lib_id, all_tag_names(&l.conn)?);
+                coll_cache.insert(lib_id, all_coll_names(&l.conn)?);
+            }
+            let tags = &tag_cache[&lib_id];
+            let colls = &coll_cache[&lib_id];
+
+            /* 目录：整棵子树都要抓 */
+            if Path::new(p).is_dir() {
+                for (aid, full, rating, note, source_url, hash) in db::assets_under(&l.conn, p)? {
+                    out.push(AssetCarry {
+                        from: full,
+                        /* 库里存的是 16 字节原始哈希；快照条目是 32 位十六进制，转一道 */
+                        hash: hash.map(|h| snapshot::hex(&h)),
+                        rating,
+                        note,
+                        source_url,
+                        tags: tags.get(&aid).cloned().unwrap_or_default(),
+                        colls: colls.get(&aid).cloned().unwrap_or_default(),
+                    });
+                }
+                continue;
+            }
+
+            /* 文件：按「目录 + 文件名」点查，和扫描用的键一致（大小写不敏感） */
+            let Some(aid) = db::asset_id_by_path(&l.conn, p)? else {
+                continue;
+            };
+            let Some(a) = db::asset_by_id(&l.conn, aid)? else {
+                continue;
+            };
+            out.push(AssetCarry {
+                from: p.clone(),
+                hash: db::asset_hash(&l.conn, aid)?.map(|h| snapshot::hex(&h)),
+                rating: a.rating as i64,
+                note: a.note,
+                source_url: a.source_url,
+                tags: tags.get(&aid).cloned().unwrap_or_default(),
+                colls: colls.get(&aid).cloned().unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 移动 + 重扫之后：把抓到的数据写进**文件现在所属的库**。
+    ///
+    /// `pairs` 是 `(源绝对路径, 目标绝对路径)`，来自 `FsOps::mv_*` 的真实结果。
+    /// 一个 pair 可能是**文件**，也可能是**目录** —— 后者按前缀 + 相对路径映射到新位置
+    /// （同名改名后的新名字也在 pairs 里，所以按新路径点查一定找得到重扫出来的行）。
+    pub fn apply_carry(
+        &self,
+        carries: &[AssetCarry],
+        pairs: &[(String, String)],
+    ) -> Result<CarryStat, String> {
+        let mut st = CarryStat::default();
+        for (from, to) in pairs {
+            let from_n = norm_path(from);
+            for c in carries {
+                /* 这条 carry 属于这个 pair 吗：同一个文件，或在被移动的目录底下 */
+                let c_n = norm_path(&c.from);
+                let rel = if c_n == from_n {
+                    String::new()
+                } else if c_n.starts_with(&format!("{from_n}\\")) {
+                    c_n[from_n.len()..].to_string()
+                } else {
+                    continue;
+                };
+                let dst_path = format!("{}{}", to.trim_end_matches(['\\', '/']), rel);
+
+                let (Some(src_id), Some(dst_id)) =
+                    (self.lib_for_path(from), self.lib_for_path(&dst_path))
+                else {
+                    continue;
+                };
+                let Ok(dst) = self.lib(dst_id) else { continue };
+                let Some(new_id) = db::asset_id_by_path(&dst.conn, &dst_path)? else {
+                    /* 目标库还没扫到这一行（例如文件刚落地、扫描被跳过）：如实计数，
+                       不硬塞 —— 索引归扫描管，和导入用户数据同一条纪律 */
+                    st.skipped += 1;
+                    continue;
+                };
+
+                /* ① 用户字段：**源里有值才写**。空值不覆盖目标已有内容，
+                      和 `import_userdata` 的口径一致（擦掉用户现在写的东西比漏搬更糟） */
+                if c.rating > 0 {
+                    db::set_rating(&dst.conn, &[new_id], c.rating as i32)?;
+                }
+                if !c.note.is_empty() {
+                    db::set_note(&dst.conn, new_id, &c.note)?;
+                }
+                if !c.source_url.is_empty() {
+                    db::set_source_url(&dst.conn, new_id, &c.source_url)?;
+                }
+
+                /* ② 标签：按名字在目标库重建（同名标签在本库不存在就建一份） */
+                for name in &c.tags {
+                    let tid = reg::ensure_tag(&dst.conn, name)?;
+                    st.tags += db::insert_asset_tags(&dst.conn, &[new_id], tid)? as usize;
+                }
+
+                /* ③ 分组：按名字找，没有就建 —— 用户看到的是"我那张图还在交付组里"。
+                      `coll_create` 同名直接返回已有 id，所以这里不用先查一遍。 */
+                for name in &c.colls {
+                    let cid = db::coll_create(&dst.conn, name)?;
+                    st.colls += db::coll_add(&dst.conn, cid, &[new_id])?;
+                }
+
+                /* ④ 快照条目：按 hash 跟着走 */
+                if let Some(h) = c.hash.as_deref().filter(|h| !h.is_empty()) {
+                    st.snaps += self.carry_snap_items(src_id, dst_id, h, &dst_path)?;
+                }
+                st.carried += 1;
+            }
+        }
+        /* 图搬走之后，源库那些标签/分组/快照可能就空了 —— 顺手清掉，
+           别让用户下次切回来看到一堆 0（owner 2026-11-20 的要求）。 */
+        let _ = self.prune_empty_shelves(EMPTY_SHELF_GRACE);
+        Ok(st)
+    }
+
+    /// 把一个哈希的条目从源库各快照搬到目标库同名快照。
+    ///
+    /// 同库换目录时条目本来就在同一个快照里，只更新"最后见到的位置"，不删不建。
+    fn carry_snap_items(
+        &self,
+        src_id: i64,
+        dst_id: i64,
+        hash: &str,
+        new_path: &str,
+    ) -> Result<usize, String> {
+        let src = self.lib(src_id)?;
+        let dst = self.lib(dst_id)?;
+        let name = Path::new(new_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut n = 0usize;
+
+        for snap in reg::snapshots(&src.conn)? {
+            let items = reg::snapshot_items(&src.conn, snap.id)?;
+            let Some(it) = items.iter().find(|i| i.hash == hash) else {
+                continue;
+            };
+            if src_id == dst_id {
+                reg::snapshot_touch_item(&src.conn, snap.id, hash, &name, new_path, &dst.root)?;
+                n += 1;
+                continue;
+            }
+            /* 跨库：目标库同名快照（没有就建），插一条指向新位置 */
+            let mut moved = it.clone();
+            moved.name = name.clone();
+            moved.path = new_path.to_string();
+            moved.lib = dst.root.clone();
+            let snap_id = reg::snapshot_create(&dst.conn, &snap.name)?;
+            n += reg::snapshot_insert_items(&dst.conn, snap_id, &[moved])?;
+            /* 源库这条要下架：图已经不属于这个库了，留着就会显示"找不到" */
+            reg::snapshot_remove_items(&src.conn, snap.id, &[hash.to_string()])?;
+        }
+        Ok(n)
     }
 
     /// 快照 id → (库, 库内 id)。对外一律用**全局 id**（库号 + 库内 id）。
@@ -2399,11 +3188,14 @@ impl App {
         Ok((l, local))
     }
 
-    /// 快照清单（**所有库汇总**）。id 换成全局 id，名称冲突不合并 ——
+    /// 快照清单（**当前库 + 内置库**）。id 换成全局 id，名称冲突不合并 ——
     /// 两个库可以各自有一份「交付稿」，它们是两个东西。
+    ///
+    /// 0.4.4 起不再"所有库汇总"：非内置库之间严格分开（owner 2026-11-20），
+    /// 否则切库时快照列表纹丝不动，看起来就像数据都混在一起。
     pub fn snapshot_list(&self) -> Result<Vec<reg::SnapshotRow>, String> {
         let mut out = Vec::new();
-        for l in &self.libs {
+        for l in self.view_libs() {
             for mut r in reg::snapshots(&l.conn)? {
                 r.id = gid(l.id, r.id);
                 out.push(r);
@@ -2729,8 +3521,10 @@ impl App {
 
     /// 按内容哈希在**所有库**里找一张图。命中返回 `(全局 id, 素材, 库根)`。
     ///
-    /// 快照按库拆开之后仍然是"全局找"：素材被移到另一个库时，
-    /// 快照里那条还能靠内容认回来（这正是哈希身份的意义）。
+    /// **刻意保持全局**（0.3.10 起的行为，单测 `snapshot_survives_rename_and_library_move` 守着）：
+    /// 用户把一张图从 A 库挪到 B 库之后，A 库那份快照里那条**还得认得出来**
+    /// —— 哈希身份的意义就在这。它只影响"这一条书签指向谁"，不会把 B 库的
+    /// 标签/分组/快照列进 A 库的侧栏（那三样已经按库分开了）。
     fn match_by_hash(
         &self,
         hash: &[u8],
@@ -2889,6 +3683,59 @@ impl App {
             "INSERT INTO meta (k,v) VALUES ('snapshots_split','1') ON CONFLICT(k) DO UPDATE SET v='1'",
             [],
         );
+    }
+
+    /// 0.4.4：分组从「注册库一份、成员是全局 id」拆成「每库一份、成员是本库 id」。
+    ///
+    /// 旧数据里一个分组可能横跨几个库（A 库的图 + B 库的图混在同一组里）。拆法：
+    /// **按成员的库号分桶，每个有成员的库各得一个同名分组**，只装属于自己那一桶的图。
+    /// 一个图都不会丢（只是同名的组会变成两三个），而且切库之后各看各的 —— 这正是
+    /// owner 2026-11-20 要的"整个有关这个库的数据全部切换掉"。
+    ///
+    /// 空分组（建了还没放图）分不出库：落到当前库，不能因为"没有成员"就弄丢。
+    /// 注册库那张老表**原样留着**不删 —— 万一要回退，数据还在。
+    ///
+    /// **每个分组单独盖章**（`coll_split_<id>`），不是一个全局开关：
+    /// 老版本（0.4.3）还在往注册库写分组，用户降级回去新建的那些，下次启动也要能搬过来。
+    /// 全局开关只能搬一次，降级期间新建的会永远丢在注册库里。
+    fn migrate_collections_into_libs(&mut self) {
+        if self.libs.is_empty() {
+            return;
+        }
+        let fallback = self.cur_lib().map(|l| l.id).unwrap_or(self.libs[0].id);
+        let rows = reg::collections(&self.reg).unwrap_or_default();
+        for row in rows {
+            let stamp = format!("coll_split_{}", row.id);
+            let done: Option<String> = self
+                .reg
+                .query_row("SELECT v FROM meta WHERE k=?1", rusqlite::params![&stamp], |r| r.get(0))
+                .ok();
+            if done.as_deref() == Some("1") {
+                continue;
+            }
+            let gids = reg::coll_gids(&self.reg, row.id).unwrap_or_default();
+            let mut buckets: std::collections::BTreeMap<i64, Vec<i64>> =
+                std::collections::BTreeMap::new();
+            for g in gids {
+                let (lib_id, local) = ungid(g);
+                if self.libs.iter().any(|l| l.id == lib_id) {
+                    buckets.entry(lib_id).or_default().push(local);
+                }
+            }
+            if buckets.is_empty() {
+                buckets.insert(fallback, Vec::new());
+            }
+            for (lib_id, locals) in buckets {
+                let Ok(l) = self.lib(lib_id) else { continue };
+                /* 同名已存在就用它（拆库后可能出现两个同名分组，合并成一份） */
+                let Ok(cid) = db::coll_create(&l.conn, &row.name) else { continue };
+                let _ = db::coll_add(&l.conn, cid, &locals);
+            }
+            let _ = self.reg.execute(
+                "INSERT INTO meta (k,v) VALUES (?1,'1') ON CONFLICT(k) DO UPDATE SET v='1'",
+                rusqlite::params![&stamp],
+            );
+        }
     }
 }
 
@@ -3207,14 +4054,18 @@ mod tests {
         assert_eq!(tags_b[0].count, 1);
         assert_eq!(tags_b[0].color, None, "B 库的标签不该继承 A 库的颜色");
 
-        // ③ 按标签名筛选仍然跨库命中（名字稳定，id 按库换算）
+        // ③ 按标签名筛选：**只命中当前库**（0.4.5，owner 2026-11-20："全部都要隔离"）。
+        //    名字稳定、id 按库换算这件事没变，变的是"不再把别的库一起列出来"——
+        //    否则切到 B 之后按同名标签筛，A 库的图还会出现在同一页里。
         let q = model::AssetQuery {
             recursive: true,
             tag: Some("跨库标签".into()),
             limit: Some(10),
             ..Default::default()
         };
-        assert_eq!(app.list(&q).unwrap().len(), 2);
+        let hit = app.list(&q).unwrap();
+        assert_eq!(hit.len(), 1, "B 库只有 w.png 挂了这个标签");
+        assert_eq!(hit[0].name, "w.png", "不该混进 A 库的图");
 
         // ④ 每素材的标签名（id 要换成全局 id）
         let per = app.tags_for(&[ia, ib]).unwrap();
@@ -3825,26 +4676,27 @@ mod tests {
             assert_eq!(ids.len(), 1);
             assert_eq!(app.snapshot_add_assets(snap, &ids).unwrap().added, 1);
         }
-        assert_eq!(app.snapshot_list().unwrap().len(), 2, "两个库各一份同名快照");
+        /* 0.4.4 起快照列表**按库过滤**：每个库只看得到自己那一份
+           （以前是所有库汇总，切库时列表纹丝不动 —— owner 说那就是"数据混在一起"） */
+        app.set_current_lib(&lib_a.to_string_lossy()).unwrap();
+        let only_a = app.snapshot_list().unwrap();
+        assert_eq!(only_a.len(), 1, "A 只看得到自己那份");
+        let snap_a = only_a[0].id;
+        app.set_current_lib(&lib_b.to_string_lossy()).unwrap();
+        assert_eq!(app.snapshot_list().unwrap().len(), 1, "B 只看得到自己那份");
 
         /* 移除 A：它的快照跟着下架（B 那条还在） */
-        let snap_a = app
-            .snapshot_list()
-            .unwrap()
-            .into_iter()
-            .find(|s| lib_of(s.id) == app.lib_for_path(&lib_a.to_string_lossy()).unwrap())
-            .unwrap()
-            .id;
         app.remove_lib(&lib_a.to_string_lossy()).unwrap();
+        app.set_current_lib(&lib_b.to_string_lossy()).unwrap();
         assert_eq!(app.snapshot_list().unwrap().len(), 1, "移除库后只剩 B 的快照");
         assert!(app.snapshot_get(snap_a).is_err() || app.snapshot_get(snap_a).unwrap().is_none());
 
         /* 重新导入 A：快照回来，条目也还在 */
         app.scan(&lib_a.to_string_lossy(), |_| {}).unwrap();
+        app.set_current_lib(&lib_a.to_string_lossy()).unwrap();
         let back = app.snapshot_list().unwrap();
-        assert_eq!(back.len(), 2, "重新导入后两份快照都在");
-        let again = back.iter().find(|s| s.count == 1).unwrap();
-        assert_eq!(app.snapshot_items(again.id).unwrap().len(), 1, "快照条目不能丢");
+        assert_eq!(back.len(), 1, "重新导入 A 后它那份快照回来了");
+        assert_eq!(app.snapshot_items(back[0].id).unwrap().len(), 1, "快照条目不能丢");
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -3930,7 +4782,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let a_id = rows.iter().find(|r| r.name == "a.png").unwrap().id;
         app.set_rating(&[a_id], 5).unwrap();
-        let exported = app.export_userdata().unwrap();
+        let exported = app.export_userdata(None).unwrap();
 
         /* 模拟"重扫过索引 / 换了台机器"：评分先清掉，再导回来 */
         app.set_rating(&[a_id], 0).unwrap();
@@ -4157,6 +5009,577 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "素材数必须等于包内图片数");
         assert!(rows.iter().all(|r| r.name != "manifest.json"));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 整库 zip（人可读版）：超过单包上限要自动分片、每片都能独立解开，
+    /// 软件数据只待在 `_AssetManager/` 里，绝不散到素材区。
+    #[test]
+    fn library_zip_splits_and_keeps_meta_apart_from_assets() {
+        let d = tmp("lib-zip");
+        let lib = d.join("我的库");
+        std::fs::create_dir_all(lib.join("色彩")).unwrap();
+        for i in 0..5 {
+            std::fs::write(lib.join(format!("p{i}.png")), vec![i as u8; 9_000]).unwrap();
+        }
+        std::fs::write(lib.join("色彩").join("deep.png"), vec![7u8; 9_000]).unwrap();
+
+        let mut app = App::open(&d).unwrap();
+        app.scan(&lib.to_string_lossy(), |_| {}).unwrap();
+
+        let out_dir = d.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let idx = d.join("lib-index.db");
+        std::fs::write(&idx, b"fake-index").unwrap();
+
+        /* 每片只给 20 KB：一张 9 KB，光清单 + 一张就快满了，必然分片 */
+        let out = app
+            .export_library_zip(
+                &lib.to_string_lossy(),
+                &out_dir,
+                "我的库-20261120",
+                20_000,
+                100,
+                Some(&idx),
+            )
+            .unwrap();
+        assert_eq!(out.files, 6, "六张都要进包");
+        assert!(out.parts.len() >= 2, "20 KB 装 6 张 9 KB 的图，必须分片");
+        assert!(out.parts.iter().all(|p| p.files > 0), "不许出现空片");
+        assert_eq!(
+            out.parts.iter().map(|p| p.files).sum::<usize>(),
+            6,
+            "所有分片加起来正好六张，不重不漏"
+        );
+        assert!(
+            out.parts[0].name.ends_with("-part1.zip"),
+            "多片时带 part 序号：{}",
+            out.parts[0].name
+        );
+
+        /* 每一片都得是**能独立解开**的合法 zip */
+        let mut seen = 0usize;
+        for (n, part) in out.parts.iter().enumerate() {
+            let dest = d.join(format!("unzip-{n}"));
+            let files = snapshot::unzip_stored(std::path::Path::new(&part.path), &dest).unwrap();
+            assert!(
+                dest.join(LIB_META_DIR).join("manifest.json").is_file(),
+                "第 {} 片必须带清单",
+                n + 1
+            );
+            assert!(!dest.join("manifest.json").exists(), "清单不许散在素材区");
+            if n == 0 {
+                assert!(
+                    dest.join(LIB_META_DIR).join("index.db").is_file(),
+                    "part1 要带库索引副本"
+                );
+            } else {
+                assert!(
+                    !dest.join(LIB_META_DIR).join("index.db").exists(),
+                    "索引只放 part1，几十 MB 不重复装"
+                );
+            }
+            seen += files;
+        }
+        /* 6 张图 + 每片一份清单 + part1 的 index.db */
+        assert_eq!(seen, 6 + out.parts.len() + 1);
+
+        /* 层级保留：子目录里的图解出来还在子目录里 */
+        assert!(
+            (0..out.parts.len()).any(|n| d
+                .join(format!("unzip-{n}"))
+                .join("色彩")
+                .join("deep.png")
+                .is_file()),
+            "「色彩/deep.png」的层级要保留"
+        );
+
+        /* 把解出来的东西再当库扫一遍：`_AssetManager/` 必须整个跳过，
+           否则用户"把包解压回库里"会凭空多出 manifest.json / index.db 两条素材 */
+        let dest = d.join("unzip-0");
+        let mut app2 = App::open(d.join("data-scan")).unwrap();
+        app2.scan(&dest.to_string_lossy(), |_| {}).unwrap();
+        let rows2 = app2
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(50),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            rows2.len(),
+            out.parts[0].files,
+            "只该索引素材，元数据目录一条都不能进"
+        );
+        assert!(
+            rows2
+                .iter()
+                .all(|r| r.name != "manifest.json" && r.name != "index.db"),
+            "元数据文件名不该出现在素材列表里"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.4：分组跟着库走。
+    /// ① 老数据（注册库里一份、成员跨库）升级时按成员的库号拆，一个图都不丢；
+    /// ② 切库后只看得到本库的分组；③ 别的库的素材塞不进来。
+    #[test]
+    fn collections_are_split_per_lib_on_migrate() {
+        let d = tmp("coll-split");
+        let a = d.join("lib-a");
+        let b = d.join("lib-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a1.png"), b"a1").unwrap();
+        std::fs::write(b.join("b1.png"), b"b1").unwrap();
+
+        let mut app = App::open(&d).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+
+        let rows = app
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        let a_id = rows.iter().find(|r| r.name == "a1.png").unwrap().id;
+        let b_id = rows.iter().find(|r| r.name == "b1.png").unwrap().id;
+
+        /* 造一份「老口径」的跨库分组：住在注册库，成员是全局 id */
+        let cid: i64 = app
+            .reg
+            .query_row(
+                "INSERT INTO collections (name, created_at) VALUES ('混装', 1) RETURNING id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        for g in [a_id, b_id] {
+            app.reg
+                .execute(
+                    "INSERT INTO collection_assets (collection_id, asset_gid, added_at) VALUES (?1, ?2, 0)",
+                    rusqlite::params![cid, g],
+                )
+                .unwrap();
+        }
+        /* 去掉盖章再重开：模拟"从老版本升上来"那一刻（每分组一个章，见迁移函数注释） */
+        app.reg
+            .execute("DELETE FROM meta WHERE k LIKE 'coll_split_%'", [])
+            .unwrap();
+        drop(app);
+
+        let mut app = App::open(&d).unwrap();
+        assert_eq!(app.libs.len(), 2);
+        for l in &app.libs {
+            let groups: i64 = l
+                .conn
+                .query_row("SELECT COUNT(*) FROM collections WHERE name='混装'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(groups, 1, "每个有成员的库都该拿到一份同名分组");
+            let members: i64 = l
+                .conn
+                .query_row("SELECT COUNT(*) FROM collection_assets", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(members, 1, "每份只装自己那一桶的图，一张都不许丢");
+        }
+
+        /* 切到 A：只看得见 A 的「混装」（B 那份不出现） */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let list = app.coll_list().unwrap();
+        assert_eq!(list.len(), 1, "非内置库之间必须分开");
+        assert_eq!(list[0].name, "混装");
+        assert_eq!(list[0].count, 1);
+
+        /* 把 B 的图塞进 A 的分组：必须被拒（返回 0，成员数不变） */
+        let added = app.coll_add(list[0].id, &[b_id]).unwrap();
+        assert_eq!(added, 0, "别的库的素材不许进这个分组");
+        assert_eq!(app.coll_list().unwrap()[0].count, 1);
+
+        /* 切到 B：换成 B 那一份，计数同样只有 1 */
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        let list_b = app.coll_list().unwrap();
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].count, 1);
+        assert_ne!(list_b[0].id, list[0].id, "两个库的分组是两条独立记录");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.4：内置库（截图）的**元数据**合并进当前库视图 —— 标签按名字合计数、
+    /// 分组/快照都看得见它那份；但素材列表不混（截图只在切到截图库时才进网格）。
+    #[test]
+    fn builtin_lib_merges_metadata_but_not_assets() {
+        let d = tmp("builtin-merge");
+        let a = d.join("lib-a");
+        let b = d.join("lib-b");
+        let shots = d.join("screenshots");
+        for p in [&a, &b, &shots] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(a.join("a1.png"), b"a1").unwrap();
+        std::fs::write(b.join("b1.png"), b"b1").unwrap();
+        std::fs::write(shots.join("shot1.png"), b"s1").unwrap();
+
+        let mut app = App::open(&d).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&shots.to_string_lossy(), |_| {}).unwrap();
+        app.set_builtin_roots(vec![shots.to_string_lossy().to_string()]);
+
+        let rows = app
+            .list(&model::AssetQuery {
+                recursive: true,
+                limit: Some(20),
+                ..Default::default()
+            })
+            .unwrap();
+        let a_id = rows.iter().find(|r| r.name == "a1.png").unwrap().id;
+        let shot_id = rows.iter().find(|r| r.name == "shot1.png").unwrap().id;
+
+        /* 两个库各打一个同名标签，各自一张图 */
+        app.set_asset_tags(a_id, &["主视觉".to_string()]).unwrap();
+        app.set_asset_tags(shot_id, &["主视觉".to_string()]).unwrap();
+
+        /* 两个库各建一个同名分组（内置库那个也建一份） */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let coll_a = app.coll_create("交付").unwrap();
+        app.coll_add(coll_a, &[a_id]).unwrap();
+        app.set_current_lib(&shots.to_string_lossy()).unwrap();
+        let coll_s = app.coll_create("交付").unwrap();
+        app.coll_add(coll_s, &[shot_id]).unwrap();
+        /* B 库也有一个同名分组：切到 A 时**不许**出现 */
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        app.coll_create("交付").unwrap();
+
+        /* 回到 A：标签合并计数（2），分组只合并内置库那一个（B 的不出现） */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let tags = app.tags().unwrap();
+        let t = tags.iter().find(|t| t.name == "主视觉").expect("标签该在");
+        assert_eq!(t.count, 2, "当前库 1 张 + 内置库 1 张，按名字合并计数");
+
+        let colls = app.coll_list().unwrap();
+        assert_eq!(colls.len(), 2, "A 的和内置库的都在，B 的不该出现");
+        assert_eq!(colls.iter().map(|c| c.count).sum::<i64>(), 2);
+
+        /* 素材不混：界面是按**目录**取列表的（切库 = 选中那个库根），
+           所以这里照着界面的查法来 —— 选中 A 的根目录递归查，不该出现截图的图 */
+        let root_a = app
+            .roots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "lib-a")
+            .expect("A 的根目录该在");
+        let a_rows = app
+            .list(&model::AssetQuery {
+                dir_id: Some(root_a.id),
+                recursive: true,
+                limit: Some(20),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(a_rows.len(), 1, "选了 A 的根目录就只看到 A 的图");
+        assert!(
+            a_rows.iter().all(|r| r.name != "shot1.png"),
+            "截图不该混进当前库的网格（owner 口径：素材不混）"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.4：快照清单只列「当前库 + 内置库」，不再所有库汇总
+    #[test]
+    fn snapshot_list_is_scoped_to_current_and_builtin() {
+        let d = tmp("snap-scope");
+        let a = d.join("lib-a");
+        let b = d.join("lib-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a1.png"), b"a1").unwrap();
+        std::fs::write(b.join("b1.png"), b"b1").unwrap();
+
+        let mut app = App::open(&d).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let s_a = app.snapshot_create("A 的快照").unwrap();
+        assert!(s_a > 0);
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        let s_b = app.snapshot_create("B 的快照").unwrap();
+        assert!(s_b > 0);
+
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let list = app.snapshot_list().unwrap();
+        assert_eq!(list.len(), 1, "只有当前库那一份");
+        assert_eq!(list[0].name, "A 的快照");
+
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        let list_b = app.snapshot_list().unwrap();
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].name, "B 的快照");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.5：跨库移动 = 数据跟着文件走。
+    /// owner 2026-11-20 的原话："移动哪个文件，哪个库的相关数据就移到那个库里，
+    /// 这样就不会出现找不到的情况 —— 包括分组、标签。"
+    #[test]
+    fn moving_between_libraries_carries_user_data() {
+        let d = tmp("carry");
+        let a = d.join("库A");
+        let b = d.join("库B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("图.png"), b"AAA").unwrap();
+        std::fs::write(b.join("占位.png"), b"BBB").unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        let a_id = app.lib_for_path(&a.to_string_lossy()).unwrap();
+        let b_id = app.lib_for_path(&b.to_string_lossy()).unwrap();
+
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let row = app
+            .list(&model::AssetQuery { limit: Some(10), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "图.png")
+            .expect("扫描后应该有一张图.png");
+        let gid = row.id;
+        app.set_rating(&[gid], 5).unwrap();
+        app.set_note(gid, "这张要留").unwrap();
+        app.tag_assets(&[gid], "参考").unwrap();
+        let coll = app.coll_create("交付").unwrap();
+        app.coll_add(coll, &[gid]).unwrap();
+        let snap = app.snapshot_create("交付稿").unwrap();
+        app.snapshot_add_assets(snap, &[gid]).unwrap();
+
+        let from = a.join("图.png").to_string_lossy().to_string();
+        let to = b.join("图.png").to_string_lossy().to_string();
+
+        /* 顺序必须与 am_move 一致：抓（移动前）→ 搬 → 重扫 → 写回 */
+        let carries = app.capture_carry(&[from.clone()]).unwrap();
+        assert_eq!(carries.len(), 1, "移动前要能抓到这张的评分/标签");
+        std::fs::rename(&from, &to).unwrap();
+        for (id, dir) in [(a_id, &a), (b_id, &b)] {
+            let l = app.libs.iter_mut().find(|l| l.id == id).unwrap();
+            crate::scan::scan_one_dir(&mut l.conn, &dir.to_string_lossy()).unwrap();
+        }
+        let st = app.apply_carry(&carries, &[(from.clone(), to.clone())]).unwrap();
+        assert_eq!(st.carried, 1);
+        assert!(st.tags >= 1, "标签要跟过去");
+        assert!(st.colls >= 1, "分组要跟过去");
+        assert!(st.snaps >= 1, "快照条目要跟过去");
+
+        /* 目标库：评分/备注/标签/分组/快照全都有 */
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        let moved = app
+            .list(&model::AssetQuery { limit: Some(10), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "图.png")
+            .expect("目标库里应该有这张图");
+        assert_eq!(moved.rating, 5);
+        assert_eq!(moved.note, "这张要留");
+        let tags = app.tags().unwrap();
+        assert!(tags.iter().any(|t| t.name == "参考" && t.count == 1), "{tags:?}");
+        let colls = app.coll_list().unwrap();
+        assert!(colls.iter().any(|c| c.name == "交付" && c.count >= 1), "{colls:?}");
+        let snaps = app.snapshot_list().unwrap();
+        let s = snaps
+            .iter()
+            .find(|s| s.name == "交付稿")
+            .expect("同名快照要出现在目标库");
+        assert_eq!(app.snapshot_items(s.id).unwrap().len(), 1, "条目也要跟过来");
+
+        /* 源库：什么都不剩（图已经不属于它了） */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let src_tags = app.tags().unwrap();
+        assert!(src_tags.iter().all(|t| t.count == 0), "源库不该再数到这张：{src_tags:?}");
+        let src_snaps = app.snapshot_list().unwrap();
+        assert!(
+            src_snaps.iter().all(|s| s.count == 0),
+            "源库快照里不该再挂着它（否则就是『找不到』）：{src_snaps:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.5：用户数据按库导 —— `libs` 只含被导的那个根，别的库一行都不许出现。
+    #[test]
+    fn userdata_exports_only_the_chosen_library() {
+        let d = tmp("ud-one");
+        let a = d.join("库A");
+        let b = d.join("库B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a.png"), b"A").unwrap();
+        std::fs::write(b.join("b.png"), b"B").unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        let a_id = app.lib_for_path(&a.to_string_lossy()).unwrap();
+
+        /* 导出只带"人写的东西"（评分/备注/来源/标签），所以 A 得先有一张打过分的 */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let gid = app
+            .list(&model::AssetQuery { limit: Some(10), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "a.png")
+            .expect("a.png 要扫进来")
+            .id;
+        app.set_rating(&[gid], 4).unwrap();
+
+        let one: serde_json::Value =
+            serde_json::from_str(&app.export_userdata(Some(a_id)).unwrap()).unwrap();
+        assert_eq!(one["libs"].as_array().unwrap().len(), 1, "只能有被导库那一个根");
+        assert_eq!(one["assets"].as_array().unwrap().len(), 1, "只能有它的素材");
+
+        let all: serde_json::Value =
+            serde_json::from_str(&app.export_userdata(None).unwrap()).unwrap();
+        assert_eq!(all["libs"].as_array().unwrap().len(), 2, "None 仍是全库（命令行/测试用）");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.5：拖**整个文件夹**跨库时，里面的图一个都不能丢数据。
+    /// `FsOps` 的 pairs 只记顶层目录，所以 capture 必须按子树展开（`db::assets_under`）。
+    #[test]
+    fn moving_a_folder_carries_data_of_everything_inside() {
+        let d = tmp("carry-dir");
+        let a = d.join("库A");
+        let b = d.join("库B");
+        std::fs::create_dir_all(a.join("子目录").join("深层")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("根.png"), b"root").unwrap();
+        std::fs::write(a.join("子目录").join("一.png"), b"one").unwrap();
+        std::fs::write(a.join("子目录").join("深层").join("二.png"), b"two").unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        let a_id = app.lib_for_path(&a.to_string_lossy()).unwrap();
+        let b_id = app.lib_for_path(&b.to_string_lossy()).unwrap();
+
+        let rows = app
+            .list(&model::AssetQuery { recursive: true, limit: Some(10), ..Default::default() })
+            .unwrap();
+        let one = rows.iter().find(|r| r.name == "一.png").unwrap().id;
+        let two = rows.iter().find(|r| r.name == "二.png").unwrap().id;
+        app.set_rating(&[one], 3).unwrap();
+        app.set_rating(&[two], 4).unwrap();
+        app.tag_assets(&[one], "甲").unwrap();
+        app.tag_assets(&[two], "乙").unwrap();
+
+        let from = a.join("子目录").to_string_lossy().to_string();
+        let to = b.join("子目录").to_string_lossy().to_string();
+
+        let carries = app.capture_carry(&[from.clone()]).unwrap();
+        assert_eq!(carries.len(), 2, "子树里两张都要抓（根.png 不在这个文件夹里，不该抓）");
+
+        std::fs::rename(&from, &to).unwrap();
+        /* 模拟 am_move 的收尾：源子树整棵清掉（目录已不存在），目标子树递归索引 */
+        {
+            let la = app.libs.iter().find(|l| l.id == a_id).unwrap();
+            crate::db::purge_subtree(&la.conn, &from).unwrap();
+            let lb = app.libs.iter_mut().find(|l| l.id == b_id).unwrap();
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            crate::scan::scan_root(
+                &mut lb.conn,
+                &to,
+                &crate::scan::ScanOptions::default(),
+                &cancel,
+                |_| {},
+            )
+            .unwrap();
+        }
+        let st = app.apply_carry(&carries, &[(from.clone(), to.clone())]).unwrap();
+        assert_eq!(st.carried, 2, "两张都要写回目标库");
+        assert!(st.tags >= 2, "两个标签都要跟过去");
+
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        let moved = app
+            .list(&model::AssetQuery { recursive: true, limit: Some(10), ..Default::default() })
+            .unwrap();
+        let m1 = moved.iter().find(|r| r.name == "一.png").expect("一.png 要在 B 库");
+        let m2 = moved.iter().find(|r| r.name == "二.png").expect("二.png 要在 B 库");
+        assert_eq!(m1.rating, 3);
+        assert_eq!(m2.rating, 4);
+        let tags = app.tags().unwrap();
+        assert!(tags.iter().any(|t| t.name == "甲" && t.count == 1), "{tags:?}");
+        assert!(tags.iter().any(|t| t.name == "乙" && t.count == 1), "{tags:?}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 0.4.7：空壳清理 —— 0 的标签/分组/快照要删掉，但**刚建的和别的库的不许动**。
+    #[test]
+    fn empty_shelves_are_pruned_but_fresh_ones_survive() {
+        let d = tmp("prune");
+        let a = d.join("库A");
+        let b = d.join("库B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("x.png"), b"x").unwrap();
+        std::fs::write(b.join("y.png"), b"y").unwrap();
+
+        let mut app = App::open(d.join("data")).unwrap();
+        app.scan(&a.to_string_lossy(), |_| {}).unwrap();
+        app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        let a_id = app.lib_for_path(&a.to_string_lossy()).unwrap();
+        let b_id = app.lib_for_path(&b.to_string_lossy()).unwrap();
+
+        /* 两边各建一套空的分组/快照；标签直接插（没有"建了但不关联"的公开 API） */
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
+        app.coll_create("空分组").unwrap();
+        app.snapshot_create("空快照").unwrap();
+        app.set_current_lib(&b.to_string_lossy()).unwrap();
+        app.coll_create("空分组").unwrap();
+        app.snapshot_create("空快照").unwrap();
+        for (id, name) in [(a_id, "空标签"), (b_id, "空标签")] {
+            let l = app.libs.iter().find(|l| l.id == id).unwrap();
+            l.conn
+                .execute(
+                    "INSERT INTO tags (name, created_at) VALUES (?1, ?2)",
+                    rusqlite::params![name, db::now_ts()],
+                )
+                .unwrap();
+        }
+
+        /* ① 宽限内：全是刚建的，一个都不许删 */
+        app.prune_empty_shelves(EMPTY_SHELF_GRACE).unwrap();
+        assert!(app.tags().unwrap().iter().any(|t| t.name == "空标签"), "刚建的标签不能被清");
+        assert!(app.coll_list().unwrap().iter().any(|c| c.name == "空分组"));
+
+        /* ② 把它们改成"很久以前建的"，这次就该清掉了 */
+        let old = db::now_ts() - 10_000;
+        for l in &app.libs {
+            l.conn
+                .execute("UPDATE tags SET created_at=?1", rusqlite::params![old])
+                .unwrap();
+            l.conn
+                .execute("UPDATE collections SET created_at=?1", rusqlite::params![old])
+                .unwrap();
+            l.conn
+                .execute("UPDATE snapshots SET created_at=?1", rusqlite::params![old])
+                .unwrap();
+        }
+        let st = app.prune_empty_shelves(EMPTY_SHELF_GRACE).unwrap();
+        assert_eq!(st.tags, 2, "两个库各一个空标签");
+        assert_eq!(st.colls, 2);
+        assert_eq!(st.snaps, 2);
+        assert!(app.tags().unwrap().iter().all(|t| t.name != "空标签"));
+        assert!(app.coll_list().unwrap().is_empty());
+        assert!(app.snapshot_list().unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -264,6 +264,9 @@ export const mockSource: Source = {
   async exportPackage() {
     throw new Error("浏览器预览模式下不能导出资产包，请用桌面版");
   },
+  async exportLibraryZip() {
+    throw new Error("浏览器预览模式下不能把整个库导出成 zip，请用桌面版");
+  },
   async pickFolder() {
     return null;
   },
@@ -367,8 +370,14 @@ export const mockSource: Source = {
   async openUrl(url: string) {
     window.open(url, "_blank");
   },
+  /* 预览里给三块侧栏面板塞几条假数据：① 预览能演示拖放到标签/分组/快照的
+     完整链路（真机回归要用浏览器自动化验，没有行就没法验）；② 以前预览模式
+     这三块永远是空的，看着像"面板坏了"。 */
   async tags() {
-    return [];
+    return [
+      { name: "风景", count: 3, color: "teal", group: null },
+      { name: "人物", count: 1, color: "amber", group: null },
+    ];
   },
   async autoTags() {
     return [];
@@ -382,17 +391,18 @@ export const mockSource: Source = {
   async tagCreate() {
     /* mock：新建空标签，列表本来就随 refreshKey 重算 */
   },
-  async tagAssets() {
-    throw new Error("浏览器预览模式不支持打标签");
+  async tagAssets(_ids: number[], _tag: string) {
+    /* 假成功：预览只演示交互，不落盘。返回数量让 toast 显示"已打 N 项" */
+    return _ids.length;
   },
   async untagAssets() {
-    throw new Error("浏览器预览模式不支持去标签");
+    return 0;
   },
   async deleteTag() {
     throw new Error("浏览器预览模式不支持删除标签");
   },
   async tagGroups() {
-    return [];
+    return [{ name: "常用", count: 4, color: null, tags: 2 }];
   },
   async setTagColor() {
     throw new Error("浏览器预览模式不支持改标签颜色");
@@ -487,15 +497,19 @@ export const mockSource: Source = {
     throw new Error("浏览器预览模式没有灵感板");
   },
   async collList() {
-    return [];
+    return [
+      { id: 1, name: "精选", count: 2, createdAt: 1700000000000 },
+      { id: 2, name: "待处理", count: 0, createdAt: 1700000100000 },
+    ];
   },
   async collCreate() {
     return 0;
   },
   async collRename() {},
   async collDelete() {},
-  async collAdd() {
-    return 0;
+  async collAdd(_id: number, ids: number[]) {
+    /* 假成功：预览只演示交互 */
+    return ids.length;
   },
   async collAddTag() {
     return 0;
@@ -513,15 +527,16 @@ export const mockSource: Source = {
     throw new Error("浏览器预览模式没有灵感板");
   },
   async snapshotList() {
-    return [];
+    return [{ id: 1, name: "初选", count: 1, createdAt: 1700000000000, updatedAt: 1700000000000 }];
   },
   async snapshotCreate() {
     throw new Error("浏览器预览模式没有快照");
   },
   async snapshotRename() {},
   async snapshotDelete() {},
-  async snapshotAdd() {
-    throw new Error("浏览器预览模式没有快照");
+  async snapshotAdd(_id: number, ids: number[]) {
+    /* 假成功：预览只演示交互 */
+    return { added: ids.length, total: ids.length, already: 0, failed: [] };
   },
   async snapshotAddTag() {
     throw new Error("浏览器预览模式没有快照");
@@ -533,6 +548,15 @@ export const mockSource: Source = {
     return [];
   },
   async boardPlace() {
+    return 0;
+  },
+  async boardNotes() {
+    return [];
+  },
+  async boardNotePut() {
+    return 0;
+  },
+  async boardNoteDel() {
     return 0;
   },
   async boardAddPaths() {

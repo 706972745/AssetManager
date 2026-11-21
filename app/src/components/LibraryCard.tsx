@@ -47,6 +47,10 @@ export function LibraryCard({
   const [busy, setBusy] = useState(false);
   /* 内置库（软件自己的截图目录）：不占名额、不给移除（owner 2026-11-17） */
   const [builtin, setBuiltin] = useState<string[]>([]);
+  /* 正在导出哪个库（按钮置灰 + 防连点；导出整库要读几分钟盘） */
+  const [exporting, setExporting] = useState<string | null>(null);
+  /* 正在导出哪个库的**用户数据**（.D）：只写一个 JSON，快得多，但仍防连点 */
+  const [dataExporting, setDataExporting] = useState<string | null>(null);
 
   useEffect(() => {
     void source
@@ -60,6 +64,77 @@ export function LibraryCard({
     return f(a) === f(b);
   };
   const isBuiltin = (p: string) => builtin.some((b) => samePath(b, p));
+
+  /**
+   * 导出**这一个库**（owner 2026-11-20：多库时每个库后面都要有自己的导出按钮，
+   * 不要把几个库攒成一个包一起导）。
+   *
+   * 走的是整库 zip：原图保留库内相对路径 + `_AssetManager/` 里放库数据，
+   * 文件名带年月日，超过 4 GB 由后端自动分片。
+   */
+  const doExport = async (root: string) => {
+    setExporting(root);
+    try {
+      const r = await source.exportLibraryZip(root);
+      if (!r) return; // 用户取消了选文件夹
+      const names = r.parts.map((p) => p.name).join("、");
+      const notes: string[] = [];
+      if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
+      if (r.skipped > 0) notes.push(`${r.skipped} 张不在原位，没进包`);
+      if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
+      onToast(
+        `已导出 ${r.files} 张 → ${names}`,
+        r.skipped > 0 || r.oversized > 0,
+        notes.join(" · ") || undefined
+      );
+    } catch (e) {
+      onToast(String(e), true);
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  /** 每行后面那个导出按钮（内置库也有：截图也是用户的资产） */
+  const exportBtn = (root: string) => (
+    <button
+      className="lib-act"
+      title="把这个素材库导出成一个 zip（文件名带年月日，只导这一个库）"
+      disabled={busy || exporting !== null || !source.desktop}
+      onClick={() => void doExport(root)}
+    >
+      <Icon name={exporting === root ? "refresh" : "download"} size={12} stroke={1.5} />
+    </button>
+  );
+
+  /**
+   * 只导**这一个库**的用户数据（0.4.5，owner 2026-11-20："按库导"）。
+   *
+   * 产物是 `<库名>-userdata-<时间戳>.D-AssetManager`：库根 + 评分 + 备注 + 标签/分组，
+   * 不含原图 —— 换机、重扫之后导回来就能把"人写的东西"找齐。
+   * 和上面的 zip 分开两个按钮：一个是"整个库搬走"，一个是"只搬我写过的批注"。
+   */
+  const doExportData = async (root: string) => {
+    setDataExporting(root);
+    try {
+      const p = await source.exportUserdata(root);
+      onToast("已导出这个库的用户数据", false, p);
+    } catch (e) {
+      onToast(String(e), true);
+    } finally {
+      setDataExporting(null);
+    }
+  };
+
+  const dataBtn = (root: string) => (
+    <button
+      className="lib-act"
+      title="只导出这个库的用户数据（评分 / 备注 / 标签 / 分组，.D-AssetManager）"
+      disabled={busy || dataExporting !== null || !source.desktop}
+      onClick={() => void doExportData(root)}
+    >
+      <Icon name={dataExporting === root ? "refresh" : "file"} size={12} stroke={1.5} />
+    </button>
+  );
 
   const reload = useCallback(() => {
     if (!source.desktop) {
@@ -152,6 +227,8 @@ export function LibraryCard({
                   <span className="lib-tag" title="软件自己的截图目录：不占名额，不可移除">
                     内置
                   </span>
+                  {dataBtn(r.path)}
+                  {exportBtn(r.path)}
                   <button
                     className="lib-act lib-open"
                     title="在资源管理器中打开"
@@ -173,6 +250,8 @@ export function LibraryCard({
                     {r.path}
                   </span>
                   <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
+                  {dataBtn(r.path)}
+                  {exportBtn(r.path)}
                   <button
                     className="lib-act lib-open"
                     title="在资源管理器中打开"

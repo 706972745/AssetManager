@@ -1,6 +1,6 @@
 [package]
 name = "assetmanager"
-version = "0.4.2"
+version = "0.4.15"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"
@@ -18,7 +18,7 @@ custom-protocol = ["tauri/custom-protocol"]
 # 托盘（「关闭到托盘」/ 托盘菜单）+ 从内置 PNG 造图标，都在这两个 feature 里。
 # `image-png` 必须开：托盘图标来自 `default_window_icon()`，关掉这个 feature
 # `TrayIconBuilder::icon` 收不到 `Image`。
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 am-core = { path = "../core" }
@@ -27,7 +27,9 @@ rfd = "0.17.2"
 tauri-plugin-global-shortcut = "2"
 # 开机自动启动：官方插件直接写注册表 HKCU\...\Run，比手写 Win32 稳（卸载时也能清干净）
 tauri-plugin-autostart = "2"
-drag = "2.1.1"
+# 0.4.12 起走本地 vendor：原版只给单一 COPY/MOVE 语义，拖到资源管理器永远是复制；
+# 本地补丁让 Copy 模式同时允许 COPY|MOVE，落点自己选（同盘=移动，跨盘/其他软件=复制）
+drag = { path = "vendor/drag" }
 # 截图的裁剪结果走 base64 回前端当 canvas 底图（data: URL 不会污染画布，
 # 跨域的自定义协议会把 toDataURL 卡死）
 base64 = "0.22"

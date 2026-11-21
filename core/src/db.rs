@@ -152,6 +152,25 @@ CREATE TABLE IF NOT EXISTS asset_tags (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_id, asset_id);
 
+/* 分组（0.4.4 起每库一份）：用户自己攒的一撮素材。
+   以前住在注册库、成员是**全局** asset id（一个分组能横跨几个库）—— 切库时
+   分组列表纹丝不动，用户看到的是"A 库的分组里装着 B 库的图"。
+   现在跟着库走：成员是本库 `assets.id`，删素材靠外键级联一起清。
+   老数据在升级时按成员的库号拆到各库（`App::migrate_collections_into_libs`）。 */
+CREATE TABLE IF NOT EXISTS collections (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS collection_assets (
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  asset_id      INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  added_at      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (collection_id, asset_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_collection_assets_asset ON collection_assets(asset_id);
+
 /* 引用关系（T26）：**谁用了这张图 / 哪些引用已经找不到文件**。
    - `src_id` 是"工程文件"（.blend / .psd / .max / .c4d …）在本库的 id；
    - `dst_path` 是工程里写的那条路径（原样存，解析不出来时它就是唯一的线索）；
@@ -1988,6 +2007,121 @@ pub fn all_asset_tags(c: &Connection) -> Res<Vec<(i64, Vec<i64>)>> {
 /// 用户层字段导出行：(id, 目录, 名字, 扩展名, 体积, 修改时间, 评分, 备注, 来源 URL)
 pub type UserRow = (i64, String, String, String, i64, i64, i64, String, String);
 
+/* ------------------------------------------------------------------ 分组
+   0.4.4 起分组跟着库走（见 SCHEMA 里的注释）。这里的 `asset_id` 一律是**本库** id，
+   `App` 层负责把全局 id 拆开、按库路由。 */
+
+pub struct CollRow {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    /// **原始成员数**（含 missing=1 的行）。界面上的数字由 `App::coll_list` 重算。
+    pub count: i64,
+}
+
+pub fn coll_list(c: &Connection) -> Res<Vec<CollRow>> {
+    let mut st = c
+        .prepare(
+            "SELECT c.id, c.name, c.created_at,
+                    (SELECT COUNT(*) FROM collection_assets a WHERE a.collection_id = c.id)
+             FROM collections c
+             ORDER BY c.sort, c.created_at, c.id",
+        )
+        .map_err(e2s)?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(CollRow { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, count: r.get(3)? })
+        })
+        .map_err(e2s)?;
+    Ok(rows.filter_map(|x| x.ok()).collect())
+}
+
+/// 新建分组。**同名直接返回已有的 id**（和快照同一口径：点两次不该出两个一样的）。
+pub fn coll_create(c: &Connection, name: &str) -> Res<i64> {
+    let name = crate::reg::validate_coll_name(name)?;
+    c.query_row(
+        "INSERT INTO collections (name, created_at) VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE SET name = collections.name
+         RETURNING id",
+        rusqlite::params![name, now_ts()],
+        |r| r.get(0),
+    )
+    .map_err(e2s)
+}
+
+pub fn coll_rename(c: &Connection, id: i64, name: &str) -> Res<()> {
+    let name = crate::reg::validate_coll_name(name)?;
+    let taken: Option<i64> = c
+        .query_row(
+            "SELECT id FROM collections WHERE name = ?1 AND id <> ?2",
+            rusqlite::params![name, id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(e2s)?;
+    if taken.is_some() {
+        return Err(format!("已经有一个叫「{name}」的分组了"));
+    }
+    c.execute("UPDATE collections SET name = ?2 WHERE id = ?1", rusqlite::params![id, name])
+        .map_err(e2s)?;
+    Ok(())
+}
+
+/// 删分组：**只删分组和成员行，素材本身一个都不动**。
+pub fn coll_delete(c: &Connection, id: i64) -> Res<()> {
+    c.execute("DELETE FROM collection_assets WHERE collection_id = ?1", rusqlite::params![id])
+        .map_err(e2s)?;
+    c.execute("DELETE FROM collections WHERE id = ?1", rusqlite::params![id])
+        .map_err(e2s)?;
+    Ok(())
+}
+
+pub fn coll_add(c: &Connection, id: i64, asset_ids: &[i64]) -> Res<usize> {
+    let mut st = c
+        .prepare(
+            "INSERT INTO collection_assets (collection_id, asset_id, added_at)
+             VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+        )
+        .map_err(e2s)?;
+    let now = now_ts();
+    let mut n = 0usize;
+    for aid in asset_ids {
+        n += st
+            .execute(rusqlite::params![id, aid, now])
+            .map_err(e2s)?;
+    }
+    Ok(n)
+}
+
+pub fn coll_remove(c: &Connection, id: i64, asset_ids: &[i64]) -> Res<usize> {
+    let mut st = c
+        .prepare("DELETE FROM collection_assets WHERE collection_id = ?1 AND asset_id = ?2")
+        .map_err(e2s)?;
+    let mut n = 0usize;
+    for aid in asset_ids {
+        n += st.execute(rusqlite::params![id, aid]).map_err(e2s)?;
+    }
+    Ok(n)
+}
+
+/// 这个分组里的**本库**素材 id（含 missing 的，计数再筛）。
+pub fn coll_ids(c: &Connection, id: i64) -> Res<Vec<i64>> {
+    let mut st = c
+        .prepare("SELECT asset_id FROM collection_assets WHERE collection_id = ?1 ORDER BY added_at, asset_id")
+        .map_err(e2s)?;
+    let rows = st.query_map(rusqlite::params![id], |r| r.get::<_, i64>(0)).map_err(e2s)?;
+    Ok(rows.flatten().collect())
+}
+
+/// 这张素材在**本库**的哪些分组里。
+pub fn coll_of(c: &Connection, asset_id: i64) -> Res<Vec<i64>> {
+    let mut st = c
+        .prepare("SELECT collection_id FROM collection_assets WHERE asset_id = ?1 ORDER BY collection_id")
+        .map_err(e2s)?;
+    let rows = st.query_map(rusqlite::params![asset_id], |r| r.get::<_, i64>(0)).map_err(e2s)?;
+    Ok(rows.flatten().collect())
+}
+
 /// 资产包导出用的一行：(id, 目录, 名字, 体积, 修改时间, 宽, 高, 评分, 备注)。
 ///
 /// 与 `user_rows` 的区别：**全部**素材都算（不只是有用户数据的）——
@@ -2125,6 +2259,113 @@ pub fn asset_id_by_path(c: &Connection, path: &str) -> Res<Option<i64>> {
     )
     .optional()
     .map_err(e2s)
+}
+
+/// 一棵目录子树下的全部素材：`(id, 绝对路径, 评分, 备注, 来源, 内容哈希)`。
+///
+/// 移动**整个文件夹**时用：`FsOps` 的 `pairs` 只记顶层项（目录本身），
+/// 里面的图不会被逐个列出 —— 不按子树展开的话，跨库拖一个文件夹会把它
+/// 里面所有图的标签/评分全丢掉（§10.5 #37 的同一个坑，只是入口不同）。
+///
+/// 前缀判定放在 Rust 侧（`norm_path` 统一斜杠 + 大小写），不用 SQL `LIKE`：
+/// 路径里本来就有反斜杠，`LIKE ... ESCAPE` 的写法在 Windows 路径上极容易写错，
+/// 而 `dirs` 表只有几百行，全取一遍再比是最不容易出错的做法。
+pub type SubTreeRow = (i64, String, i64, String, String, Option<Vec<u8>>);
+
+pub fn assets_under(c: &Connection, dir_path: &str) -> Res<Vec<SubTreeRow>> {
+    let base = crate::norm_path(dir_path);
+    let mut dir_ids: Vec<i64> = Vec::new();
+    {
+        let mut st = c.prepare("SELECT id, path FROM dirs").map_err(e2s)?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(e2s)?;
+        for (id, p) in rows.flatten() {
+            let np = crate::norm_path(&p);
+            if np == base || np.starts_with(&format!("{base}\\")) {
+                dir_ids.push(id);
+            }
+        }
+    }
+    if dir_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = dir_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        /* note / source_url 允许 NULL（老行、刚扫进来的行），按 String 直接取会
+           报 `Invalid column type Null` 然后整行被丢掉 —— 必须 COALESCE */
+        "SELECT a.id, d.path || '\\' || a.name,
+                COALESCE(a.rating, 0), COALESCE(a.note, ''), COALESCE(a.source_url, ''), a.hash_x
+         FROM assets a JOIN dirs d ON d.id = a.dir_id
+         WHERE a.missing=0 AND a.dir_id IN ({ph})
+         ORDER BY a.id"
+    );
+    let mut st = c.prepare(&sql).map_err(e2s)?;
+    let rows = st
+        .query_map(rusqlite::params_from_iter(dir_ids.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .map_err(e2s)?;
+    let mut out: Vec<SubTreeRow> = Vec::new();
+    for r in rows {
+        out.push(r.map_err(e2s)?);
+    }
+    Ok(out)
+}
+
+/// 把一个目录子树从索引里**整棵删掉**，返回删掉的素材行数。
+///
+/// 移动文件夹跨库时，源路径已经不存在了：`scan_one_dir` 只清"这一层"，
+/// 子目录里的行会留在源库里变成指向空路径的幽灵（列表里还能点、缩略图还在）。
+/// 这里按 `dirs.path` 前缀把整棵子树（含自己）的行、目录、FTS 一起清掉。
+///
+/// 只动索引，**不碰磁盘**：文件已经由 `FsOps` 搬走了。
+pub fn purge_subtree(c: &Connection, dir_path: &str) -> Res<usize> {
+    let base = crate::norm_path(dir_path);
+    let mut ids: Vec<(i64, String)> = Vec::new();
+    {
+        let mut st = c.prepare("SELECT id, path FROM dirs").map_err(e2s)?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(e2s)?;
+        for (id, p) in rows.flatten() {
+            let np = crate::norm_path(&p);
+            if np == base || np.starts_with(&format!("{base}\\")) {
+                ids.push((id, np));
+            }
+        }
+    }
+    /* **深的先删**：`dirs.parent_id` 引用了 dirs(id) 且没有 CASCADE，
+       先删父目录会撞 FOREIGN KEY constraint failed */
+    ids.sort_by_key(|(_, p)| std::cmp::Reverse(p.len()));
+    let mut n = 0usize;
+    for (id, _) in ids {
+        let files: Vec<(i64, String)> = {
+            let mut st = c
+                .prepare("SELECT id, name FROM assets WHERE dir_id=?1")
+                .map_err(e2s)?;
+            let rows = st
+                .query_map(params![id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(e2s)?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for (aid, name) in &files {
+            let _ = fts_del(c, *aid, name, "", "");
+        }
+        c.execute("DELETE FROM assets WHERE dir_id=?1", params![id])
+            .map_err(e2s)?;
+        c.execute("DELETE FROM dirs WHERE id=?1", params![id])
+            .map_err(e2s)?;
+        n += files.len();
+    }
+    Ok(n)
 }
 
 /* ---------------- 内容指纹（快照的身份） ----------------
@@ -2350,7 +2591,7 @@ mod tests {
         let mut app = crate::App::open(&d).unwrap();
         app.scan(&root.to_string_lossy(), |_p| {}).unwrap();
 
-        let json = app.export_userdata().unwrap();
+        let json = app.export_userdata(None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["app"], "AssetManager");
         let libs = v["libs"].as_array().unwrap();
@@ -2363,7 +2604,7 @@ mod tests {
         app.set_rating(&[id], 4).unwrap();
         app.set_note(id, "留一手").unwrap();
         app.tag_assets(&[id], "客户稿").unwrap();
-        let json = app.export_userdata().unwrap();
+        let json = app.export_userdata(None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let assets = v["assets"].as_array().unwrap();
         assert_eq!(assets.len(), 1);

@@ -1,7 +1,7 @@
 //! 双击导入时的「这是什么文件」判定 —— **只看内容，不看扩展名**。
 //!
 //! 职责：把一个用户双击（或从命令行传进来）的文件归到三类之一：
-//! 用户数据（`.L-AssetManager`）/ 快照清单（`.S-AssetManager`）/ 资源包（`.P-AssetManager`）。
+//! 用户数据（`.D-AssetManager`，0.4.5 起；旧的 `.L-AssetManager` 仍认）/ 快照清单（`.S-AssetManager`）/ 资源包（`.P-AssetManager`）。
 //!
 //! 边界：
 //! - 只读文件头 / 解析顶层 JSON 键，**不改文件、不写索引**（落库由调用方做）；
@@ -19,7 +19,8 @@ use std::path::Path;
 /// 三种可双击导入的文件
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImportKind {
-    /// `.L-AssetManager`：用户层数据（库根 / 评分 / 备注 / 来源 / 标签）
+    /// `.D-AssetManager`：用户层数据（库根 / 评分 / 备注 / 来源 / 标签）。
+    /// 0.4.5 把后缀从 `.L` 改成 `.D`；判定只看内容，所以老 `.L` 文件照样认得。
     UserData,
     /// `.S-AssetManager`：快照清单（只有哈希与元数据，不含图片字节）
     Snapshot,
@@ -127,7 +128,7 @@ mod tests {
 
     #[test]
     fn sniff_userdata_json() {
-        let p = tmp("u.L-AssetManager");
+        let p = tmp("u.D-AssetManager");
         std::fs::write(
             &p,
             r#"{"app":"AssetManager","libs":["D:\\a"],"assets":[]}"#,
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn sniff_missing_file_says_where() {
-        let p = tmp("nope.L-AssetManager");
+        let p = tmp("nope.D-AssetManager");
         let _ = std::fs::remove_file(&p);
         let e = sniff(&p).unwrap_err();
         assert!(e.contains("找不到这个文件"), "{e}");

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ClipboardPaste, Maximize2, Minus, Plus, X } from "lucide-react";
+import { ClipboardPaste, LayoutGrid, Layers, Maximize2, Minus, Plus, Type, X } from "lucide-react";
 import { source } from "../data/source";
+import type { BoardNote } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 import { createShiftWheelPan } from "../lib/windowShiftPan";
+import { isOwnDrag } from "../lib/ownDrag";
 
 /**
  * 灵感板（照 PureRef）：把一个标签下的所有素材铺在一块**无边界画布**上。
@@ -11,6 +13,13 @@ import { createShiftWheelPan } from "../lib/windowShiftPan";
  * - 空白处左键拖 / 中键拖 = 平移画布；滚轮 = 缩放（锚定鼠标，指针下的那张图不动）
  * - 左键拖某张图 = 移动它；拖右下角手柄 = **改它的大小**（保持比例）；双击 = 贴图
  * - 画布没有边界，坐标可以是任意大/小（不夹紧，也不回弹）
+ *
+ * 0.4.14 起多三件事：
+ * - **文字便签**：`T` 或顶栏「文字」在视口中心放一张，双击改、Esc 存、清空即删；
+ *   位置和图片一样可拖，落在 `board_notes`（按板的键存，换机器就没了，和摆位同性质）。
+ * - **一键整理**：按当前视觉顺序（从上到下、同一行从左到右）重新瀑布流排一遍并落库。
+ * - **动图悬停才动**：板上永远是 1024 档静态缩略图（GIF 的首帧），
+ *   指针停上去才把 **原文件**（`px=0`）叠上去播；离开立刻拆掉 —— 不悬停就不耗 CPU。
  *
  * 「什么能上板」：**不看格式，只看软件能不能把它变成图**。JPG/PNG/WebP/AVIF/HEIC 自不必说，
  * PSD/PSB/AI/EPS/SVG/WMF/EMF、全部 RAW、PDF 都走同一条 `thumb://` 出图管线
@@ -28,6 +37,10 @@ interface BoardItem {
   h: number;
   name: string;
   path: string;
+  /** 动图：默认静止，悬停才播 `raw` */
+  anim?: boolean;
+  /** 原文件地址（`px=0`）：动图悬停时换成它 */
+  raw?: string;
 }
 
 interface BoardBoot {
@@ -64,6 +77,12 @@ const GAP = 18;
 const MARGIN = 600;
 const MIN_W = 40;
 const MAX_W = 2400;
+/** 便签默认尺寸（画布单位）。宽度固定，高度由内容撑开，只作为落库/可见性判断的估计值 */
+const NOTE_W = 240;
+const NOTE_H = 120;
+/** 左侧图层面板宽度（画布单位 = CSS px）。**改这里要同步 `.board-layers` 的 width**：
+ *  fit / 居中要靠它把"看得见的那块"往右偏，否则内容会被面板压住一截。 */
+const LAYERS_W = 208;
 
 interface Box {
   x: number;
@@ -99,6 +118,16 @@ function layout(items: BoardItem[]): { boxes: Box[]; width: number; height: numb
 export function Board() {
   const boot = useMemo(bootData, []);
   const [items, setItems] = useState<BoardItem[]>(() => boot?.items ?? []);
+  /* 文字便签：坐标同样住在 `pos`（key = `-nid`），这里的 state 只负责文字与渲染 */
+  const [notes, setNotes] = useState<BoardNote[]>([]);
+  const notesRef = useRef<BoardNote[]>([]);
+  /** 正在编辑的那张便签（nid）；null = 没有 */
+  const [editId, setEditId] = useState<number | null>(null);
+  /* 左侧图层面板（0.4.15）：列出板上**所有**图片，点一行 = 置顶 + 视口居中。
+     面板默认展开，但只在展开时才渲染列表（2000 张的板不打开就不付这份 DOM 成本）。 */
+  const [layersOpen, setLayersOpen] = useState(true);
+  /** 当前**最顶层**的那张。只记一张 —— 需求是"最近点哪张哪张在上面"，不是 PS 那种层叠序 */
+  const [topId, setTopId] = useState<number | null>(null);
   const { boxes, width: cw, height: ch } = useMemo(() => layout(items), [items]);
   const boxById = useMemo(() => {
     const m = new Map<number, Box>();
@@ -114,10 +143,20 @@ export function Board() {
   const [zoom, setZoom] = useState(1);
   const [vis, setVis] = useState<Set<number>>(new Set());
   const [broken, setBroken] = useState<Set<number>>(new Set());
-  const [menu, setMenu] = useState<{ x: number; y: number; id: number | null } | null>(null);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    id: number | null;
+    /** 右键落在便签上：nid */
+    note?: number;
+  } | null>(null);
   const [active, setActive] = useState<number | null>(null); // 悬停/拖动中的那张：显示缩放手柄
   /* 操作反馈（粘贴成功/失败）：画布上没有 toast，横幅也不该常驻，就一条两秒半的提示 */
   const [hint, setHint] = useState<{ text: string; bad: boolean } | null>(null);
+
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
 
   /* Shift + 滚轮 = 挪**窗口**在屏幕上的位置（owner 2026-11-19）。
      它自己管 rAF 合帧与窗口几何缓存，所以整块板只建一次；挂载/卸载跟着组件走。 */
@@ -161,26 +200,58 @@ export function Board() {
     setVis((old) => (old.size === out.size && [...out].every((v) => old.has(v)) ? old : out));
   }, [items, boxById]);
 
-  /** 按内容包围盒 fit 进窗口并居中 */
-  const fit = useCallback(() => {
-    const root = rootRef.current;
-    if (!root) return;
-    const W = root.clientWidth || 1200;
-    const H = root.clientHeight || 800;
-    // 空板：包围盒是 0，直接让画布原点落在窗口中心（之后粘进来的图就落在视口正中）
-    if (!(cw > 0) || !(ch > 0)) {
-      vp.current = { k: 1, x: W / 2, y: H / 2 };
+  /** 按给定包围盒 fit 进窗口并居中（`fit` 和「一键整理」共用：整理时新包围盒还没进 state） */
+  const fitTo = useCallback(
+    (w: number, h: number) => {
+      const root = rootRef.current;
+      if (!root) return;
+      /* 图层面板占了左边一条：可见区从 `pad` 开始，否则 fit 之后内容被面板压住一截 */
+      const pad = layersOpen ? LAYERS_W : 0;
+      const W = (root.clientWidth || 1200) - pad;
+      const H = root.clientHeight || 800;
+      // 空板：包围盒是 0，直接让画布原点落在可见区中心（之后粘进来的图就落在视口正中）
+      if (!(w > 0) || !(h > 0)) {
+        vp.current = { k: 1, x: pad + W / 2, y: H / 2 };
+        applyVp();
+        setZoom(1);
+        recompute();
+        return;
+      }
+      const k = Math.min(1, (W * 0.92) / w, (H * 0.92) / h);
+      vp.current = { k, x: pad + (W - w * k) / 2, y: (H - h * k) / 2 };
       applyVp();
-      setZoom(1);
+      setZoom(k);
       recompute();
-      return;
-    }
-    const k = Math.min(1, (W * 0.92) / cw, (H * 0.92) / ch);
-    vp.current = { k, x: (W - cw * k) / 2, y: (H - ch * k) / 2 };
-    applyVp();
-    setZoom(k);
-    recompute();
-  }, [cw, ch, applyVp, recompute]);
+    },
+    [applyVp, recompute, layersOpen]
+  );
+
+  /** 按内容包围盒 fit 进窗口并居中 */
+  const fit = useCallback(() => fitTo(cw, ch), [fitTo, cw, ch]);
+
+  /** 把某张图挪到视口正中（装不下才缩）。图层面板点一行走这里 */
+  const focusItem = useCallback(
+    (id: number) => {
+      const root = rootRef.current;
+      if (!root) return;
+      const pad = layersOpen ? LAYERS_W : 0;
+      const W = (root.clientWidth || 1200) - pad;
+      const H = root.clientHeight || 800;
+      const b = pos.current.get(id) ?? boxById.get(id) ?? { x: 0, y: 0, w: CW, h: CW };
+      const v = vp.current;
+      /* 只在"这张装不下"时才改 k：用户当前缩放手感不该被一次点击重置 */
+      const need = Math.min(1, (W * 0.86) / Math.max(1, b.w), (H * 0.86) / Math.max(1, b.h));
+      const k = need < v.k ? Math.max(0.04, need) : v.k;
+      v.k = k;
+      v.x = pad + W / 2 - (b.x + b.w / 2) * k;
+      v.y = H / 2 - (b.y + b.h / 2) * k;
+      applyVp();
+      setZoom(k);
+      /* 居中后这张可能刚进视口 —— 立刻重算可见集，它才会被挂成 `<img>` */
+      recompute();
+    },
+    [applyVp, recompute, boxById, layersOpen]
+  );
 
   const reset100 = useCallback(() => {
     vp.current = { x: 0, y: 0, k: 1 };
@@ -228,18 +299,23 @@ export function Board() {
       return;
     }
     let alive = true;
-    void source
-      .boardLayout(board)
-      .then((rows) => {
-        if (!alive) return;
-        for (const [g, x, y, w, h] of rows) pos.current.set(g, { x, y, w, h });
-      })
-      .catch(() => {})
-      .finally(() => {
-        layoutReady.current = true;
-        /* 读完之后重排一次：这一帧 items 已经从 boot 来了，直接把 DOM 位置改对 */
-        setItems((old) => [...old]);
-      });
+    void Promise.all([
+      source.boardLayout(board).catch(() => [] as [number, number, number, number, number][]),
+      source
+        .boardNotes(board)
+        .catch(() => [] as [number, number, number, number, number, string][]),
+    ]).then(([rows, ns]) => {
+      if (!alive) return;
+      for (const [g, x, y, w, h] of rows) pos.current.set(g, { x, y, w, h });
+      /* 便签的坐标进同一个 `pos`，key 用 `-nid`：图片 id 是正数，两边永不相撞 */
+      const list: BoardNote[] = ns.map(([nid, x, y, w, h, text]) => ({ nid, x, y, w, h, text }));
+      for (const n of list) pos.current.set(-n.nid, { x: n.x, y: n.y, w: n.w, h: n.h });
+      notesRef.current = list;
+      setNotes(list);
+      layoutReady.current = true;
+      /* 读完之后重排一次：这一帧 items 已经从 boot 来了，直接把 DOM 位置改对 */
+      setItems((old) => [...old]);
+    });
     return () => {
       alive = false;
     };
@@ -257,6 +333,125 @@ export function Board() {
     },
     [boot?.board]
   );
+
+  /** 便签的位置记回库。文字从 `notesRef` 取 —— settle 里那个闭包不跟着 notes 重挂 */
+  const noteRemember = useCallback(
+    (nid: number) => {
+      const board = boot?.board;
+      const b = pos.current.get(-nid);
+      if (!board || !b) return;
+      const text = notesRef.current.find((n) => n.nid === nid)?.text ?? "";
+      void source
+        .boardNotePut(
+          board,
+          nid,
+          Math.round(b.x),
+          Math.round(b.y),
+          Math.round(b.w),
+          Math.round(b.h),
+          text
+        )
+        .catch(() => {});
+    },
+    [boot?.board]
+  );
+
+  /* ---------------- 文字便签（0.4.14） ---------------- */
+
+  /** 在视口正中放一张空便签，并立刻进入编辑 */
+  const addNote = useCallback(async () => {
+    const board = boot?.board;
+    if (!board) return;
+    const root = rootRef.current;
+    const W = root?.clientWidth ?? 1200;
+    const H = root?.clientHeight ?? 800;
+    const v = vp.current;
+    const cx = (W / 2 - v.x) / v.k;
+    const cy = (H / 2 - v.y) / v.k;
+    const x = Math.round(cx - NOTE_W / 2);
+    const y = Math.round(cy - NOTE_H / 2);
+    try {
+      const nid = await source.boardNotePut(board, null, x, y, NOTE_W, NOTE_H, "");
+      pos.current.set(-nid, { x, y, w: NOTE_W, h: NOTE_H });
+      notesRef.current = [...notesRef.current, { nid, x, y, w: NOTE_W, h: NOTE_H, text: "" }];
+      setNotes(notesRef.current);
+      setEditId(nid);
+    } catch (e) {
+      setHint({ text: String(e), bad: true });
+    }
+  }, [boot?.board]);
+
+  /** 结束编辑：有字就存，**一个字都没有就删**（空便签留在板上没有意义） */
+  const commitNote = useCallback(
+    (nid: number, raw: string) => {
+      setEditId((cur) => (cur === nid ? null : cur));
+      const board = boot?.board;
+      const b = pos.current.get(-nid) ?? { x: 0, y: 0, w: NOTE_W, h: NOTE_H };
+      const text = raw.replace(/\s+$/, "");
+      if (!text.trim()) {
+        notesRef.current = notesRef.current.filter((n) => n.nid !== nid);
+        setNotes(notesRef.current);
+        pos.current.delete(-nid);
+        if (board) void source.boardNoteDel(board, nid).catch(() => {});
+        return;
+      }
+      notesRef.current = notesRef.current.map((n) => (n.nid === nid ? { ...n, text } : n));
+      setNotes(notesRef.current);
+      if (board)
+        void source
+          .boardNotePut(
+            board,
+            nid,
+            Math.round(b.x),
+            Math.round(b.y),
+            Math.round(b.w),
+            Math.round(b.h),
+            text
+          )
+          .catch(() => {});
+    },
+    [boot?.board]
+  );
+
+  const delNote = useCallback(
+    (nid: number) => {
+      notesRef.current = notesRef.current.filter((n) => n.nid !== nid);
+      setNotes(notesRef.current);
+      pos.current.delete(-nid);
+      setEditId((cur) => (cur === nid ? null : cur));
+      const board = boot?.board;
+      if (board) void source.boardNoteDel(board, nid).catch(() => {});
+    },
+    [boot?.board]
+  );
+
+  /* ---------------- 一键整理 ---------------- */
+
+  /** 按**当前视觉顺序**重排成瀑布流并落库。便签不参与 —— 它们通常是贴在某张图旁边的标注 */
+  const tidy = useCallback(() => {
+    if (!items.length) return;
+    const box = (id: number): Box => pos.current.get(id) ?? boxById.get(id) ?? { x: 0, y: 0, w: CW, h: CW };
+    const order = [...items].sort((a, b) => {
+      const A = box(a.id);
+      const B = box(b.id);
+      // 先按行（80 画布单位一带），行内再按 x —— 近似"从上到下、从左到右"的阅读序
+      const ra = Math.round(A.y / 80);
+      const rb = Math.round(B.y / 80);
+      return ra - rb || A.x - B.x;
+    });
+    const { boxes: bx, width, height } = layout(order);
+    const rows: [number, number, number, number, number][] = [];
+    order.forEach((it, i) => {
+      const b = { ...bx[i] };
+      pos.current.set(it.id, b);
+      rows.push([it.id, Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.h)]);
+    });
+    // 顺序写回 state：再点一次「整理」时起点就是这次的阅读序
+    setItems(order);
+    if (boot?.board) void source.boardPlace(boot.board, rows).catch(() => {});
+    fitTo(width, height);
+    setHint({ text: `已整理 ${order.length} 张`, bad: false });
+  }, [items, boxById, boot?.board, fitTo]);
 
   useEffect(() => {
     items.forEach((it, i) => {
@@ -301,6 +496,8 @@ export function Board() {
     sx: number;
     sy: number;
     box: Box;
+    /** 拖的是便签（`id` 是 `-nid`）：收尾要写 board_notes，不写 board_items */
+    note?: boolean;
     /** 拖图只认左键（下面的 `e.button === 0` 已限定），所以恒为 1 —— 见 onDown 里的说明 */
     mask: number;
   } | null>(null);
@@ -313,6 +510,10 @@ export function Board() {
     if (!root) return;
 
     const onWheel = (e: WheelEvent) => {
+      /* 左侧图层面板里的滚轮 = 滚那个列表，不是缩放画布。
+         必须在 `preventDefault` **之前**放行，否则列表滚不动。 */
+      const tgt = e.target instanceof HTMLElement ? e.target : null;
+      if (tgt?.closest(".board-layers")) return;
       e.preventDefault();
       /* Shift + 滚轮 = **把这个窗口挪到屏幕上别的位置**（owner 原话："按住 shift 滚轮
          不松，可以随意拖动窗口到任意位置"）。它既不是缩放画布、也不是平移画布内容，
@@ -378,7 +579,9 @@ export function Board() {
       }
       const d = drag.current;
       if (!d) return;
-      const el = canvasRef.current?.querySelector<HTMLElement>(`[data-img="${d.id}"]`);
+      const el = canvasRef.current?.querySelector<HTMLElement>(
+        d.note ? `[data-note="${-d.id}"]` : `[data-img="${d.id}"]`
+      );
       if (el) {
         pos.current.set(d.id, {
           x: Math.round(parseFloat(el.style.left) || d.box.x),
@@ -387,7 +590,10 @@ export function Board() {
           h: Math.round(parseFloat(el.style.height) || d.box.h),
         });
       }
-      remember(d.id);
+      /* 便签的高度是 auto（由文字撑开），`style.height` 是空串 —— parseFloat 会给 NaN，
+         上面那行自动退回 d.box.h，够用。 */
+      if (d.note) noteRemember(-d.id);
+      else remember(d.id);
       drag.current = null;
       rootRef.current?.classList.remove("dragging-img");
       recompute();
@@ -417,7 +623,9 @@ export function Board() {
       }
       const d = drag.current;
       if (!d) return;
-      const el = canvasRef.current?.querySelector<HTMLElement>(`[data-img="${d.id}"]`);
+      const el = canvasRef.current?.querySelector<HTMLElement>(
+        d.note ? `[data-note="${-d.id}"]` : `[data-img="${d.id}"]`
+      );
       if (!el) return;
       if (d.kind === "move") {
         el.style.left = `${d.box.x + (e.clientX - d.sx) / vp.current.k}px`;
@@ -445,7 +653,7 @@ export function Board() {
       window.removeEventListener("mouseup", settle);
       window.removeEventListener("blur", settle);
     };
-  }, [applyVp, recompute, boxById, remember]);
+  }, [applyVp, recompute, boxById, remember, noteRemember]);
 
   const onDown = (e: React.MouseEvent) => {
     if (e.button === 2) return; // 右键交给菜单
@@ -460,10 +668,33 @@ export function Board() {
     if (t.closest("[data-tauri-drag-region]")) return;
     // 顶栏/缩放条上的按钮同理：按下按钮不该顺手把画布平移起来
     if (t.closest("button")) return;
+    /* 左侧图层面板：点列表、拖滚动条都不该把画布拖走 */
+    if (t.closest(".board-layers")) return;
+    /* 正在编辑的便签：这次按下归 textarea（选字 / 摆光标），**不要**起拖动。
+       否则往便签里点一下，整张条就被挪走了。 */
+    if (t.closest("textarea")) return;
+    const noteEl = t.closest<HTMLElement>("[data-note]");
+    if (noteEl && e.button === 0) {
+      const nid = Number(noteEl.dataset.note);
+      drag.current = {
+        kind: "move",
+        id: -nid,
+        sx: e.clientX,
+        sy: e.clientY,
+        box: at(-nid),
+        note: true,
+        mask: 1,
+      };
+      rootRef.current?.classList.add("dragging-img");
+      e.preventDefault();
+      return;
+    }
     const handle = t.closest<HTMLElement>("[data-handle]");
     const cell = t.closest<HTMLElement>("[data-img]");
     if (cell && e.button === 0) {
       const id = Number(cell.dataset.img);
+      /* 最近点的那张放到最顶层（需求原话：不需要 PS 那种层叠序，点谁谁在上面） */
+      setTopId(id);
       const b = at(id);
       drag.current = {
         kind: handle ? "size" : "move",
@@ -614,6 +845,10 @@ export function Board() {
             else if (p.type === "leave") rootRef.current?.classList.remove("drop-hot");
             else if (p.type === "drop") {
               rootRef.current?.classList.remove("drop-hot");
+              /* 自己刚拖出去又拖回来的那趟不算「导入」：拖回来可能只是想放到
+                 标签/分组上（App 的 am://drag-end 负责投放），不拦的话素材库
+                 会凭空多一份导入记录。 */
+              if (isOwnDrag(p.paths)) return;
               void addPaths(p.paths);
             }
           })
@@ -634,6 +869,12 @@ export function Board() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      /* 正在便签里打字：全局快捷键一律让路。
+         否则 Ctrl+V 会被当成"粘贴剪贴板图片"，一按就往板里塞一张截图。
+         注意 target 不一定是元素（事件可能落在 window 上，比如程序化派发），
+         所以先判类型再用 `closest` —— 直接 `e.target.closest` 会 TypeError。 */
+      const tgt = e.target instanceof HTMLElement ? e.target : null;
+      if (tgt && tgt.closest("textarea, input")) return;
       const mod = e.ctrlKey || e.metaKey;
       /* Ctrl+V = 把剪贴板里的图**变成这个标签下的一张素材**：
          存进 `程序目录\screenshots` → 入库 → 打上这块板的标签 → 贴到视口正中。
@@ -664,18 +905,58 @@ export function Board() {
       }
       if (e.key === "f" || e.key === "F") fit();
       if (e.key === "0") reset100();
+      /* L = 开合左侧图层面板 */
+      if ((e.key === "l" || e.key === "L") && !mod && !e.altKey) {
+        e.preventDefault();
+        setLayersOpen((v) => !v);
+      }
+      /* T = 在视口正中放一张文字便签（和顶栏那枚「文字」按钮同一条路） */
+      if ((e.key === "t" || e.key === "T") && !mod && !e.altKey) {
+        e.preventDefault();
+        void addNote();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, menu, reset100, active, items, paste]);
+  }, [fit, menu, reset100, active, items, paste, addNote]);
 
   /* ---------------- 菜单 ---------------- */
 
   const menuItems: CtxItem[] = useMemo(() => {
+    /* 便签的菜单只有两件事：改字、删掉 */
+    if (menu?.note != null) {
+      const nid = menu.note;
+      return [
+        {
+          label: "编辑文字",
+          icon: "file",
+          action: () => setEditId(nid),
+        },
+        { kind: "separator" },
+        {
+          label: "删除这张便签",
+          icon: "trash",
+          danger: true,
+          action: () => delNote(nid),
+        },
+      ];
+    }
     const id = menu?.id ?? null;
     const it = id != null ? items.find((x) => x.id === id) : null;
     if (!it) {
       return [
+        {
+          label: "添加文字便签",
+          icon: "file",
+          shortcut: "T",
+          action: () => void addNote(),
+        },
+        {
+          label: "一键整理图片",
+          icon: "grid",
+          action: tidy,
+        },
+        { kind: "separator" },
         {
           label: "从资源管理器拖文件进来",
           icon: "import",
@@ -727,7 +1008,7 @@ export function Board() {
       { kind: "separator" },
       { label: "关闭这块灵感板", icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
     ];
-  }, [menu, items, fit, reset100, paste]);
+  }, [menu, items, notes, fit, reset100, paste, addNote, tidy, delNote]);
 
   if (!boot) {
     return <div className="board-miss">灵感板数据丢失，请回到主窗口重新打开</div>;
@@ -754,8 +1035,22 @@ export function Board() {
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        const cell = (e.target as HTMLElement).closest<HTMLElement>("[data-img]");
-        setMenu({ x: e.clientX, y: e.clientY, id: cell ? Number(cell.dataset.img) : null });
+        const t = e.target as HTMLElement;
+        const cell = t.closest<HTMLElement>("[data-img]");
+        const note = t.closest<HTMLElement>("[data-note]");
+        /* 图层面板里的行也能右键：菜单用的是同一份"这张图"的菜单（打开/另存/定位） */
+        const layer = t.closest<HTMLElement>("[data-layer]");
+        if (!cell && !note && t.closest(".board-layers") && !layer) {
+          // 面板空白处：没有可作用于的图，直接不弹（否则会弹出"画布"菜单，语义是错的）
+          setMenu(null);
+          return;
+        }
+        setMenu({
+          x: e.clientX,
+          y: e.clientY,
+          id: cell ? Number(cell.dataset.img) : layer ? Number(layer.dataset.layer) : null,
+          note: note ? Number(note.dataset.note) : undefined,
+        });
       }}
     >
       <div ref={canvasRef} className="board-canvas">
@@ -765,7 +1060,7 @@ export function Board() {
             <div
               key={it.id}
               data-img={it.id}
-              className={`board-cell ${active === it.id ? "on" : ""} ${broken.has(it.id) ? "broken" : ""}`}
+              className={`board-cell ${active === it.id ? "on" : ""} ${topId === it.id ? "top" : ""} ${broken.has(it.id) ? "broken" : ""}`}
               style={{ left: b.x, top: b.y, width: b.w, height: b.h }}
               title={it.name}
               onMouseEnter={() => setActive(it.id)}
@@ -781,30 +1076,146 @@ export function Board() {
                   <span className="board-fallback-name">{it.name}</span>
                 </div>
               ) : (
-                <img
-                  src={it.src}
-                  alt={it.name}
-                  draggable={false}
-                  decoding="async"
-                  loading="lazy"
-                  onError={() =>
-                    setBroken((old) => {
-                      if (old.has(it.id)) return old;
-                      const n = new Set(old);
-                      n.add(it.id);
-                      return n;
-                    })
-                  }
-                />
+                <>
+                  {/* 静态层：永远是 1024 档缩略图（动图就是它的首帧）。板上不动 = 不解码整段动画 */}
+                  <img
+                    src={it.src}
+                    alt={it.name}
+                    draggable={false}
+                    decoding="async"
+                    loading="lazy"
+                    onError={() =>
+                      setBroken((old) => {
+                        if (old.has(it.id)) return old;
+                        const n = new Set(old);
+                        n.add(it.id);
+                        return n;
+                      })
+                    }
+                  />
+                  {/* 动图：**只有指针停在这张上**才挂原文件那一层，离开立刻拆掉（卸载即停止解码）。
+                      原图解码比缩略图慢，所以先透明、加载完再淡入，避免切换瞬间闪一下白。 */}
+                  {it.anim && it.raw && active === it.id && (
+                    <img
+                      key="anim"
+                      className="board-anim"
+                      src={it.raw}
+                      alt=""
+                      draggable={false}
+                      decoding="async"
+                      onLoad={(e) => e.currentTarget.classList.add("ready")}
+                      onError={(e) => {
+                        /* 原图读不出来（超 48MB 退回缩略图 / 文件被移走）：只把这一层藏掉，
+                           不删 DOM —— 从 React 手里抢节点删会让下一次渲染找不到它。 */
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
+                  )}
+                </>
               )}
               <span className="board-handle" data-handle title="拖动改大小（Alt+滚轮也行）" />
             </div>
           );
         })}
+
+        {/* 文字便签：和图片同住一块画布，跟着平移缩放一起走。
+            高度不写死（由文字撑开），落库的 h 只是个估计值 —— 只用于可见性判断。 */}
+        {notes.map((n) => {
+          const b = pos.current.get(-n.nid) ?? { x: n.x, y: n.y, w: n.w, h: n.h };
+          const editing = editId === n.nid;
+          return (
+            <div
+              key={`n${n.nid}`}
+              data-note={n.nid}
+              className={`board-note ${editing ? "editing" : ""}`}
+              style={{ left: b.x, top: b.y, width: b.w }}
+              title={editing ? undefined : "双击改文字 · 拖动挪位置"}
+              onDoubleClick={(e) => {
+                /* 必须拦住：外层双击是「打开贴图 / fit」，会把便签一起带走 */
+                e.stopPropagation();
+                setEditId(n.nid);
+              }}
+            >
+              {editing ? (
+                <textarea
+                  className="board-note-input"
+                  defaultValue={n.text}
+                  autoFocus
+                  spellCheck={false}
+                  placeholder="写点什么…（Esc 保存，清空即删）"
+                  onFocus={(e) => {
+                    const el = e.currentTarget;
+                    el.style.height = "auto";
+                    el.style.height = `${el.scrollHeight}px`;
+                  }}
+                  onInput={(e) => {
+                    /* 随字数长高：便签本来是"贴一张纸条"，不该出现内部滚动条 */
+                    const el = e.currentTarget;
+                    el.style.height = "auto";
+                    el.style.height = `${el.scrollHeight}px`;
+                  }}
+                  onBlur={(e) => commitNote(n.nid, e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    /* 打字期间不许触发全局快捷键（T 新便签 / Ctrl+V 粘图 / F 适应窗口） */
+                    e.stopPropagation();
+                    if (e.key === "Escape" || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    }
+                  }}
+                />
+              ) : (
+                <div className={`board-note-text ${n.text ? "" : "empty"}`}>
+                  {n.text || "双击写字"}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
+      {/* 左侧图层面板（0.4.15）：板上所有图片按板内顺序列出来，点哪行就把哪张
+          置顶并平移到视口正中。**不做 PS 那种"列表上方压下方"的层叠语义** ——
+          列表顺序只表示"板上有哪些图"，层级只认"最近点了谁"。 */}
+      {layersOpen && (
+        <div className="board-layers" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="board-layers-head">
+            <Layers size={13} strokeWidth={1.8} className="board-layers-icon" />
+            <span className="board-layers-title">图层</span>
+            <span className="mono board-layers-count">{items.length}</span>
+            <button title="收起图层面板（L）" onClick={() => setLayersOpen(false)}>
+              <X size={12} strokeWidth={1.9} />
+            </button>
+          </div>
+          <div className="board-layers-list">
+            {items.map((it) => (
+              <div
+                key={it.id}
+                data-layer={it.id}
+                className={`board-layer ${topId === it.id ? "on" : ""}`}
+                title={`${it.name}\n点一下 = 置顶并居中`}
+                onClick={() => {
+                  setTopId(it.id);
+                  focusItem(it.id);
+                }}
+              >
+                {broken.has(it.id) ? (
+                  <span className="board-layer-ph mono">
+                    {(it.name.split(".").pop() || "?").toUpperCase().slice(0, 4)}
+                  </span>
+                ) : (
+                  <img src={it.src} alt="" draggable={false} loading="lazy" decoding="async" />
+                )}
+                <span className="board-layer-name">{it.name}</span>
+                {topId === it.id && <span className="board-layer-top">顶</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* 空板：唯一的正经动作就是「粘一张进来」，所以直接把这句话写在画布中央 */}
-      {!items.length && (
+      {!items.length && !notes.length && (
         <div className="board-empty">
           <span className="board-empty-title">
             {boot.snapshot ? "这份快照里的图这次一张都没找到" : "这块板还是空的"}
@@ -824,14 +1235,21 @@ export function Board() {
               : boot.coll
                 ? `并加进分组「${boot.coll.name}」`
                 : `并打上「${boot.tag}」标签`}
+            <br />
+            也可以按 <kbd className="mono">T</kbd> 先写一段文字注释。
           </span>
         </div>
       )}
 
       {hint && <div className={`board-hint ${hint.bad ? "bad" : ""}`}>{hint.text}</div>}
 
-      {/* 左下角缩放条：固定在这一角（画布怎么平移缩放都不动它） */}
-      <div className="board-zoombar" onMouseDown={(e) => e.stopPropagation()}>
+      {/* 左下角缩放条：固定在这一角（画布怎么平移缩放都不动它）。
+          图层面板展开时往右让出它的宽度，否则会浮在列表上面。 */}
+      <div
+        className="board-zoombar"
+        style={{ left: layersOpen ? LAYERS_W + 14 : 14 }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <button title="缩小" onClick={() => zoomBy(1 / 1.2)}>
           <Minus size={12} strokeWidth={1.9} />
         </button>
@@ -862,6 +1280,19 @@ export function Board() {
             onClick={() => void paste()}
           >
             <ClipboardPaste size={13} strokeWidth={1.8} />
+          </button>
+          <button title="添加文字便签（T）" onClick={() => void addNote()}>
+            <Type size={13} strokeWidth={1.8} />
+          </button>
+          <button title="一键整理图片：按当前顺序重排成整齐的瀑布流" onClick={tidy}>
+            <LayoutGrid size={13} strokeWidth={1.8} />
+          </button>
+          <button
+            title="图层面板（L）：所有图片一览，点谁谁置顶"
+            className={layersOpen ? "on" : ""}
+            onClick={() => setLayersOpen((v) => !v)}
+          >
+            <Layers size={13} strokeWidth={1.8} />
           </button>
           <span className="board-sep" />
           <button title="缩小" onClick={() => zoomBy(1 / 1.2)}>

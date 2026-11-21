@@ -9,7 +9,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
-import { setActiveDock } from "./lib/dockHover";
+import { setActiveDock, useDockHover } from "./lib/dockHover";
+import { setOwnDrag } from "./lib/ownDrag";
 import { loadHotkeys } from "./lib/hotkeys";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
@@ -285,6 +286,10 @@ export default function App() {
   const ghostEl = useRef<HTMLDivElement | null>(null);
   /** 当前高亮的那一行落点（同一时刻只能有一个） */
   const hotRef = useRef<HTMLElement | null>(null);
+  /** 最后一次 markDropAt 的指针位置：面板展开动画期间重估落点用 */
+  const lastPt = useRef<{ x: number; y: number } | null>(null);
+  /* 订阅 activeDock：面板切换/展开时触发下面的 rAF 重估 */
+  const activeDockNow = useDockHover();
   const dlg = useDialog();
   const askRef = useRef(dlg.ask);
   askRef.current = dlg.ask;
@@ -881,13 +886,16 @@ export default function App() {
     void source.collList().then(setColls).catch(() => {});
   }, [refreshKey, tagPrompt, tagEdit, snapPrompt]);
 
-  /* 切库：每个库**自带一套标签/分组**（存在库自己的 `.AssetManager/lib.db`），
-     所以当前库一换，侧栏那三份清单必须重拉 —— 否则会看到上一个库的标签，
-     用户以为"标签串库了"。启动时也用持久化的活动库对齐一次。 */
-  const reloadTagLists = useCallback(() => {
+  /* 切库：每个库**自带一套标签 / 标签分组 / 分组 / 快照**（存在库自己的 `.AssetManager/lib.db`），
+     所以当前库一换，侧栏这几份清单必须重拉 —— 否则会看到上一个库的数据，
+     用户以为"串库了"。启动时也用持久化的活动库对齐一次。
+     0.4.4 起分组和快照也按库过滤了（以前是所有库汇总），这两条不能再漏。 */
+  const reloadSideLists = useCallback(() => {
     void source.tags().then(setTags).catch(() => {});
     void source.tagGroups().then(setTagGroups).catch(() => {});
     void source.autoTags().then(setAutoTagCounts).catch(() => {});
+    void source.collList().then(setColls).catch(() => {});
+    void source.snapshotList().then(setSnaps).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -896,7 +904,7 @@ export default function App() {
     void source
       .setCurrentLib(p)
       .then((changed) => {
-        if (changed) reloadTagLists();
+        if (changed) reloadSideLists();
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -910,7 +918,7 @@ export default function App() {
         if (changed) {
           setTagFilter(null);
           setCollFilter(null);
-          reloadTagLists();
+          reloadSideLists();
         }
       })
       .catch(() => {});
@@ -1646,7 +1654,7 @@ export default function App() {
             action: () => void exportSnapshot(row),
           },
           {
-            label: "导出原始图片（.P-AssetManager）",
+            label: "导出原始图片（.zip，散图可直接解压）",
             icon: "file",
             action: () => void exportSnapshotZip(row),
           },
@@ -1968,8 +1976,45 @@ export default function App() {
   /* 落点处理器：这批 id 该挂到哪个集合上。跟素材右键菜单里的三个动作是同一套语义，
      入口换成「拖过去松手」（owner 2026-11-19）。存 ref 是因为下面的拖拽监听
      是空依赖的常驻 effect —— 直接闭包会一直用第一次渲染时的那份函数。 */
-  const dragDropRef = useRef({ tag: applyTag, coll: addToColl, snap: dropToSnapshot });
-  dragDropRef.current = { tag: applyTag, coll: addToColl, snap: dropToSnapshot };
+  /** 拖到面板**头部**松手（owner 2026-11-20 复测仍报"拖到分组/标签没反应"）：
+      用户瞄准的是「标签 / 分组 / 快照」那一条，展开后指针多半停在**头部**上
+      （头部占最下面 32px，而且行列表在它上面），以前这里不是落点、松手什么都不会发生。
+      现在头部也是落点：投到「当前筛选的那个，没有筛选就投第一个」，toast 会写
+      实际进了哪个 —— 单行时零歧义，多行时名字就写在 toast 里，投错了再拖一次。 */
+  const dropOnHead = useCallback(
+    async (which: string, ids: number[]) => {
+      if (which === "tags") {
+        const name = tagFilter ?? tags[0]?.name;
+        if (!name) {
+          toast("这个库还没有标签：先在标签面板里点「+ 标签」建一个", true);
+          return;
+        }
+        await applyTag(name, ids);
+        return;
+      }
+      if (which === "collections") {
+        const id = collFilter ?? colls[0]?.id;
+        if (id == null) {
+          toast("这个库还没有分组：先在分组面板里点「+ 分组」建一个", true);
+          return;
+        }
+        await addToColl(id, ids);
+        return;
+      }
+      if (which === "snapshots") {
+        const id = snapFilter ?? snaps[0]?.id;
+        if (id == null) {
+          toast("这个库还没有快照：先展开快照段，点 + 建一个", true);
+          return;
+        }
+        await dropToSnapshot(id, ids);
+      }
+    },
+    [tagFilter, tags, collFilter, colls, snapFilter, snaps, applyTag, addToColl, dropToSnapshot, toast]
+  );
+
+  const dragDropRef = useRef({ tag: applyTag, coll: addToColl, snap: dropToSnapshot, head: dropOnHead });
+  dragDropRef.current = { tag: applyTag, coll: addToColl, snap: dropToSnapshot, head: dropOnHead };
 
   /* ---------------- 窗口内拖拽：自己画浮层、自己判落点 ----------------
      为什么不用系统拖放做窗口内的拖动（owner 2026-11-19 连着两次反馈的根因）：
@@ -2041,35 +2086,131 @@ export default function App() {
   /** 指针压着谁：面板只在真的移过去时才展开；落点同一时刻只亮一行 */
   const markDropAt = useCallback((x: number, y: number) => {
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
-    if (el?.closest(".tag-dock")) setActiveDock("tags");
-    else if (el?.closest(".coll-dock")) setActiveDock("collections");
+    /* 判定顺序**不能反**：分组面板复用了 `.tag-dock` 的样式，它的 class 里同时有
+       `tag-dock` 和 `coll-dock`。先判 `.tag-dock` 会把分组当成标签 →
+       展开的是上面那块标签面板、把分组顶走 → 指针落点来回切，
+       表现就是"分组永远展不开、展开收起反复横跳"（owner 2026-11-20 报的）。
+       快照段也要认：它默认是折叠的，不激活就渲染不出可投放的清单行。 */
+    const dock = el?.closest<HTMLElement>(".coll-dock, .tag-dock, .snap-section");
+    if (dock?.classList.contains("coll-dock")) setActiveDock("collections");
+    else if (dock?.classList.contains("tag-dock")) setActiveDock("tags");
+    else if (dock?.classList.contains("snap-section")) setActiveDock("snapshots");
     else setActiveDock(null);
 
     const hit =
       el?.closest<HTMLElement>(
-        "[data-drop-tag],[data-drop-coll],[data-drop-snap],[data-dir-path]"
+        "[data-drop-tag],[data-drop-coll],[data-drop-snap],[data-drop-head],[data-dir-path]"
       ) ?? null;
     if (hit !== hotRef.current) {
-      hotRef.current?.classList.remove("drop-hot");
+      hotRef.current?.removeAttribute("data-hot");
       hotRef.current = hit;
-      if (hit) hit.classList.add("drop-hot");
+      hit?.setAttribute("data-hot", "");
     }
+    /* 用 data-hot 而不是 class：React 重渲染（面板展开 / 行增删）会整体重写它管的
+       className，手动加的 drop-hot 被抹掉之后就再也不亮 —— data-* 属性不在 JSX 里，
+       React 不碰它，重渲染也保得住。 */
+    /* 记住最后指针位置：面板的展开动画（height 110ms）会不断改变"指针下面是谁"，
+       而鼠标停住不产生 mousemove —— 没有重估，高亮就可能停在 null，
+       用户看着"亮都不亮"。重估由下面的 effect 驱动。 */
+    lastPt.current = { x, y };
+  }, []);
+
+  /* 面板展开 / 收起是 110ms 的动画，动画期间"指针下面是谁"每一帧都在变。
+     鼠标停住时没有 mousemove，markDropAt 不会再跑 —— 用 rAF 在动画期间
+     反复按最后指针位置重估，动画稳定后高亮停在正确的落点上。 */
+  useEffect(() => {
+    if (!drag.current || !lastPt.current) return;
+    let raf = 0;
+    let n = 0;
+    const tick = () => {
+      if (!drag.current || n >= 12) return;
+      if (lastPt.current) markDropAt(lastPt.current.x, lastPt.current.y);
+      n++;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [activeDockNow, markDropAt]);
+
+  /* ---------------- 拖拽 click 闸门 ----------------
+     拖完松手时 Chromium 会把**拖拽前的 mousedown** 和**松手时的 mouseup** 配成一对补发
+     click，打在松手点上。落在「复制原文件」这类按钮上就是"拖个图松手 → 原文件进剪贴板"
+     （owner 2026-11-21 两次截图：已复制原文件 / ×2 —— 正是 selPaths 的数量）。
+
+     0.4.13 把拦截器装在**拖拽结束事件**里（`am://drag-end` / drag-drop），CDP 自测先 emit
+     再 click 能过，真机照旧 —— 因为 OLE 一落地，渲染进程**先**补发 click，Rust 的
+     `am://drag-end` 走 IPC 晚几毫秒才到，闸门永远晚一步。
+
+     所以改成一个常驻的闸：**按下瓦片就压下去**（臂已抬起），松手后再保持 300ms 才放行。
+     闸门只是"关"，不放行任何 click，普通点击零开销。 */
+  const dragGate = useRef({ on: false, until: 0 });
+  const gateWatchdog = useRef<number | null>(null);
+
+  /** 压闸：拖拽开始（以及每次交接给系统拖放时）调用 */
+  const armDragGate = useCallback(() => {
+    dragGate.current = { on: true, until: 0 };
+    if (gateWatchdog.current) window.clearTimeout(gateWatchdog.current);
+    /* 兜底：万一拖拽没起成、drag-end 也没来，闸门不能永远压着（那会让全界面点击失效）。
+       慢拖超过 30 秒就续期，最多续 3 次（≈2 分钟），再长按"事件丢了"强行放闸。 */
+    let left = 3;
+    const tick = () => {
+      if (dragGate.current.on && left-- > 0) {
+        gateWatchdog.current = window.setTimeout(tick, 30000);
+        return;
+      }
+      dragGate.current = { on: false, until: 0 };
+      gateWatchdog.current = null;
+    };
+    gateWatchdog.current = window.setTimeout(tick, 30000);
+  }, []);
+
+  /** 放闸：拖拽结束调用，`ms` 内继续拦（吃掉补发的那个 click） */
+  const releaseDragGate = useCallback((ms = 300) => {
+    if (gateWatchdog.current) {
+      window.clearTimeout(gateWatchdog.current);
+      gateWatchdog.current = null;
+    }
+    dragGate.current = { on: false, until: Date.now() + ms };
+  }, []);
+
+  /** 常驻拦截器：capture 装在 window 上，React 的根容器收不到 → onClick 不触发 */
+  useEffect(() => {
+    const swallow = (ev: MouseEvent) => {
+      const g = dragGate.current;
+      if (g.on || Date.now() < g.until) {
+        ev.stopPropagation();
+        ev.preventDefault();
+      }
+    };
+    window.addEventListener("click", swallow, true);
+    return () => window.removeEventListener("click", swallow, true);
   }, []);
 
   /** 收尾（松手 / Esc / 出窗 / 窗口失焦都走这里） */
   const clearDrag = useCallback(() => {
     drag.current = null;
     hideGhost();
-    hotRef.current?.classList.remove("drop-hot");
+    hotRef.current?.removeAttribute("data-hot");
     hotRef.current = null;
     setActiveDock(null);
-  }, [hideGhost]);
+    releaseDragGate();
+  }, [hideGhost, releaseDragGate]);
+
+  /** 保留旧调用点：闸门已经是常驻的，这里只把尾巴再延 300ms */
+  const blockNextClick = useCallback(() => {
+    releaseDragGate(300);
+  }, [releaseDragGate]);
 
   /** 落点动作：标签 / 分组 / 快照只建关联；目录是**唯一**会动磁盘的落点 */
   const dropHit = useCallback(
     (el: HTMLElement | null, ids: number[] | null, paths: string[]) => {
       if (!el) return;
       if (ids?.length) {
+        const headEl = el.closest<HTMLElement>("[data-drop-head]");
+        if (headEl?.dataset.dropHead) {
+          void dragDropRef.current.head(headEl.dataset.dropHead, ids);
+          return;
+        }
         const tagEl = el.closest<HTMLElement>("[data-drop-tag]");
         if (tagEl?.dataset.dropTag) {
           void dragDropRef.current.tag(tagEl.dataset.dropTag, ids);
@@ -2111,11 +2252,13 @@ export default function App() {
 
   const beginDrag = useCallback(
     (p: DragPayload, x: number, y: number) => {
+      // 闸门在**按下瓦片**这一刻就压下去：拖出窗/拖回来松手时补发的那个 click 才拦得住
+      armDragGate();
       drag.current = p;
       showGhost(p, x, y);
       markDropAt(x, y);
     },
-    [showGhost, markDropAt]
+    [armDragGate, showGhost, markDropAt]
   );
 
   /** 网格 / 详情面板里按住素材拖 */
@@ -2159,16 +2302,30 @@ export default function App() {
     [beginDrag]
   );
 
+  /** 交给系统拖放的那一趟的完整载荷：拖回窗口时恢复自己的浮层用
+      （`dragPaths/dragIds/dragPreview` 只够 `am://drag-end` 投放，不够画缩略图）。 */
+  const handoffPayload = useRef<DragPayload | null>(null);
+
   /** 这趟拖出窗口了 → 交给系统拖放（CF_HDROP，出口是磁盘原文件） */
   const handoffToSystem = useCallback(
     (d: DragPayload) => {
       clearDrag();
+      /* clearDrag 会放闸，这里立刻重新压下去：系统拖放（OLE 模态循环）从交接到落地
+         整段时间都算"拖拽中"，落地那一刻补发的 click 必须还在闸里 */
+      armDragGate();
+      handoffPayload.current = d;
+      /* 告诉各处的「文件拖入」监听：这一批是**自己拖出去的**，别当成新文件导入 */
+      setOwnDrag(d.paths);
       dragPaths.current = d.paths;
       dragIds.current = d.ids;
       dragPreview.current = d.previewId;
-      void source.dragOut(d.paths, d.previewId).catch((e) => toast(String(e), true));
+      void source.dragOut(d.paths, d.previewId).catch((e) => {
+        // 拖拽没起成 → 不会有 drag-end 事件来放闸，这里自己放
+        releaseDragGate();
+        toast(String(e), true);
+      });
     },
-    [clearDrag, toast]
+    [armDragGate, clearDrag, releaseDragGate, toast]
   );
 
   /* 窗口内拖拽的全局监听：移动 → 浮层跟手 + 判落点；松手 → 执行落点；Esc → 取消 */
@@ -2200,18 +2357,30 @@ export default function App() {
     const onUp = (e: MouseEvent) => {
       const d = drag.current;
       if (!d) return;
-      // 先取命中元素再收尾：收尾会摘掉高亮，但不影响 elementFromPoint
-      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      /* 先取命中元素再收尾：收尾会摘掉高亮，但不影响 elementFromPoint。
+         面板展开/收起有动画，松手那一刻行可能刚滑走几像素 —— 命中不到任何落点时，
+         退回"最后一次高亮的那一行"（只在不远处才认，避免误投到隔壁行）。 */
+      const hitEl = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const within = "[data-drop-tag],[data-drop-coll],[data-drop-snap],[data-drop-head],[data-dir-path]";
+      let el = hitEl;
+      const hot = hotRef.current;
+      if (hot && !hitEl?.closest(within)) {
+        const r = hot.getBoundingClientRect();
+        const pad = 8;
+        if (
+          e.clientX >= r.left - pad &&
+          e.clientX <= r.right + pad &&
+          e.clientY >= r.top - pad &&
+          e.clientY <= r.bottom + pad
+        ) {
+          el = hot;
+        }
+      }
       clearDrag();
       dropHit(el, d.ids, d.paths);
       /* 拖动结束后浏览器还会补一个 click：落在标签行上就会顺手切换筛选、
-         落在分组行上就会切分组。一律吃掉（300ms 后自动失效，不影响下一次点击）。 */
-      const block = (ev: MouseEvent) => {
-        ev.stopPropagation();
-        ev.preventDefault();
-      };
-      window.addEventListener("click", block, { capture: true, once: true });
-      window.setTimeout(() => window.removeEventListener("click", block, true), 300);
+         落在分组行上就会切分组。一律吃掉（400ms 后自动失效，不影响下一次点击）。 */
+      blockNextClick();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && drag.current) {
@@ -2232,7 +2401,7 @@ export default function App() {
       window.removeEventListener("blur", clearDrag);
       document.removeEventListener("mouseout", onOut);
     };
-  }, [clearDrag, dropHit, handoffToSystem, markDropAt, moveGhost]);
+  }, [blockNextClick, clearDrag, dropHit, handoffToSystem, markDropAt, moveGhost]);
 
   /* 系统拖放结束（只在"拖出窗口后又拖回来"时才走到这里）：
      窗口内的拖动已经在 `mouseup` 里就地处理了，这里只兜底命中测试。 */
@@ -2243,13 +2412,146 @@ export default function App() {
       dragPaths.current = null;
       dragIds.current = null;
       dragPreview.current = null;
+      handoffPayload.current = null;
+      setOwnDrag(null);
       clearDrag();
+      /* OLE 路径同样要拦补发的 click：拖回来松手时 Chromium 会把丢了的
+         mousedown 和这个 mouseup 配成一对 click（见 blockNextClick 注释）。
+         放在早退之前：不管 dropped 与否、命中与否，拖拽一结束就拦。 */
+      blockNextClick();
       if (!p.dropped || !paths?.length) return;
       // 松手点换算是 Rust 侧算好的 CSS 像素（已除过 DPR），这里直接命中测试
       dropHit(document.elementFromPoint(p.x, p.y) as HTMLElement | null, ids, paths);
     });
-    return off;
-  }, [clearDrag, dropHit]);
+    /* Rust 轮询线程推的光标位置（16ms 一拍）：OLE 拖放期间 WebView 收不到
+       mousemove、drag-over 又不持续，这是跟手的主力通道（坐标已是窗口内 CSS 像素）。
+       与 cursorPosition 轮询、drag-over 事件互为备份，都是幂等操作。 */
+    const offMove = onAppEvent<{ x: number; y: number }>("am://drag-move", (p) => {
+      const mine = handoffPayload.current;
+      if (!mine) return;
+      if (ghostEl.current) moveGhost(p.x, p.y);
+      else showGhost(mine, p.x, p.y);
+      markDropAt(p.x, p.y);
+    });
+    return () => {
+      off();
+      offMove();
+    };
+  }, [blockNextClick, clearDrag, dropHit, showGhost, moveGhost, markDropAt]);
+
+  /* 拖出窗口后系统拖放接管（OLE 模态循环）。指针**回到窗口里**时，WebView2 自己的
+     IDropTarget 接管拖拽视觉，系统的拖影被 Show(FALSE) 掉 —— 用户看到的就是
+     「拖回来缩略图没了」（owner 2026-11-20）。恢复自己的浮层：
+     enter/over → 按 handoff 时存的载荷重画 ghost + 重估落点；leave → 再收起来
+     （窗口外由系统拖影接管）。drop 后的投放仍由上面的 am://drag-end 统一处理。 */
+  useEffect(() => {
+    if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+    let dead = false;
+    let un: (() => void) | null = null;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview()
+          .onDragDropEvent((e) => {
+            const mine = handoffPayload.current;
+            if (!mine) return;
+            const p = e.payload;
+            /* leave 没有 paths：正有一趟自己的系统拖拽、指针又出了窗口 → 收起浮层，
+               窗口外由系统拖影接管 */
+            if (p.type === "leave") {
+              hideGhost();
+              return;
+            }
+            const came = p.type === "enter" || p.type === "drop" ? p.paths : [];
+            const same =
+              came.length === mine.paths.length &&
+              [...came].sort((a, b) => a.localeCompare(b)).join("\n").toLowerCase() ===
+                [...mine.paths].sort((a, b) => a.localeCompare(b)).join("\n").toLowerCase();
+            if (!same) return; /* 别人拖进来的文件，交给导入等各自的处理器 */
+            if (p.type === "enter") {
+              /* 只在 enter 时画一次（浮层出现），跟手交给轮询 + over 双路 */
+              const dpr = window.devicePixelRatio || 1;
+              showGhost(mine, p.position.x / dpr, p.position.y / dpr);
+            } else if (p.type === "over") {
+              /* over 事件与下面的 cursorPosition 轮询互为备份：哪条通就走哪条，
+                 两边都只做幂等的 moveGhost / markDropAt */
+              const dpr = window.devicePixelRatio || 1;
+              const x = p.position.x / dpr;
+              const y = p.position.y / dpr;
+              if (ghostEl.current) moveGhost(x, y);
+              markDropAt(x, y);
+            } else if (p.type === "drop") {
+              /* am://drag-end 随后到，负责 clearDrag + 投放；这里只把载荷交出去。
+                 click 拦截两条路都装（drop 事件比 drag-end 早到，谁先到谁拦） */
+              blockNextClick();
+              handoffPayload.current = null;
+            }
+          })
+          .then((u) => {
+            if (dead) u();
+            else un = u;
+          })
+          .catch(() => {})
+      )
+      .catch(() => {});
+    return () => {
+      dead = true;
+      un?.();
+    };
+  }, [blockNextClick, showGhost, hideGhost, moveGhost, markDropAt]);
+
+  /* 拖回来之后的**跟手**：OLE 拖放期间 WebView 收不到 mousemove，drag-over 事件
+     又不持续（实测浮层恢复了也不跟手），改用 `cursorPosition()` 轮询 ——
+     它走 Win32 GetCursorPos，不依赖消息循环，系统拖放期间照样每帧都拿得到。
+     窗口原点缓存一次：拖拽进行时鼠标被拖放占用，窗口不可能移动。
+     「还在拖」的判定就是 `handoffPayload` 非空（drop / drag-end / 取消都会清）。 */
+  useEffect(() => {
+    if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+    let dead = false;
+    let raf = 0;
+    let busy = false;
+    let origin: { x: number; y: number; scale: number } | null = null;
+    const poll = () => {
+      raf = requestAnimationFrame(poll);
+      if (dead || busy || !handoffPayload.current) return;
+      busy = true;
+      void (async () => {
+        try {
+          const { cursorPosition } = await import("@tauri-apps/api/window");
+          const cur = await cursorPosition();
+          const mine = handoffPayload.current;
+          if (dead || !mine) return;
+          if (!origin) {
+            const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+            const w = getCurrentWebviewWindow();
+            const ip = await w.innerPosition();
+            const sf = await w.scaleFactor();
+            origin = { x: ip.x, y: ip.y, scale: sf || 1 };
+          }
+          if (!handoffPayload.current) return;
+          /* 屏幕物理坐标 → 窗口内 CSS 像素 */
+          const x = (cur.x - origin.x) / origin.scale;
+          const y = (cur.y - origin.y) / origin.scale;
+          if (x < -40 || y < -40 || x > window.innerWidth + 40 || y > window.innerHeight + 40) {
+            /* 光标在窗外：收起浮层（窗口外由系统拖影显示） */
+            hideGhost();
+            return;
+          }
+          if (ghostEl.current) moveGhost(x, y);
+          else showGhost(mine, x, y);
+          markDropAt(x, y);
+        } catch {
+          /* IPC 抖动：下一帧重试 */
+        } finally {
+          busy = false;
+        }
+      })();
+    };
+    raf = requestAnimationFrame(poll);
+    return () => {
+      dead = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [showGhost, hideGhost, moveGhost, markDropAt]);
 
   /* ---------------- 加库：原生文件夹选择器（T15） ---------------- */
   const onAddPath = async (path: string, label = "已加入库") => {
@@ -3317,13 +3619,34 @@ export default function App() {
       },
       {
         id: "export",
-        label: "导出用户数据（.L-AssetManager）",
+        label: "导出用户数据（.D-AssetManager，按库）",
         icon: "copy",
-        keywords: "导出 备份 export 用户数据",
+        keywords: "导出 备份 export 用户数据 data 按库",
         run: async () => {
           try {
-            const p = await source.exportUserdata();
-            toast("已导出用户数据", false, p);
+            /* 只导当前库：命令面板没有选库这一步，交给设置页做多库选择 */
+            const p = await source.exportUserdata(dir?.path ?? null);
+            toast("已导出当前库的用户数据", false, p);
+          } catch (e) {
+            toast(String(e), true);
+          }
+        },
+      },
+      {
+        id: "export-zip",
+        label: "导出整个库为 ZIP（带年月日）",
+        icon: "download",
+        keywords: "导出 zip 压缩 备份 打包 整库 library export",
+        run: async () => {
+          try {
+            const r = await source.exportLibraryZip(dir?.path ?? null);
+            if (!r) return; // 用户取消了选文件夹
+            const names = r.parts.map((p) => p.name).join("、");
+            const notes: string[] = [];
+            if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
+            if (r.skipped > 0) notes.push(`${r.skipped} 张不在原位，没进包`);
+            if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
+            toast(`已导出 ${r.files} 张 → ${names}`, notes.length > 0, notes.join(" · ") || undefined);
           } catch (e) {
             toast(String(e), true);
           }
@@ -3774,10 +4097,6 @@ export default function App() {
           onSetRating={onSetRating}
           onSetNote={onSetNote}
           onSetSource={onSetSource}
-          onClose={() => {
-            setRenameId(null);
-            setSelected(null);
-          }}
         />
         )}
       </div>

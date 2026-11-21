@@ -390,6 +390,64 @@ fn main() {
             },
             None => eprintln!("用法: am-cli open <原文件路径>"),
         },
+        // 冒烟：整库导成普通 zip —— 不起界面就能验证分包与包内结构
+        // 用法：am-cli zips <库根> <输出目录> [--max-bytes N] [--stem 前缀]
+        "zips" => {
+            let Some(root) = args.get(1).filter(|s| !s.starts_with("--")) else {
+                eprintln!("用法: am-cli zips <库根> <输出目录> [--max-bytes N] [--stem 前缀] [--data DIR]");
+                std::process::exit(2);
+            };
+            let Some(out) = args.get(2).filter(|s| !s.starts_with("--")) else {
+                eprintln!("缺输出目录");
+                std::process::exit(2);
+            };
+            let max_bytes = arg(&args, "--max-bytes")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(3_600_000_000);
+            let stem = arg(&args, "--stem").unwrap_or_else(|| {
+                format!("{}-cli", am_core::snapshot::safe_file_stem(root))
+            });
+            let out_dir = std::path::PathBuf::from(out);
+            std::fs::create_dir_all(&out_dir).ok();
+            /* 这个库的索引文件：和 am_lib_files 一样的解析（0.3.9 起在库根 .AssetManager 里） */
+            let want = root.replace('/', "\\");
+            let index_db = am_core::reg::libs(&app.reg).unwrap_or_default().into_iter().find_map(|r| {
+                if !r.root.replace('/', "\\").eq_ignore_ascii_case(&want) {
+                    return None;
+                }
+                let rel = if r.file.is_empty() {
+                    format!("libs/lib-{}.db", r.id)
+                } else {
+                    r.file.clone()
+                };
+                Some(std::path::PathBuf::from(&data).join(rel))
+            });
+            match app.export_library_zip(
+                root,
+                &out_dir,
+                &stem,
+                max_bytes,
+                60_000,
+                index_db.as_deref(),
+            ) {
+                Ok(r) => {
+                    println!(
+                        "完成: {} 张 / {} 片 / 跳过 {} / 超大 {}",
+                        r.files,
+                        r.parts.len(),
+                        r.skipped,
+                        r.oversized
+                    );
+                    for p in &r.parts {
+                        println!("  {}  {} 张  {} 字节", p.name, p.files, p.bytes);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("失败: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
             eprintln!("未知命令: {}", other);
             std::process::exit(2);

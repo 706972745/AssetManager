@@ -32,6 +32,7 @@ export type SettingsKey =
   | "libs"
   | "appearance"
   | "cache"
+  | "backup"
   | "shortcuts"
   | "update";
 
@@ -45,6 +46,7 @@ const NAV: { key: SettingsKey; label: string; tk: TKey; icon: string }[] = [
   { key: "libs", label: "素材库", tk: "nav.libs", icon: "folder" },
   { key: "appearance", label: "外观", tk: "nav.appearance", icon: "image" },
   { key: "cache", label: "缓存与索引", tk: "nav.cache", icon: "database" },
+  { key: "backup", label: "库数据与备份", tk: "nav.backup", icon: "download" },
   { key: "shortcuts", label: "快捷键", tk: "nav.shortcuts", icon: "keyboard" },
   { key: "update", label: "更新", tk: "nav.update", icon: "refresh" },
 ];
@@ -195,6 +197,11 @@ export function Settings({
   const [libFiles, setLibFiles] = useState<[string, string, number][]>([]);
   /* 系统级快捷键（F1/F3）：改动立刻注册，注册失败的组合如实回显 */
   const [hotkeys, setHotkeys] = useState<HotkeySet>(() => loadHotkeys());
+  /* 多库导出（ZIP / 用户数据）先弹窗选一个库：绝不把几个库攒成一份
+     （owner 2026-11-20）。null = 没在选择中；run 是选定之后要做的那件事。 */
+  const [libPick, setLibPick] = useState<{ roots: string[]; run: (root: string) => void } | null>(
+    null
+  );
 
   /** 改一个系统快捷键：存起来 → 立刻重新注册三个 → 失败的单独说 */
   const applyHotkey = useCallback(
@@ -275,6 +282,54 @@ export function Settings({
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: 0 });
   }, [section, q]);
+
+  /**
+   * 导出**一个**库的整库 zip（`root = null` 时由后端退到当前库）。
+   *
+   * 抽成函数是因为两个入口共用：设置里那一行（多库时先选中一个）、
+   * 以及「素材库」页每一行后面的按钮。提示文案只有一份，别在两个地方漂移。
+   */
+  const runZipExport = useCallback(
+    async (root: string | null) => {
+      setBusy(true);
+      try {
+        const r = await source.exportLibraryZip(root);
+        if (!r) return; // 用户在选文件夹那一步点了取消
+        const names = r.parts.map((p) => p.name).join("、");
+        const notes: string[] = [];
+        if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
+        if (r.skipped > 0) notes.push(`${r.skipped} 张文件不在原位，没进包`);
+        if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
+        onToast(
+          `已导出 ${r.files} 张 → ${names}`,
+          r.skipped > 0 || r.oversized > 0,
+          notes.join(" · ") || undefined
+        );
+      } catch (e) {
+        onToast(String(e), true);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [source, onToast]
+  );
+
+  /** 导出**一个库**的用户数据（0.4.5：`<库名>-userdata-<时间戳>.D-AssetManager`）。
+      与 ZIP 不同，它不带原图，只有库根 + 评分 + 备注 + 标签 —— 换机后先扫一遍再导回来。 */
+  const runDataExport = useCallback(
+    async (root: string | null) => {
+      setBusy(true);
+      try {
+        const p = await source.exportUserdata(root);
+        onToast("已导出这个库的用户数据", false, p);
+      } catch (e) {
+        onToast(String(e), true);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [source, onToast]
+  );
 
   const groups = useMemo<
     { key: SettingsKey; title: string; tk: TKey; rows: RowDef[] }[]
@@ -789,25 +844,36 @@ export function Settings({
               </button>
             ),
           },
+        ],
+      },
+      {
+        /* ---- 库数据与备份（0.4.12）----
+           导出三件套（.D 用户数据 / .P 资产包 / 整库 ZIP）原来混在「缓存与索引」里，
+           owner 2026-11-21：「有些本该放在一起的却分开在不同的地方了」——
+           全部库数据的进出（导出 + 库索引文件 + 数据位置）收进同一页。 */
+        key: "backup",
+        title: "库数据与备份",
+        tk: "nav.backup",
+        rows: [
           {
             id: "export",
-            label: "导出用户数据",
-            hint: "库根 + 评分 + 备注，写成 userdata-时间戳.L-AssetManager（索引可重建，这份是人写的东西）",
-            kw: "导出 备份 export userdata 换机",
+            label: "导出用户数据（按库）",
+            hint: libName
+              ? `把「${libName}」的库根 / 评分 / 备注 / 标签 / 分组写成 <库名>-userdata-时间戳.D-AssetManager；不含原图（索引可重建，这份是人写的东西）。有多个库时会先让你选导哪一个`
+              : `把一个库的库根 / 评分 / 备注 / 标签 / 分组写成 <库名>-userdata-时间戳.D-AssetManager；不含原图。有多个库时会先让你选导哪一个`,
+            kw: "导出 备份 export userdata data 换机 按库",
             node: (
               <button
                 className="btn"
                 disabled={busy || !source.desktop}
                 onClick={async () => {
-                  setBusy(true);
-                  try {
-                    const p = await source.exportUserdata();
-                    onToast("已导出用户数据", false, p);
-                  } catch (e) {
-                    onToast(String(e), true);
-                  } finally {
-                    setBusy(false);
+                  const roots = libFiles.map(([root]) => root);
+                  /* 多库 → 先选；单库 → 直接导。绝不把几个库合成一份（owner 2026-11-20） */
+                  if (roots.length > 1) {
+                    setLibPick({ roots, run: (r) => void runDataExport(r) });
+                    return;
                   }
+                  await runDataExport(roots[0] ?? activePath ?? null);
                 }}
               >
                 导出
@@ -842,6 +908,31 @@ export function Settings({
                   } finally {
                     setBusy(false);
                   }
+                }}
+              >
+                导出
+              </button>
+            ),
+          },
+          {
+            id: "library-zip",
+            label: "导出整个库（ZIP）",
+            hint: libName
+              ? `把「${libName}」的原图和库数据打成一个普通 zip：文件名带年月日，原图保留文件夹层级，软件数据收在 _AssetManager/ 目录里；超过 4 GB 自动分片，任何解压软件都能打开。**有多个库时会先让你选导哪一个**`
+              : `把当前素材库的原图和库数据打成一个普通 zip：文件名带年月日，原图保留文件夹层级，软件数据收在 _AssetManager/ 目录里；超过 4 GB 自动分片。有多个库时会先让你选导哪一个`,
+            kw: "导出 zip 压缩 备份 打包 整库 library export",
+            node: (
+              <button
+                className="btn"
+                disabled={busy || !source.desktop}
+                onClick={async () => {
+                  const roots = libFiles.map(([root]) => root);
+                  /* 多库 → 先选；单库 → 直接导。绝不"所有库打成一个包"（owner 2026-11-20） */
+                  if (roots.length > 1) {
+                    setLibPick({ roots, run: (r) => void runZipExport(r) });
+                    return;
+                  }
+                  await runZipExport(roots[0] ?? activePath ?? null);
                 }}
               >
                 导出
@@ -971,7 +1062,7 @@ export function Settings({
         ],
       },
     ];
-  }, [draft, stat, total, busy, t, localePref, autoStart, scaleNow, libName, activePath, source, onToast]);
+  }, [draft, stat, total, busy, t, localePref, autoStart, scaleNow, libName, activePath, source, onToast, libFiles, runZipExport, runDataExport, setLibPick]);
 
   const needle = q.trim().toLowerCase();
   const shown = needle
@@ -993,6 +1084,7 @@ export function Settings({
      它的入场每帧都要重绘整棵子树，纯 CSS 动画交给合成器更稳；
      而且「减少动效」开关压的是 CSS 令牌，CSS 动画能自动跟着降级。 */
   return (
+    <>
     <div className="set-scrim" onMouseDown={onClose}>
       <div
         className="set-sheet"
@@ -1095,6 +1187,48 @@ export function Settings({
         </section>
       </div>
     </div>
+
+    {libPick && (
+      <div className="dlg-scrim" onMouseDown={() => setLibPick(null)}>
+        <div
+          className="dlg"
+          role="dialog"
+          aria-modal="true"
+          aria-label="导出哪个素材库"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="dlg-title">导出哪个素材库？</div>
+          <div className="dlg-body">
+            <div className="zippick">
+              {libPick.roots.map((root) => (
+                <button
+                  key={root}
+                  className="zippick-row"
+                  title={root}
+                  onClick={() => {
+                    const run = libPick.run;
+                    setLibPick(null);
+                    run(root);
+                  }}
+                >
+                  <Icon name="folder" size={14} stroke={1.5} />
+                  <span className="zippick-name">
+                    {root.split(/[\\/]/).filter(Boolean).pop() ?? root}
+                  </span>
+                  <span className="zippick-path mono">{root}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="dlg-actions">
+            <button className="btn" onClick={() => setLibPick(null)}>
+              取消
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

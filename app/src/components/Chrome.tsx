@@ -942,7 +942,6 @@ export function Detail({
   onDelete,
   onBeginDrag,
   onToast,
-  onClose,
   tags,
   colors,
   autoTags,
@@ -981,8 +980,6 @@ export function Detail({
   onCopyFile: (a: Asset) => void;
   onDelete: (a: Asset) => void;
   onToast: (msg: string, err?: boolean) => void;
-  /** 关掉详情（顶栏那个 ×） */
-  onClose: () => void;
   /** 当前素材的手工标签 */
   tags: string[];
   /** 标签名 → 颜色键（详情 chip 上的小色点） */
@@ -1066,9 +1063,15 @@ export function Detail({
     setRefsOpen(false);
   }, [asset?.id]);
 
-  /* 顶栏文件名的单击复制延时器（见下面 onClick：双击时要把这一下取消掉） */
-  const titleClick = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(titleClick.current), []);
+  /* 0.4.11 复制文件名改成 Shift+双击：单击复制太容易误触（选了半天素材，
+     手一抖点在文件名上就弹 toast），且单击路径不再需要延时器。 */
+  const titleCopiedAt = useRef(0);
+  const copyTitle = (name: string) => {
+    const now = Date.now();
+    if (now - titleCopiedAt.current < 350) return;
+    titleCopiedAt.current = now;
+    void copy(name, "文件名");
+  };
 
   /* 详情里的预览图也能直接拖出去（与网格里的瓦片同一套手势）：
      按下记坐标 → 移动超过 6px 交给 Rust 起 OLE 拖拽，出去的是原文件。 */
@@ -1164,28 +1167,23 @@ export function Detail({
               ) : (
                 <button
                   className="detail-title"
-                  title="单击复制文件名 · 双击改名"
+                  title="双击改名 · Shift+双击复制文件名"
                   onClick={(e) => {
-                    window.clearTimeout(titleClick.current);
-                    /* 用 click 的 detail 判双击，而不是 onDoubleClick：
+                    /* 用 click 的 detail 判双击，而不是只靠 onDoubleClick：
                        WebView2 在部分输入路径下不派发 dblclick（自测注入点击就是如此），
                        detail 则是「这一串里的第几次点击」，稳。
-                       单击复制延后 220ms —— 双击时第一次 click 先到，
-                       不延后就会「复制两次 + 弹两次 toast + 又进改名」。 */
-                    if (e.detail >= 2) {
-                      onStartRename();
-                      return;
-                    }
-                    titleClick.current = window.setTimeout(
-                      () => void copy(asset.name, "文件名"),
-                      220
-                    );
+                       0.4.11 起单击不做事（原来单击复制太容易误触），复制挪到 Shift+双击。 */
+                    if (e.detail < 2) return;
+                    if (e.shiftKey) copyTitle(asset.name);
+                    else onStartRename();
                   }}
                   /* detail 判双击之外再挂一条 dblclick：两条任意一条先到都进改名，
-                     onStartRename 是幂等的（只设同一个 id）。 */
-                  onDoubleClick={() => {
-                    window.clearTimeout(titleClick.current);
-                    onStartRename();
+                     onStartRename 是幂等的（只设同一个 id）。
+                     Shift+双击走 copyTitle —— 复制不幂等（会弹两个 toast），
+                     click(detail≥2) 与 dblclick 真鼠标下都会到，350ms 内只认第一次。 */
+                  onDoubleClick={(e) => {
+                    if (e.shiftKey) copyTitle(asset.name);
+                    else onStartRename();
                   }}
                 >
                   {asset.name}
@@ -1195,9 +1193,8 @@ export function Detail({
                 rating={asset.rating}
                 onChange={(n) => onSetRating([asset.id], n)}
               />
-              <button className="detail-close" aria-label="关闭详情" title="关闭详情（Esc）" onClick={onClose}>
-                <Icon name="close" size={15} stroke={1.5} />
-              </button>
+              {/* 0.4.9 删掉「关闭详情」按钮：面板是常驻的，这个 × 实际只是取消选中，
+                  关不掉任何东西，反而让用户以为点它会收起右半边。Esc 的行为不变。 */}
             </header>
 
             <div className="detail-body">

@@ -222,6 +222,12 @@ fn entry_name(used: &mut std::collections::HashSet<String>, path: &Path) -> Stri
     cand
 }
 
+/// zip32 的硬上限：单条目尺寸、中心目录偏移、条目数都写在**固定宽度的 u32/u16** 里。
+/// 超过之后 `as u32` 会**静默截断**，写出来的包当场就是坏的（读端才报错，写端一声不响）。
+/// 所以这里既不写 ZIP64，也绝不允许越过这条线 —— 越界直接报错，由调用方分包。
+const ZIP32_MAX_BYTES: u64 = u32::MAX as u64;
+const ZIP32_MAX_ENTRIES: u64 = u16::MAX as u64;
+
 /// 导出的 zip：**stored（不压缩）**。
 /// 素材基本是 PNG/JPG/WebP，本身已经压过，deflate 再压通常只省 0–2%，
 /// 却要把几百 MB 重新过一遍 CPU —— 为了那点体积不值得，用户要的是"打包成一个文件"。
@@ -240,6 +246,16 @@ impl ZipWriter {
         Ok(Self { f, central: Vec::new(), count: 0, offset: 0 })
     }
 
+    /// 已经写进这个包的字节数（含头、数据、描述符）。分包判断靠它，不要自己记。
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// 已经装了几个条目。zip32 的上限是 65535，到了就必须换包。
+    pub fn entries(&self) -> u64 {
+        self.count
+    }
+
     /// 塞一个磁盘文件进去（单趟读：先写头占位，边读边算 CRC，最后补 data descriptor）
     pub fn add_file(&mut self, file: &Path, name: &str) -> Result<u64, String> {
         let meta = std::fs::metadata(file).map_err(|e| format!("读不了 {}：{e}", file.display()))?;
@@ -249,6 +265,29 @@ impl ZipWriter {
         let (dt, dd) = dos_datetime(meta_time(&meta));
         let name_b = name.as_bytes();
         let start = self.offset;
+
+        /* zip32 上限：**先算再写**。写了才发现越界，盘上已经留下半张坏图 */
+        let need = 30u64 + name_b.len() as u64 + meta.len() + 16;
+        if self.count + 1 > ZIP32_MAX_ENTRIES {
+            return Err(format!(
+                "这个包已经装了 {} 个条目，到 zip 上限（{}）了。请换一个包继续。",
+                self.count, ZIP32_MAX_ENTRIES
+            ));
+        }
+        if meta.len() > ZIP32_MAX_BYTES {
+            return Err(format!(
+                "{} 单个文件就有 {}，超过 zip 单包 4 GB 的上限，装不进去。",
+                file.display(),
+                meta.len()
+            ));
+        }
+        if start + need > ZIP32_MAX_BYTES {
+            return Err(format!(
+                "这个包已经写到 {}，再装 {} 就超过 4 GB 上限了。请换一个包继续。",
+                start,
+                file.display()
+            ));
+        }
 
         // 本地头：crc/尺寸先写 0，靠 bit 3 + data descriptor 收尾（标准做法）
         let mut h = Vec::with_capacity(30 + name_b.len());
@@ -321,6 +360,18 @@ impl ZipWriter {
         let (dt, dd) = dos_datetime(crate::db::now_ts());
         let name_b = name.as_bytes();
         let start = self.offset;
+        let need = 30u64 + name_b.len() as u64 + bytes.len() as u64;
+        if self.count + 1 > ZIP32_MAX_ENTRIES {
+            return Err(format!(
+                "这个包已经装了 {} 个条目，到 zip 上限（{}）了。请换一个包继续。",
+                self.count, ZIP32_MAX_ENTRIES
+            ));
+        }
+        if start + need > ZIP32_MAX_BYTES {
+            return Err(format!(
+                "这个包已经写到 {start}，再装 {name} 就超过 4 GB 上限了。请换一个包继续。"
+            ));
+        }
         let mut crc = Crc32::new();
         crc.update(bytes);
         let crc = crc.finish();
@@ -371,6 +422,17 @@ impl ZipWriter {
     pub fn finish(mut self) -> Result<u64, String> {
         let cd_start = self.offset;
         let cd = std::mem::take(&mut self.central);
+        /* 收尾这三个数字也是 u32/u16：越界写进去，包的"目录页"就是错的，
+           解压软件只会说"文件已损坏"，不会告诉你是哪一步撑破的 */
+        if self.count > ZIP32_MAX_ENTRIES {
+            return Err(format!(
+                "条目数 {} 超过 zip 上限（{}），请分包。",
+                self.count, ZIP32_MAX_ENTRIES
+            ));
+        }
+        if cd_start + cd.len() as u64 > ZIP32_MAX_BYTES {
+            return Err("这个包超过 4 GB 上限（zip32），请分包。".into());
+        }
         self.f.write_all(&cd).map_err(|e| e.to_string())?;
         let mut e = Vec::with_capacity(22);
         e.extend_from_slice(&0x0605_4b50u32.to_le_bytes());

@@ -13,6 +13,7 @@ import type {
   ImportFilesReport,
   ImportReport,
   ItemStat,
+  LibraryZipOut,
   MoveOutcome,
   MovePlan,
   MovePolicy,
@@ -127,7 +128,8 @@ export const tauriSource: Source = {
     invoke!<[number, number]>("am_cache_gc", { limit, target }),
   dataDir: () => invoke!<string>("am_data_dir"),
   rebuildIndex: () => invoke!<void>("am_rebuild_index"),
-  exportUserdata: () => invoke!<string>("am_export_userdata"),
+  exportUserdata: (path) =>
+    invoke!<string>("am_export_userdata", { path: path ?? null }),
   pickFolder: (title) => invoke!<string | null>("am_pick_folder", { title: title ?? null }),
   dataRoot: () => invoke!<DataRootInfo>("am_data_root"),
   probeDir: (dir) => invoke!<DirProbe>("am_probe_dir", { dir }),
@@ -226,6 +228,8 @@ export const tauriSource: Source = {
   pickAndImport: (target) => invoke!<ImportFilesReport | null>("am_pick_and_import", { target }),
   exportPackage: (path) =>
     invoke!<PackageOut | null>("am_export_package", { path: path ?? null }),
+  exportLibraryZip: (path) =>
+    invoke!<LibraryZipOut | null>("am_export_library_zip", { path: path ?? null }),
   snapshotOpen: (id) => invoke!<number>("am_snapshot_open", { snapshot: id }),
   snapshotPaste: (id) => invoke!<BoardPastedItem>("am_snapshot_paste", { snapshot: id }),
   snapshotCombine: (ids, name, mode) =>
@@ -233,6 +237,11 @@ export const tauriSource: Source = {
   boardLayout: (board) =>
     invoke!<[number, number, number, number, number][]>("am_board_layout", { board }),
   boardPlace: (board, rows) => invoke!<number>("am_board_place", { board, rows }),
+  boardNotes: (board) =>
+    invoke!<[number, number, number, number, number, string][]>("am_board_notes", { board }),
+  boardNotePut: (board, nid, x, y, w, h, text) =>
+    invoke!<number>("am_board_note_put", { board, nid, x, y, w, h, text }),
+  boardNoteDel: (board, nid) => invoke!<number>("am_board_note_del", { board, nid }),
   boardAddPaths: (paths) =>
     invoke!<[BoardItemDto[], string[]]>("am_board_add_paths", { paths }),
   peekTop: (on) => invoke!<boolean>("am_peek_top", { on }),

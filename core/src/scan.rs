@@ -90,7 +90,13 @@ fn is_reparse(_meta: &std::fs::Metadata) -> bool {
 /// ③ 导出/移动时把库的元数据当成素材一起搬走。
 fn is_meta_dir(dir: &Path) -> bool {
     dir.file_name()
-        .map(|n| crate::libhome::is_home_dir(&n.to_string_lossy()))
+        .map(|n| {
+            let n = n.to_string_lossy();
+            /* `_AssetManager/`（下划线）是「导出整个库」那个 zip 里放库数据的目录。
+               用户把包解压回某个库里是很自然的动作（"我想把这些图导进来"），
+               不跳过的话库里会凭空多出 `manifest.json` / `index.db` 两条素材 */
+            crate::libhome::is_home_dir(&n) || n.eq_ignore_ascii_case(crate::LIB_META_DIR)
+        })
         .unwrap_or(false)
 }
 

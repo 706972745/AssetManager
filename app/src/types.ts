@@ -244,6 +244,26 @@ export interface PackageOut {
   skipped: number;
 }
 
+/** 整库 zip 的一个分片（超过 4 GB / 6.5 万条会拆成 part1、part2…） */
+export interface LibraryZipPart {
+  path: string;
+  name: string;
+  files: number;
+  bytes: number;
+}
+
+/** 整库 zip 的结果：原图 + `_AssetManager/` 里的库数据，落在用户选的文件夹 */
+export interface LibraryZipOut {
+  dir: string;
+  parts: LibraryZipPart[];
+  /** 真正进包的素材数 */
+  files: number;
+  /** 索引里有、磁盘上找不到的条数 */
+  skipped: number;
+  /** 单个文件就超过单包上限、装不进去的条数 */
+  oversized: number;
+}
+
 /** 灵感板上一张图（板上看到的永远是缩略图，操作一律落到 path 的源文件） */
 export interface BoardItemDto {
   id: number;
@@ -252,6 +272,20 @@ export interface BoardItemDto {
   h: number;
   name: string;
   path: string;
+  /** 动图（gif / apng / webp）：默认静止，指针停上去才播 `raw` */
+  anim: boolean;
+  /** 原文件地址（`px=0`）：动图悬停时换成它 */
+  raw: string;
+}
+
+/** 灵感板上的一张文字便签（位置/尺寸/文字都在注册库里，跟着板走） */
+export interface BoardNote {
+  nid: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
 }
 
 /** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
@@ -262,6 +296,8 @@ export interface BoardPastedItem {  id: number;
   h: number;
   name: string;
   path: string;
+  anim: boolean;
+  raw: string;
 }
 
 /** 标签 + 使用数（侧栏用） */
@@ -482,8 +518,9 @@ export interface Source {
   dataDir(): Promise<string>;
   /** 重建索引：清索引 + 全量重扫所有库根（进度走 scan://progress） */
   rebuildIndex(): Promise<void>;
-  /** 导出 userdata-<时间戳>.L-AssetManager，返回落盘路径 */
-  exportUserdata(): Promise<string>;
+  /** 导出**这一个库**的用户数据：`<库名>-userdata-<时间戳>.D-AssetManager`，返回落盘路径。
+   *  `path` 不传 = 当前库。 */
+  exportUserdata(path?: string | null): Promise<string>;
   /** 原生文件夹选择器；取消返回 null */
   pickFolder(title?: string): Promise<string | null>;
   /** 数据文件夹（索引 + 缩略图缓存）放哪：默认目录 / 自定义目录清单 */
@@ -618,6 +655,11 @@ export interface Source {
   pickAndImport(target: string): Promise<ImportFilesReport | null>;
   /** 导出资产包（**整个当前素材库**）。`path` 用来定位库，取消 = null */
   exportPackage(path?: string | null): Promise<PackageOut | null>;
+  /**
+   * 整库导成**普通 zip**（原图按库内相对路径 + `_AssetManager/` 里的软件数据），
+   * 文件名带年月日；超过单包上限自动分片。`path` 用来定位库，取消 = null。
+   */
+  exportLibraryZip(path?: string | null): Promise<LibraryZipOut | null>;
   /** 开一块快照灵感板 */
   snapshotOpen(id: number): Promise<number>;
   /** 快照板里 Ctrl+V：存截图目录 + 入库 + 加进这个快照 */
@@ -643,6 +685,20 @@ export interface Source {
     board: string,
     rows: [number, number, number, number, number][],
   ): Promise<number>;
+  /** 灵感板便签：读这块板上所有文字注释 */
+  boardNotes(board: string): Promise<[number, number, number, number, number, string][]>;
+  /** 灵感板便签：新建（`nid = null`）或更新一张，返回 nid */
+  boardNotePut(
+    board: string,
+    nid: number | null,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    text: string,
+  ): Promise<number>;
+  /** 灵感板便签：删一张 */
+  boardNoteDel(board: string, nid: number): Promise<number>;
   peekTop(on: boolean): Promise<boolean>;
   /** 图已经画上去了 → 才让后端把窗口显示出来（否则建窗时会闪一下默认底色） */
   peekReady(): Promise<void>;

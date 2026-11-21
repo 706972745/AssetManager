@@ -289,14 +289,11 @@ fn am_lib_count(state: State<AppState>) -> Result<i64, String> {
 /// 谁被漏掉谁就会以 `screenshots` 的英文名混进素材库列表、还占一个名额。
 #[tauri::command]
 fn am_builtin_roots(state: State<AppState>) -> Result<Vec<String>, String> {
-    let app = lock(&state);
-    let mut out = vec![shot_dir().to_string_lossy().to_string()];
-    for r in app.lib_roots()? {
-        if is_builtin_root(&r) && !out.iter().any(|p| same_path(p, &r)) {
-            out.push(r);
-        }
-    }
-    Ok(out)
+    let mut app = lock(&state);
+    let roots = builtin_roots_of(&app)?;
+    /* 顺手刷新 core 那份（用户可能刚把某个 screenshots 目录加进来） */
+    app.set_builtin_roots(roots.clone());
+    Ok(roots)
 }
 
 /// 从素材库移除一个库根：只清索引，磁盘上的文件一个都不动。
@@ -869,7 +866,9 @@ fn to_css(origin: (i32, i32, f64), p: (i32, i32)) -> (f64, f64) {
 /// 1. **必须 `run_on_main_thread` 后立刻返回**：`DoDragDrop` 会开一个模态消息循环，
 ///    在命令线程里调它，拖完之前整个 IPC 都被它占着；
 /// 2. 出去的是**磁盘原文件**（`DragItem::Files` → CF_HDROP），不是缩略图；
-/// 3. 一律 COPY 语义（`DragMode::Copy`）—— 从素材库拖出去永远不该「移走」源文件。
+/// 3. COPY|MOVE 同时允许（vendor 补丁，0.4.12）—— 落点自己选：
+///    资源管理器/桌面**同盘=移动**（不再复制出副本，owner 2026-11-21）、
+///    跨盘=复制；PS / 浏览器只认 COPY，拖过去照旧是复制。
 #[tauri::command]
 fn am_drag_out(
     app: AppHandle,
@@ -910,11 +909,34 @@ fn am_drag_out(
             let app2 = app.clone();
             let win2 = win.clone();
 
+            /* 拖放期间的**跟手浮层**靠这条线程推：OLE 模态循环占住主线程，
+               WebView 收不到 mousemove、drag-over 事件也不持续（owner 2026-11-20
+               实测拖回来浮层不跟手）。GetCursorPos 是纯 Win32 调用，任何线程都能调，
+               16ms 一拍 push 给前端 —— 不依赖消息循环的活跃度。 */
+            let origin = client_origin_scale(&win);
+            let stop_poll = Arc::new(AtomicBool::new(false));
+            let stop_poll2 = stop_poll.clone();
+            let stop_poll3 = stop_poll.clone();
+            let app_poll = app.clone();
+            std::thread::spawn(move || {
+                while !stop_poll2.load(Ordering::SeqCst) {
+                    if let (Some(o), Some(p)) = (origin, cursor_pos()) {
+                        let (lx, ly) = to_css(o, p);
+                        let _ = app_poll.emit(
+                            "am://drag-move",
+                            serde_json::json!({ "x": lx, "y": ly }),
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+            });
+
             let r = drag::start_drag(
                 &win,
                 drag::DragItem::Files(files),
                 image,
                 move |result, pos| {
+                    stop_poll3.store(true, Ordering::SeqCst);
                     // 松手位置换成本窗口的 CSS 像素，前端据此判断落在哪
                     let (lx, ly) = match (client_origin_scale(&win2), cursor_pos()) {
                         (Some(o), Some(p)) => to_css(o, p),
@@ -937,6 +959,7 @@ fn am_drag_out(
             );
             if let Err(e) = r {
                 eprintln!("拖拽启动失败：{e}");
+                stop_poll.store(true, Ordering::SeqCst);
             }
         })
         .map_err(|e| format!("启动拖拽失败：{e}"))?;
@@ -987,11 +1010,11 @@ fn am_rebuild_index(app: AppHandle, state: State<AppState>) -> Result<(), String
 /// 本地时间戳 `YYYYMMDD-HHMM`：导出文件默认名里的那一刻。
 ///
 /// 为什么不直接用 `db::now_ts()`（unix 秒）：文件名是给人看的，
-/// `userdata-20261119-2143.L-AssetManager` 一眼就知道是哪天的备份。
+/// `我的库-userdata-20261120-2143.D-AssetManager` 一眼就知道是哪个库、哪天的备份。
 /// 取**本地时间**而不是 UTC：用户在上海，文件名写着 8 小时前的那一刻只会让人困惑。
 /// 拿不到系统时间（理论上不会）就退回 unix 秒，别让导出失败。
 #[cfg(windows)]
-fn local_stamp() -> String {
+fn local_parts() -> Option<(u16, u16, u16, u16, u16)> {
     #[repr(C)]
     #[derive(Default)]
     struct SystemTime {
@@ -1010,31 +1033,60 @@ fn local_stamp() -> String {
     let mut t = SystemTime::default();
     unsafe { GetLocalTime(&mut t) };
     if t.year == 0 {
-        return db::now_ts().to_string();
+        return None;
     }
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}",
-        t.year, t.month, t.day, t.hour, t.minute
-    )
+    Some((t.year, t.month, t.day, t.hour, t.minute))
 }
 
 #[cfg(not(windows))]
-fn local_stamp() -> String {
-    db::now_ts().to_string()
+fn local_parts() -> Option<(u16, u16, u16, u16, u16)> {
+    None
 }
 
-/// 导出用户层数据（T13）：`userdata-<YYYYMMDD-HHMM>.L-AssetManager` 落在数据目录，返回完整路径。
+/// `YYYYMMDD` —— 整库 zip 的名字只要"哪一天"，不要时分（一天导几次不该有歧义，
+/// 重名时由系统文件对话框自己加 `(2)`）。
+fn local_ymd() -> String {
+    match local_parts() {
+        Some((y, m, d, _, _)) => format!("{y:04}{m:02}{d:02}"),
+        None => db::now_ts().to_string(),
+    }
+}
+
+fn local_stamp() -> String {
+    match local_parts() {
+        Some((y, m, d, hh, mm)) => format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}"),
+        None => db::now_ts().to_string(),
+    }
+}
+
+/// 导出用户层数据（T13）：**按库导**，文件名带库名，落在数据目录，返回完整路径。
 ///
-/// 后缀（0.4.2）从 `.json` 换成 `.L-AssetManager`：双击就能导回来（文件关联 + 内容嗅探），
-/// **内容格式一个字都没改** —— 老文件照样能导入。
+/// `path` = 库根（或库内任意路径）；`None` = 当前库。0.4.5 起不再"一锅全导"：
+/// 用户点的是"这个库的数据"，导出全库只会让人以为数据又混在一起了。
+///
+/// 后缀 0.4.2 从 `.json` → `.L-AssetManager`，0.4.5 再改成 `.D-AssetManager`（D = Data）。
+/// **内容格式一个字都没改** —— 老的 `.L` 文件照样能导入（类型判定只看内容，不看扩展名）。
 #[tauri::command]
-fn am_export_userdata(state: State<AppState>) -> Result<String, String> {
+fn am_export_userdata(path: Option<String>, state: State<AppState>) -> Result<String, String> {
     let app = lock(&state);
-    let json = app.export_userdata()?;
-    let name = format!("userdata-{}.L-AssetManager", local_stamp());
-    let path = app.data_dir.join(name);
-    std::fs::write(&path, json).map_err(|e| format!("写文件失败：{}", e))?;
-    Ok(path.to_string_lossy().to_string())
+    let lib_id = match path.as_deref() {
+        Some(p) => app
+            .lib_for_path(p)
+            .ok_or_else(|| format!("这个路径不在任何素材库里：{p}"))?,
+        None => app
+            .current_lib_id()
+            .ok_or_else(|| "还没有选中素材库".to_string())?,
+    };
+    let json = app.export_userdata(Some(lib_id))?;
+    let label = app.lib_label(lib_id).unwrap_or_else(|| "素材库".into());
+    let name = format!(
+        "{}-userdata-{}.D-AssetManager",
+        am_core::snapshot::safe_file_stem(&label),
+        local_stamp()
+    );
+    let target = app.data_dir.join(name);
+    std::fs::write(&target, json).map_err(|e| format!("写文件失败：{}", e))?;
+    Ok(target.to_string_lossy().to_string())
 }
 
 /// 原生文件夹选择器（T15）。`rfd` 走系统 IFileDialog，比让用户手打路径靠谱得多。
@@ -1187,6 +1239,9 @@ struct MoveOutcome {
     skipped: Vec<String>,
     renamed: Vec<String>,
     replaced: Vec<String>,
+    /// 跟着文件走过去的用户数据（评分/备注/来源/标签/分组/快照条目）。
+    /// 0.4.5 起跨库移动不再是"搬完变白纸"——搬了多少条，这里如实报。
+    carried: am_core::CarryStat,
 }
 
 /// 真移动（T02）。`policy` 由「同名三选」决定；索引在同一个命令里刷新，
@@ -1202,6 +1257,10 @@ fn am_move(
     let first = paths
         .first()
         .ok_or_else(|| "没有要移动的文件".to_string())?;
+    /* 抓数据必须在 mv 之前：重扫会 DELETE 源行，连带级联清掉标签关联 */
+    let carries = app.capture_carry(&paths)?;
+    /* 哪些是整目录移动，也得在 mv 之前记 —— 移动之后源路径就没了 */
+    let dirs = dir_keys(&paths);
     let ops = fsops::FsOps::new(app.conn_for_path(first)?);
     let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let ext = ops.mv_with(&list, Path::new(&target), policy.unwrap_or_default())?;
@@ -1217,12 +1276,20 @@ fn am_move(
         }
     }
     refresh_dirs(&mut app, &dirty);
+    /* 整目录移动：源子树清空、目标子树递归索引（否则子目录里的图两边都不对） */
+    resync_moved_dirs(&mut app, &dir_moves_of(&ext.pairs, &dirs));
+
+    /* 重扫完再写回：目标库的新行这时才存在。
+       搬运失败**不当作移动失败** —— 文件已经动了，报错只会让用户以为要重来。 */
+    let pairs: Vec<(String, String)> = ext.pairs.clone();
+    let carried = app.apply_carry(&carries, &pairs).unwrap_or_default();
 
     Ok(MoveOutcome {
         moved: ext.report.moved,
         skipped: ext.report.skipped,
         renamed: ext.report.renamed.iter().map(|(o, n)| format!("{} → {}", o, n)).collect(),
         replaced: ext.report.replaced,
+        carried,
     })
 }
 
@@ -1264,7 +1331,11 @@ fn am_move_start(
         match open_app(&data_dir) {
             Ok(mut a) => {
                 let list: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-                let res = {
+                    /* 抓数据必须在 mv 之前（重扫会删源行）；抓不到就继续搬，只是没有可带的东西。
+                       放在 `res` 块外：块里只做搬运，搬完还要用这批快照写回目标库。 */
+                    let carries = a.capture_carry(&paths).unwrap_or_default();
+                    let dirs = dir_keys(&paths);
+                    let res = {
                     let Some(first) = list.first().cloned() else {
                         let _ = app.emit("move://done", MoveDone {
                             ok: false,
@@ -1306,11 +1377,16 @@ fn am_move_start(
                             }
                         }
                         refresh_dirs(&mut a, &dirty);
+                        resync_moved_dirs(&mut a, &dir_moves_of(&ext.pairs, &dirs));
+                        /* 重扫完再写回：目标库的新行这时才存在 */
+                        let pairs: Vec<(String, String)> = ext.pairs.clone();
+                        let carried = a.apply_carry(&carries, &pairs).unwrap_or_default();
                         outcome = Some(MoveOutcome {
                             moved: ext.report.moved,
                             skipped: ext.report.skipped,
                             renamed: ext.report.renamed.iter().map(|(o, n)| format!("{} → {}", o, n)).collect(),
                             replaced: ext.report.replaced,
+                            carried,
                         });
                     }
                     Err(e) => err = Some(e),
@@ -1334,6 +1410,15 @@ fn am_move_start(
                 }
                 if !o.skipped.is_empty() {
                     bits.push(format!("跳过 {} 项", o.skipped.len()));
+                }
+                /* 跨库/跨目录移动带走了什么，明说一句：
+                   "标签 3 · 分组 1 · 快照 2" 比一句"移动成功"让人放心得多 */
+                let c = &o.carried;
+                if c.carried > 0 && (c.tags + c.colls + c.snaps) > 0 {
+                    bits.push(format!(
+                        "带走批注：标签 {} · 分组 {} · 快照 {}",
+                        c.tags, c.colls, c.snaps
+                    ));
                 }
                 if bits.is_empty() {
                     "没有移动任何文件".into()
@@ -1362,6 +1447,8 @@ fn am_delete(paths: Vec<String>, state: State<AppState>) -> Result<usize, String
         .filter_map(|p| p.parent().map(|x| x.to_path_buf()))
         .collect();
     refresh_dirs(&mut app, &dirty);
+    /* 删掉的图可能把标签/分组/快照腾空 → 清掉空壳（宽限保护刚建的那些） */
+    let _ = app.prune_empty_shelves(am_core::EMPTY_SHELF_GRACE);
     Ok(entries.len())
 }
 
@@ -1441,6 +1528,49 @@ fn am_undo(state: State<AppState>) -> Result<String, String> {
 }
 
 /// 把一批目录的一层内容重新对账进索引（文件操作之后调）。
+/// 路径比较用的键（小写 + 统一反斜杠）。只在"这条 pair 原来是目录吗"这一处用。
+fn path_key(p: &str) -> String {
+    p.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// 目录移动的索引收尾：源子树**整棵**清掉，目标子树**递归**建索引。
+///
+/// 只刷上一层（`refresh_dirs`）不够：拖走一个文件夹之后
+/// · 源库里子目录的行没人删 → 变成指向空路径的幽灵（列表里还在、点了打不开）；
+/// · 目标库里子目录中的图没人建 → `apply_carry` 按路径找不到行，批注只能记成跳过。
+fn resync_moved_dirs(app: &mut App, moves: &[(String, String)]) {
+    for (from, to) in moves {
+        if let Some(lib_id) = app.lib_for_path(from) {
+            if let Some(l) = app.libs.iter().find(|l| l.id == lib_id) {
+                let _ = db::purge_subtree(&l.conn, from);
+            }
+        }
+        let Some(lib_id) = app.lib_for_path(to) else { continue };
+        let Some(l) = app.libs.iter_mut().find(|l| l.id == lib_id) else { continue };
+        let cancel = AtomicBool::new(false);
+        let opts = scan::ScanOptions::default();
+        let _ = scan::scan_root(&mut l.conn, to, &opts, &cancel, |_p| {});
+    }
+}
+
+/// 移动前记下哪些路径是**目录**：移动之后源路径就不存在了，再 `is_dir` 全是 false。
+fn dir_keys(paths: &[String]) -> HashSet<String> {
+    paths
+        .iter()
+        .filter(|p| Path::new(p).is_dir())
+        .map(|p| path_key(p))
+        .collect()
+}
+
+/// 从真实移动结果里挑出"整目录移动"的那几条。
+fn dir_moves_of(pairs: &[(String, String)], dirs: &HashSet<String>) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .filter(|(f, _)| dirs.contains(&path_key(f)))
+        .cloned()
+        .collect()
+}
+
 fn refresh_dirs(app: &mut App, dirs: &HashSet<PathBuf>) {
     for d in dirs {
         if !d.is_dir() {
@@ -2174,8 +2304,24 @@ fn recall_to_item(app: &AppHandle, rec: &PeekRecall) -> Option<PeekItem> {
 /// 看着就像开关没生效。这两样只能在 DWM 层关。
 /// 打开索引（所有入口共用一个）：**缓存放安装目录**（owner 2026-11-19：缓存别塞数据目录，
 /// 这样装到哪个盘、删哪个目录都是自洽的）。写不进去时 core 自己退回 `<数据目录>/cache`。
+///
+/// 顺带把**内置库**（截图目录）的名单告诉 core：标签 / 分组 / 快照要把内置库合并进
+/// 当前库的视图（owner 2026-11-20）。判定规则留在这里，core 不知道 exe 装在哪。
 fn open_app(data: &Path) -> Result<App, String> {
-    App::open_with_cache(data, Some(exe_dir().join("cache")))
+    let mut app = App::open_with_cache(data, Some(exe_dir().join("cache")))?;
+    app.set_builtin_roots(builtin_roots_of(&app)?);
+    Ok(app)
+}
+
+/// 内置库根名单：当前截图目录 + 已登记里满足 `is_builtin_root` 的（换构建跑过会有好几个）。
+fn builtin_roots_of(app: &App) -> Result<Vec<String>, String> {
+    let mut out = vec![shot_dir().to_string_lossy().to_string()];
+    for r in app.lib_roots()? {
+        if is_builtin_root(&r) && !out.iter().any(|p| same_path(p, &r)) {
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(windows)]
@@ -2634,6 +2780,11 @@ async fn restore_peeks(app: AppHandle) {
 /// 再多就开始掉帧；超出的部分不是悄悄丢掉，窗口里会写明"只放了前 N 张"。
 const BOARD_MAX: usize = 2000;
 static BOARD_SEQ: AtomicU64 = AtomicU64::new(1);
+/* CDP 调试参数（`AM_CDP=1` 时才挂）。**凡是多开的窗口都要带同一串**：
+   WebView2 的 additional browser args 是 **environment 级**的，主窗带了、新窗不带，
+   创建直接失败（实测灵感板报 `0x8007139F 组或资源的状态不是执行请求操作的正确状态`）。
+   发布路径不设这个环境变量，行为不变。 */
+const CDP_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222";
 /// label → 标签名。同一个标签重复点「打开灵感板」不该开第二块，聚焦已有那块。
 static BOARD_TAGS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
@@ -2650,6 +2801,36 @@ struct BoardItem {
     name: String,
     /// 复制原文件用（右键菜单）
     path: String,
+    /// 动图（gif / apng / webp）：板上**默认静止**，指针停上去才换原图播
+    anim: bool,
+    /// 原文件地址（`px=0` 直吐原始字节，不进解码管线）：动图靠它才动得起来
+    raw: String,
+}
+
+/// 动图候选：只看扩展名。真正的帧数要解码才知，这里只决定"值不值得挂原图" ——
+/// 静态 webp 多请求一次原图也没什么代价（还是本地文件，不进缓存）。
+fn anim_ext(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(ext.as_str(), "gif" | "apng" | "webp")
+}
+
+/// 上板条目统一在这里拼 URL：`src` 是 1024 档缩略图（静止用），
+/// `raw` 是原文件（动图悬停用）。以前四处各写一份，改档位就会漏一处。
+fn board_item(id: i64, mtime: i64, w: u32, h: u32, name: String, path: String) -> BoardItem {
+    BoardItem {
+        id,
+        src: format!("http://thumb.localhost/{id}?px=1024&r={mtime}"),
+        raw: format!("http://thumb.localhost/{id}?px=0&r={mtime}"),
+        anim: anim_ext(&path),
+        w,
+        h,
+        name,
+        path,
+    }
 }
 
 /// 取全量素材上板（keyset 分页，单页上限 1000）。返回 `(条目, 命中总数)`。
@@ -2677,16 +2858,9 @@ fn board_items_q(app: &App, base: AssetQuery) -> Result<(Vec<BoardItem>, usize),
                 r.width.unwrap_or(0).max(0) as u32,
                 r.height.unwrap_or(0).max(0) as u32,
             );
-            out.push(BoardItem {
-                id: r.id,
-                /* 板上按 1024 档取缩略图：放到两三倍还看得清，又不至于把内存吃光。
-                   `r` 带上 mtime，文件改了 URL 就变，WebView 缓存自动失效。 */
-                src: format!("http://thumb.localhost/{}?px=1024&r={}", r.id, r.mtime),
-                w,
-                h,
-                name: r.name.clone(),
-                path: r.path.clone(),
-            });
+            /* 板上按 1024 档取缩略图：放到两三倍还看得清，又不至于把内存吃光。
+               `r` 带上 mtime，文件改了 URL 就变，WebView 缓存自动失效。 */
+            out.push(board_item(r.id, r.mtime, w, h, r.name.clone(), r.path.clone()));
         }
         if out.len() >= BOARD_MAX {
             break;
@@ -2744,7 +2918,7 @@ fn spawn_board(
     }
     let label = format!("board-{}", BOARD_SEQ.fetch_add(1, Ordering::Relaxed));
     let script = format!("window.__AM_BOARD__ = {boot};");
-    let win = tauri::WebviewWindowBuilder::new(
+    let mut bb = tauri::WebviewWindowBuilder::new(
         app,
         &label,
         tauri::WebviewUrl::App("index.html".into()),
@@ -2758,8 +2932,13 @@ fn spawn_board(
     .transparent(false)
     .resizable(true)
     .center()
-    .initialization_script(&script)
-    .build()
+    .initialization_script(&script);
+    /* 见 CDP_ARGS 的注释：主窗带了调试参数，这块板也必须带同一串，否则窗口建不出来 */
+    if std::env::var("AM_CDP").as_deref() == Ok("1") {
+        bb = bb.additional_browser_args(CDP_ARGS);
+    }
+    let win = bb
+        .build()
     .map_err(|e| {
         if let Some(d) = LOG_DIR.get() {
             log_runtime(d, &format!("board build FAIL {e}"));
@@ -2872,6 +3051,39 @@ fn am_board_place(
     lock(&state).board_place(&board, &rows)
 }
 
+/// 灵感板便签：读这块板上所有文字注释（`[[nid,x,y,w,h,text], …]`，按创建顺序）
+#[tauri::command]
+fn am_board_notes(
+    state: State<'_, AppState>,
+    board: String,
+) -> Result<Vec<(i64, f64, f64, f64, f64, String)>, String> {
+    lock(&state).board_notes(&board)
+}
+
+/// 灵感板便签：新建（`nid = null`，后端发号）或更新一张，返回 nid。
+///
+/// 文字为空也算一次正常写入 —— **清空文字的便签由前端决定删不删**，
+/// 后端不替它判断，否则"先清空再打字"会在中途被删掉。
+#[tauri::command]
+fn am_board_note_put(
+    state: State<'_, AppState>,
+    board: String,
+    nid: Option<i64>,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    text: String,
+) -> Result<i64, String> {
+    lock(&state).board_note_put(&board, nid, x, y, w, h, &text)
+}
+
+/// 灵感板便签：删一张
+#[tauri::command]
+fn am_board_note_del(state: State<'_, AppState>, board: String, nid: i64) -> Result<usize, String> {
+    lock(&state).board_note_del(&board, nid)
+}
+
 /// 往灵感板上**拖文件进来**（P2.8）：只收已经入库的那几张。
 ///
 /// 为什么不顺便把文件复制/导入进来：板子是"看图的地方"，不是第二个入库入口。
@@ -2916,14 +3128,14 @@ fn am_board_add_paths(
             continue;
         };
         let g = am_core::ids::gid(lib_id, local);
-        items.push(BoardItem {
-            id: g,
-            src: format!("http://thumb.localhost/{}?px=1024&r={}", g, a.mtime),
-            w: a.width.unwrap_or(0).max(0) as u32,
-            h: a.height.unwrap_or(0).max(0) as u32,
-            name: a.name.clone(),
-            path: a.path.clone(),
-        });
+        items.push(board_item(
+            g,
+            a.mtime,
+            a.width.unwrap_or(0).max(0) as u32,
+            a.height.unwrap_or(0).max(0) as u32,
+            a.name.clone(),
+            a.path.clone(),
+        ));
     }
     Ok((items, bad))
 }
@@ -3047,15 +3259,15 @@ async fn paste_into(
     }
     log_runtime_opt(&format!("board paste {} -> {saved}", sink.log_key()));
 
-    Ok(BoardItem {
-        id: g,
-        src: format!("http://thumb.localhost/{}?px=1024&r={}", asset.id, asset.mtime),
+    Ok(board_item(
+        g,
+        asset.mtime,
         // 扫描没填上宽高时用剪贴板自己的尺寸，别让板上出现一张 0×0 的方块
-        w: asset.width.unwrap_or(cw as i64).max(0) as u32,
-        h: asset.height.unwrap_or(ch as i64).max(0) as u32,
-        name: asset.name.clone(),
-        path: asset.path.clone(),
-    })
+        asset.width.unwrap_or(cw as i64).max(0) as u32,
+        asset.height.unwrap_or(ch as i64).max(0) as u32,
+        asset.name.clone(),
+        asset.path.clone(),
+    ))
 }
 
 /// 标签板里的 Ctrl+V：存盘入库后**打上这个标签**，再贴到板上。
@@ -3291,8 +3503,8 @@ async fn am_snapshot_export_zip(
     }
     let stem = am_core::snapshot::safe_file_stem(&name);
     let picked = rfd::AsyncFileDialog::new()
-        /* 快照的原始图片包**保持 .zip**（owner 2026-11-19 明确）：
-           它是"一堆散图"，不是资产包；.P 留给设置里的「导出资产包」 */
+        /* 0.4.12：快照的原始图片包**就是 .zip**（owner 2026-11-21 最终口径，
+           0.4.11 改成 .P 又被否了）。散图给人解压，不是资产包；.P 留给设置里的「导出资产包」。 */
         .set_title("导出原始图片（zip）")
         .set_file_name(format!("{stem}.zip"))
         .add_filter("压缩包", &["zip"])
@@ -3317,7 +3529,7 @@ async fn am_snapshot_export_zip(
 
 /* ---------------- 双击导入（0.4.2） ----------------
 
-   三条导出（`.L` 用户数据 / `.S` 快照清单 / `.P` 资源包）都注册了文件关联：
+   三条导出（`.D` 用户数据 / `.S` 快照清单 / `.P` 资源包）都注册了文件关联（`.L` 旧格式仍兼容）：
    资源管理器双击 → `AssetManager.exe --open "<文件>"` → 若已有实例在跑，路径经
    `single_instance` 转给首实例 → 首实例 emit `am://open-file` → 前端弹确认框 →
    调 `am_open_import_file`。**类型由内容嗅探决定**（`am_core::file_kind`），
@@ -3360,7 +3572,7 @@ fn read_import_text(path: &Path) -> Result<String, String> {
     })
 }
 
-/// 导入用户数据（`.L`）：只合并不删 —— 回填评分 / 备注 / 来源 / 标签。
+/// 导入用户数据（`.D`，旧 `.L` 同样认）：只合并不删 —— 回填评分 / 备注 / 来源 / 标签。
 #[tauri::command]
 fn am_import_userdata(app: AppHandle, path: String) -> Result<ImportReport, String> {
     let text = read_import_text(Path::new(&path))?;
@@ -3598,6 +3810,94 @@ async fn am_export_package(
     }))
 }
 
+/// 单包上限：**3.6 GB**，不是 4 GB。
+///
+/// zip32 的偏移量是 u32（4 GiB），贴着上限装的话，最后一条加上中心目录就顶出去了 ——
+/// 而 `ZipWriter` 越界是**报错**（不会写坏包），所以宁可早一点换包。
+/// 条目数同理：6.5 万是硬上限，留 5 千给"每片都带的那份清单"。
+const LIB_ZIP_MAX_BYTES: u64 = 3_600_000_000;
+const LIB_ZIP_MAX_ENTRIES: u64 = 60_000;
+
+/// 整库导出成**普通 zip**：原图（保留文件夹层级）+ `_AssetManager/` 里的库数据。
+///
+/// 和 `am_export_package`（`.P-AssetManager`）的区别：那个是给本软件双击导回的，
+/// 这个是**给人用的** —— 换机备份、发给同事，任何解压软件都能打开，文件名带年月日。
+/// 超过 4 GB / 6.5 万条自动分片（`part1`、`part2`…），单片时不带 `-part1` 尾巴。
+#[tauri::command]
+async fn am_export_library_zip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<Option<am_core::LibraryZip>, String> {
+    /* ① 先定库根 + 这个库自己的索引文件（锁用完就放，绝不带进 await） */
+    let (root, index_db) = {
+        let a = lock(&state);
+        let by_path = path
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .and_then(|p| a.lib_for_path(p));
+        let id = by_path
+            .or(a.current)
+            .or_else(|| a.libs.first().map(|l| l.id))
+            .ok_or_else(|| "还没有素材库：先在设置里加一个文件夹".to_string())?;
+        let l = a
+            .libs
+            .iter()
+            .find(|l| l.id == id)
+            .ok_or_else(|| "这个素材库已经不在了".to_string())?;
+        (l.root.clone(), am_core::reg::lib_file(&a.data_dir, id))
+    };
+    let lib_name = Path::new(&root)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "素材库".into());
+    let stem = format!(
+        "{}-{}",
+        am_core::snapshot::safe_file_stem(&lib_name),
+        local_ymd()
+    );
+
+    /* ② 选落地的文件夹。分片数量要到装填时才知道，所以让用户选目录而不是选文件名 */
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导出整个库（ZIP）：选一个文件夹放导出的包")
+        .pick_folder()
+        .await;
+    let Some(dir) = picked else { return Ok(None) };
+    let out_dir = dir.path().to_path_buf();
+
+    /* ③ 重活搬出 async：整库读盘几分钟，不能占着运行时和锁 */
+    let out = tauri::async_runtime::spawn_blocking(move || -> Result<am_core::LibraryZip, String> {
+        let st = app.state::<AppState>();
+        let a = lock(&st);
+        a.export_library_zip(
+            &root,
+            &out_dir,
+            &stem,
+            LIB_ZIP_MAX_BYTES,
+            LIB_ZIP_MAX_ENTRIES,
+            Some(&index_db),
+        )
+    })
+    .await
+    .map_err(|e| format!("打包线程没能跑完（{e}）。请重试一次。"))??;
+
+    if let Some(d) = LOG_DIR.get() {
+        let names: Vec<&str> = out.parts.iter().map(|p| p.name.as_str()).collect();
+        log_runtime(
+            d,
+            &format!(
+                "export library zip files={} parts={} skipped={} oversized={} -> {}",
+                out.files,
+                out.parts.len(),
+                out.skipped,
+                out.oversized,
+                names.join(",")
+            ),
+        );
+    }
+    Ok(Some(out))
+}
+
 /// 快照的灵感板：先把条目对成现在的素材，再把它们铺到无限画布上。
 /// 找不到的条目**不静默丢** —— 窗口标题里写明「N 张这次没找到」。
 #[tauri::command]
@@ -3617,14 +3917,14 @@ async fn am_snapshot_open(
     let mut items: Vec<BoardItem> = Vec::with_capacity(res.items.len());
     for it in &res.items {
         let Some(g) = it.gid else { continue };
-        items.push(BoardItem {
-            id: g,
-            src: format!("http://thumb.localhost/{}?px=1024&r={}", g, it.mtime),
-            w: it.w.unwrap_or(0).max(0) as u32,
-            h: it.h.unwrap_or(0).max(0) as u32,
-            name: it.name.clone(),
-            path: it.path.clone(),
-        });
+        items.push(board_item(
+            g,
+            it.mtime,
+            it.w.unwrap_or(0).max(0) as u32,
+            it.h.unwrap_or(0).max(0) as u32,
+            it.name.clone(),
+            it.path.clone(),
+        ));
     }
     let shown = items.len();
     let title = format!("灵感板 · 快照 {}", row.name);
@@ -6140,6 +6440,33 @@ fn main() {
                但我们事后能知道崩在哪。 */
             let _ = LOG_DIR.set(default_dir.clone());
             log_runtime(&default_dir, &format!("start v{} data={}", env!("CARGO_PKG_VERSION"), data.display()));
+
+            /* ---- 主窗口（0.4.13 起从 tauri.conf.json 搬到 Rust）----
+               唯一目的是给 AM_CDP=1 一个开关：设了就给 WebView2 挂
+               --remote-debugging-port=9222，供 CDP 真鼠标注入复现拖拽问题。
+               不设则完全等同原来的配置窗口，发布行为不变。 */
+            let cdp = std::env::var("AM_CDP").as_deref() == Ok("1");
+            let mut main_b = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("AssetManager")
+            .inner_size(1280.0, 820.0)
+            .min_inner_size(900.0, 600.0)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .center()
+            .resizable(true);
+            if cdp {
+                main_b = main_b.additional_browser_args(CDP_ARGS);
+            }
+            if let Err(e) = main_b.build() {
+                log_runtime(&default_dir, &format!("main window build FAIL (cdp={cdp}): {e}"));
+                return Err(Box::new(e));
+            }
+
             std::panic::set_hook(Box::new(|info| {
                 let dir = LOG_DIR.get().cloned().unwrap_or_else(|| PathBuf::from("."));
                 let loc = info
@@ -6530,6 +6857,9 @@ fn main() {
             am_board_close,
             am_board_layout,
             am_board_place,
+            am_board_notes,
+            am_board_note_put,
+            am_board_note_del,
             am_board_add_paths,
             am_board_paste,
             am_coll_list,
@@ -6563,6 +6893,7 @@ fn main() {
             am_import_files,
             am_pick_and_import,
             am_export_package,
+            am_export_library_zip,
             am_snapshot_open,
             am_snapshot_paste,
             am_save_as,

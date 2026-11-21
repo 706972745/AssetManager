@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { SnapshotRow } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
+import { useDockHover } from "../lib/dockHover";
+
+/** 拖拽经过时临时展开用的 id（和 TagDock / CollDock 同一套全局单值） */
+const DOCK_ID = "snapshots";
 
 /**
  * 快照分区 —— **位置、形态、交互都照 FontManager 侧栏的「快照」那一段**：
@@ -129,6 +133,11 @@ export function SnapshotDock({
   onImport: () => void;
 }) {
   const [closed, setClosed] = useState(loadClosed);
+  /* 拖拽经过时**临时展开**（不改用户的折叠偏好）：
+     收起的快照段不渲染清单行，拖上去就没有落点、松手什么都不会发生。
+     `closed` 仍然是用户点标题设置的那个，松手后自动回到它的状态。 */
+  const activeDock = useDockHover();
+  const expanded = !closed || activeDock === DOCK_ID;
   /* 单击「只看这份」要延后 200ms 再执行：
      双击时浏览器会先发两次 click、再发 dblclick —— 立即执行的话双击等于
      "筛上 → 取消 → 打开灵感板"，列表先闪一下，而且第二次点击可能落在重排后的另一行上。 */
@@ -145,18 +154,23 @@ export function SnapshotDock({
   }, [creating]);
 
   return (
-    <div className={`snap-section ${closed ? "snap-collapsed" : ""}`}>
-      <div className="snap-heading">
+    <div className={`snap-section ${expanded ? "" : "snap-collapsed"}`}>
+      <div
+        className="snap-heading"
+        /* 拖放到标题行 = 投到当前筛选的快照（没有就投第一个）：标题行占整个
+           收起态的高度，不接落点的话「拖到快照」就是永远没反应。 */
+        data-drop-head="snapshots"
+      >
         <button
           className="snap-toggle"
           onClick={() => setClosed((v) => !v)}
-          aria-expanded={!closed}
+          aria-expanded={expanded}
           /* 悬停气泡照 FontManager 的 hint.snapshotsSection：说清"这是什么 + 点标题干什么"。
              不再用原生 title（灰底黑字、延迟不定，两边的观感差得最明显）。 */
           data-hint-text="快照：把一批图片记成一份清单，之后一键打开灵感板（只记图片，不搬文件）；点标题展开或收起"
         >
           <span className="snap-chevron">
-            <Icon name="chevron" size={12} stroke={2} className={closed ? "" : "rot90"} />
+            <Icon name="chevron" size={12} stroke={2} className={expanded ? "rot90" : ""} />
           </span>
           <span>快照</span>
         </button>
@@ -178,7 +192,7 @@ export function SnapshotDock({
         </button>
       </div>
 
-      {!closed && (
+      {expanded && (
         <div className="snap-list scroll-hot">
           {creating && (
             <SnapshotInput

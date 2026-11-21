@@ -1027,20 +1027,6 @@
 .detail-title:hover {
   background: rgba(var(--ink-rgb), 0.05);
 }
-.detail-close {
-  flex: none;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--text-3);
-  transition: background var(--t-quick), color var(--t-quick);
-}
-.detail-close:hover {
-  background: var(--e2);
-  color: var(--text-1);
-}
 /* 预览卡：**固定 1:1 方框**，图按短边铺满，长边溢出 → 滚动看其余部分。
    不用 object-fit: contain —— 那会缩成一张小图 + 大片留白，细节全丢；
    也不能裁剪 —— 用户要的是"看全"，不是"看中间"。 */
@@ -4452,7 +4438,7 @@ body.snip-body #root {
   position: absolute;
   /* 2px（owner 2026-11-18：「截图的框要粗一点」）。压暗层是 box-shadow 从选区边缘向外，
      所以加粗只影响线的视觉宽度，不改选区几何。 */
-  border: 2px solid #1b4fe0;
+  border: 2px solid var(--ui-accent);
   pointer-events: none;
 }
 /* 窗口自动识别的框：同色同宽，只是没有压暗 */
@@ -4467,7 +4453,7 @@ body.snip-body #root {
   height: 8px;
   margin: -4px 0 0 -4px;
   border-radius: 50%;
-  background: #1b4fe0;
+  background: var(--ui-accent);
   box-shadow: 0 0 0 2px #fff;
   pointer-events: none;
 }
@@ -4486,143 +4472,742 @@ body.snip-body #root {
   letter-spacing: 0.2px;
 }
 
-/* 工具栏：浅底 + 蓝边（Snipaste 就是拿蓝边把工具栏"接"在选区上） */
+/* ---------------- 截图工具条 v2（分组 / 悬停托盘 / 属性组） ----------------
+   规格来自 `screenshot-toolbar-v2/截图标注工具条-UI优化方案.md` §6–7：
+   工具条高 56、按钮 36×36、图标 20（24 网格 / 1.6 描边）、组内 2px / 组间 6px、
+   托盘距工具条 12px、圆角 14/12/9 梯度。
+
+   **配色全部吃软件自己的令牌**（tokens.css）：底色 `--ui-menu`、描边 `--ui-line`、
+   文字 `--text-primary/secondary/tertiary`、强调 `--ui-accent`、选中底 `--accent-soft`。
+   深浅两套由 `html[data-theme]` 决定（Snip.tsx 按软件主题偏好写入这个属性），
+   这里只保留必须在两套主题下给不同**透明度**的那几层（hover / 阴影）。
+   ⚠️ `<button>` 的 color 默认是 buttontext（黑），所有图标按钮都必须显式声明
+   color，否则深色工具条上会出现看不见的黑图标（方案 §12.3 最后一条）。 */
+
+.snip-root {
+  --tb-bg: var(--ui-menu);
+  --tb-border: var(--ui-line);
+  --tb-ink: var(--text-secondary);
+  --tb-ink-strong: var(--text-primary);
+  --tb-ink-dim: var(--text-tertiary);
+  --tb-hover: rgba(var(--ink-rgb), 0.07);
+  --tb-accent: var(--ui-accent);
+  --tb-accent-solid: var(--ui-accent);
+  --tb-accent-bg: var(--accent-soft);
+  --tb-accent-ring: var(--accent-glow-soft);
+  --tb-danger: var(--danger);
+  --tb-sep: var(--hairline);
+  --tb-shadow: 0 18px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 0 0.5px var(--hairline);
+  --tb-shadow-tray: 0 24px 56px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.34), 0 0 0 0.5px var(--hairline);
+  --tb-tip-bg: var(--tooltip-bg);
+  --tb-tip-ink: var(--text-primary);
+  --tb-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+html[data-theme="light"] .snip-root {
+  --tb-hover: rgba(var(--ink-rgb), 0.055);
+  --tb-shadow: 0 18px 40px rgba(20, 20, 18, 0.16), 0 2px 8px rgba(20, 20, 18, 0.08),
+    0 0 0 0.5px rgba(20, 20, 18, 0.06);
+  --tb-shadow-tray: 0 24px 48px rgba(20, 20, 18, 0.18), 0 4px 12px rgba(20, 20, 18, 0.1),
+    0 0 0 0.5px rgba(20, 20, 18, 0.06);
+}
+
 .snip-bar {
   position: absolute;
+  z-index: 30;
   display: flex;
   align-items: center;
-  height: 34px;
-  padding: 0 3px;
-  box-sizing: border-box;
-  background: #f2f2f2;
-  border: 1px solid #1b4fe0;
-  border-radius: 3px;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
-  /* 比放大镜(25)高：放大镜贴到工具栏上时，工具栏不能被盖住（按钮还得看得见） */
-  z-index: 26;
+  gap: 2px;
+  height: 56px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: var(--tb-shadow);
+  color: var(--tb-ink);
+  font-family: "Inter Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  animation: snip-tb-in 0.3s var(--tb-ease) both;
 }
-.snip-btn {
+@keyframes snip-tb-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 工具按钮 */
+.snip-tbtn {
   position: relative;
-  width: 31px;
-  height: 32px;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  border-radius: 3px;
-  color: #323232;
-  transition: background 90ms ease, color 90ms ease;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--tb-ink);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s var(--tb-ease);
+  -webkit-tap-highlight-color: transparent;
 }
-.snip-btn:hover {
-  background: rgba(0, 0, 0, 0.08);
+.snip-tbtn svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  pointer-events: none;
 }
-.snip-btn.on {
-  background: rgba(27, 79, 224, 0.16);
-  color: #1462c4;
+.snip-tbtn:hover {
+  background: var(--tb-hover);
+  color: var(--tb-ink-strong);
 }
-.snip-btn:disabled {
-  color: #bcbcbc;
+.snip-tbtn:active {
+  transform: scale(0.94);
+}
+.snip-tbtn:focus-visible {
+  outline: 2px solid var(--tb-accent);
+  outline-offset: 1px;
+}
+.snip-tbtn.is-on {
+  background: var(--tb-accent-bg);
+  color: var(--tb-accent);
+  box-shadow: inset 0 0 0 1px var(--tb-accent-ring);
+}
+.snip-tbtn:disabled {
+  opacity: 0.32;
+  cursor: default;
   background: transparent;
 }
-.snip-btn.danger:hover {
-  background: #e5484d;
-  color: #fff;
+.snip-tbtn.is-off {
+  opacity: 0.36;
 }
-/* 箭头那个红点：Snipaste 2.11 用来标"有新样式" */
-.snip-badge {
-  position: absolute;
-  top: 5px;
-  right: 6px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #f5222d;
+.snip-close:hover {
+  background: rgba(255, 107, 107, 0.14);
+  color: var(--tb-danger);
 }
+
 .snip-sep {
+  flex: 0 0 1px;
   width: 1px;
-  height: 18px;
-  margin: 0 3px;
-  background: #d5d5d5;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--tb-sep);
 }
-/* 按钮气泡：默认藏着，悬停才出 */
+
+/* 折叠组：右下角 4px 三角 = "本组还有更多"（Photoshop 式） */
+.snip-stack {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+}
+.snip-stack + .snip-stack {
+  margin-left: 6px;
+}
+.snip-caret {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-bottom: 4px solid currentColor;
+  opacity: 0.38;
+  transition: opacity 0.18s;
+}
+.snip-caret.is-alt {
+  color: var(--tb-accent);
+  opacity: 0.95;
+}
+.snip-stack.is-open > .snip-stack__face {
+  background: var(--tb-hover);
+  color: var(--tb-ink-strong);
+}
+.snip-stack.is-open .snip-caret {
+  opacity: 0.85;
+}
+
+/* 托盘：底边距工具条 12px，水平居中于组按钮；--shift 由 JS 量出来做贴边平移 */
+.snip-tray {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 12px;
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: var(--tb-shadow-tray);
+  backdrop-filter: blur(26px) saturate(1.5);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(-50% + var(--shift, 0px))) translateY(8px) scale(0.94);
+  transform-origin: 50% 100%;
+  transition: opacity 0.16s ease, transform 0.2s var(--tb-ease);
+}
+/* 12px 的间隙也要算进托盘：指针从按钮斜向移进托盘时不会中途 "离开" 组，
+   否则慢一点就会触发 190ms 的收起（方案 §5.6 的"移出立即收起"反面案例）。 */
+.snip-tray::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  bottom: -14px;
+  height: 14px;
+}
+.snip-tray.down::before {
+  bottom: auto;
+  top: -14px;
+}
+.snip-tray::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - var(--shift, 0px));
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: var(--tb-bg);
+  border-right: 1px solid var(--tb-border);
+  border-bottom: 1px solid var(--tb-border);
+  transform: rotate(45deg);
+}
+.snip-tray.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(calc(-50% + var(--shift, 0px))) translateY(0) scale(1);
+}
+/* 工具条贴近屏幕顶部时翻到下方展开，否则托盘会被裁掉 */
+.snip-tray.down {
+  bottom: auto;
+  top: calc(100% + 12px);
+  transform-origin: 50% 0;
+  transform: translateX(calc(-50% + var(--shift, 0px))) translateY(-8px) scale(0.94);
+}
+.snip-tray.down::after {
+  bottom: auto;
+  top: -5px;
+  border: 0;
+  border-left: 1px solid var(--tb-border);
+  border-top: 1px solid var(--tb-border);
+}
+.snip-tray.down.is-open {
+  transform: translateX(calc(-50% + var(--shift, 0px))) translateY(0) scale(1);
+}
+/* 条目"阶梯"出现：强化展开方向感；收起即时，不播反向动画（否则会抖） */
+.snip-tray .snip-tbtn {
+  opacity: 0;
+  transform: translateY(6px) scale(0.9);
+}
+.snip-tray.is-open .snip-tbtn {
+  opacity: 1;
+  transform: none;
+  transition: opacity 0.16s ease, transform 0.22s var(--tb-ease), background 0.15s, color 0.15s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(1) {
+  transition-delay: 0.01s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(2) {
+  transition-delay: 0.04s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(3) {
+  transition-delay: 0.07s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(4) {
+  transition-delay: 0.1s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(5) {
+  transition-delay: 0.13s;
+}
+.snip-tray.is-open .snip-tbtn:nth-child(6) {
+  transition-delay: 0.16s;
+}
+
+/* 属性组：颜色 / 粗细 / 填充 */
+.snip-prop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.snip-anchor {
+  position: relative;
+  display: flex;
+}
+.snip-chip {
+  position: relative;
+  width: 32px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--tb-ink);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.snip-chip:hover,
+.snip-chip.is-open {
+  background: var(--tb-hover);
+  color: var(--tb-ink-strong);
+}
+.snip-chip:focus-visible {
+  outline: 2px solid var(--tb-accent);
+  outline-offset: 1px;
+}
+.snip-chip--width {
+  cursor: ns-resize;
+}
+.snip-chip svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  pointer-events: none;
+}
+.snip-swatch {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9), 0 0 0 3px rgba(0, 0, 0, 0.35),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s var(--tb-ease);
+}
+.snip-chip:hover .snip-swatch {
+  transform: scale(1.08);
+}
+html[data-theme="light"] .snip-swatch {
+  box-shadow: 0 0 0 1.5px #fff, 0 0 0 3.5px rgba(15, 25, 40, 0.28),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* 调色板：7×3 + 吸管 + 自定义；选中态用**中性色**描边，避免和色块撞色 */
+.snip-palette {
+  position: absolute;
+  z-index: 70;
+  left: 50%;
+  bottom: calc(100% + 24px);
+  transform: translateX(-50%);
+  width: max-content;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: var(--tb-shadow-tray);
+  backdrop-filter: blur(26px) saturate(1.5);
+}
+.snip-palette.down {
+  bottom: auto;
+  top: calc(100% + 24px);
+}
+.snip-pal-label {
+  margin: 2px 0 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--tb-ink-dim);
+}
+.snip-swatches {
+  display: grid;
+  grid-template-columns: repeat(7, 22px);
+  gap: 5px;
+}
+.snip-sw {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.snip-sw:hover {
+  transform: scale(1.12);
+  transition: transform 0.12s var(--tb-ease);
+}
+.snip-sw.is-on::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 8px;
+  border: 2px solid var(--tb-ink-strong);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+.snip-pal-foot {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--tb-sep);
+}
+.snip-pal-btn {
+  position: relative;
+  flex: 1;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--tb-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tb-ink);
+  font-family: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.snip-pal-btn:hover {
+  background: var(--tb-hover);
+  color: var(--tb-ink-strong);
+}
+.snip-pal-btn svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+}
+.snip-pal-custom {
+  overflow: hidden;
+}
+.snip-pal-custom input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* 粗细 / 字号读数卡（滚轮调节时浮出，1.2s 自己收） */
+.snip-whud {
+  position: absolute;
+  z-index: 70;
+  left: 50%;
+  bottom: calc(100% + 24px);
+  width: 150px;
+  padding: 10px 12px 9px;
+  border-radius: 12px;
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: var(--tb-shadow-tray);
+  backdrop-filter: blur(26px) saturate(1.5);
+  transform: translateX(-50%);
+}
+.snip-whud::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: var(--tb-bg);
+  border-right: 1px solid var(--tb-border);
+  border-bottom: 1px solid var(--tb-border);
+  transform: rotate(45deg);
+}
+.snip-whud.down {
+  bottom: auto;
+  top: calc(100% + 24px);
+}
+.snip-whud.down::after {
+  bottom: auto;
+  top: -5px;
+  border: 0;
+  border-left: 1px solid var(--tb-border);
+  border-top: 1px solid var(--tb-border);
+}
+.snip-whud__num {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 3px;
+  color: var(--tb-ink-strong);
+}
+.snip-whud__num b {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  font-variant-numeric: tabular-nums;
+}
+.snip-whud__num span {
+  font-size: 10.5px;
+  color: var(--tb-ink-dim);
+}
+.snip-whud__preview {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  margin: 5px 0 8px;
+}
+.snip-whud__preview i {
+  display: block;
+  width: 100%;
+  border-radius: 999px;
+  transition: height 0.08s linear;
+}
+.snip-whud__track {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ui-line);
+}
+.snip-whud__track i {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--tb-accent);
+  box-shadow: 0 0 0 2px var(--tb-bg);
+  transition: left 0.1s linear;
+}
+.snip-whud__range {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  font-size: 9.5px;
+  color: var(--tb-ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.snip-whud__range em {
+  font-style: normal;
+}
+
+/* 输出分裂按钮：复制是唯一实心主按钮，其余进下拉 */
+.snip-split {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  margin-left: 2px;
+  border-radius: 10px;
+  background: var(--tb-accent-solid);
+  box-shadow: 0 2px 8px var(--accent-glow-soft);
+}
+.snip-split__go {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 10px 0 11px;
+  border: 0;
+  border-radius: 10px 0 0 10px;
+  background: transparent;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.snip-split__go svg {
+  width: 16px;
+  height: 16px;
+}
+.snip-split__go:hover {
+  background: rgba(var(--ink-rgb), 0.14);
+}
+.snip-split__more {
+  width: 22px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid rgba(var(--ink-rgb), 0.28);
+  border-radius: 0 10px 10px 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+.snip-split__more:hover {
+  background: rgba(var(--ink-rgb), 0.16);
+}
+.snip-split__more svg {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.18s var(--tb-ease);
+}
+.snip-split.is-open .snip-split__more svg {
+  transform: rotate(180deg);
+}
+.snip-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 14px);
+  min-width: 200px;
+  padding: 5px;
+  border-radius: 12px;
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: var(--tb-shadow-tray);
+  backdrop-filter: blur(26px) saturate(1.5);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px) scale(0.96);
+  transform-origin: 100% 100%;
+  transition: opacity 0.15s, transform 0.2s var(--tb-ease);
+}
+.snip-menu.down {
+  bottom: auto;
+  top: calc(100% + 14px);
+  transform-origin: 100% 0;
+}
+.snip-menu.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+.snip-mi {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--tb-ink);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.snip-mi:hover {
+  background: var(--tb-hover);
+  color: var(--tb-ink-strong);
+}
+.snip-mi svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+.snip-mi kbd {
+  margin-left: auto;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--e2);
+  color: var(--tb-ink-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+}
+.snip-mi.is-off {
+  opacity: 0.45;
+}
+.snip-mi-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--tb-sep);
+}
+
+/* 悬停提示：进入即显示（0ms），托盘展开时父级提示由 JS 收起 */
 .snip-tip {
   position: absolute;
-  bottom: calc(100% + 7px);
+  bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  padding: 3px 7px;
-  border-radius: 3px;
-  background: rgba(26, 26, 26, 0.94);
-  color: #fff;
-  font-size: 12px;
-  line-height: 17px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--tb-tip-bg);
+  border: 1px solid var(--tb-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  color: var(--tb-tip-ink);
+  font-size: 11.5px;
+  line-height: 1;
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 90ms ease;
-  z-index: 30;
+  transition: opacity 0.12s;
+  z-index: 60;
 }
-.snip-btn:hover .snip-tip {
+.snip-tbtn:hover .snip-tip,
+.snip-chip:hover .snip-tip {
   opacity: 1;
 }
-
-/* 工具选项（再点一次工具弹出）：颜色 + 线宽 */
-.snip-opts {
-  position: absolute;
-  padding: 6px;
-  background: #f2f2f2;
-  border: 1px solid #1b4fe0;
-  border-radius: 3px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  z-index: 22;
+.snip-tip kbd {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--e2);
+  border: 1px solid var(--tb-border);
+  color: var(--tb-ink-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
 }
-.snip-opts-row {
+/* 托盘里的提示往下弹，避免顶出屏幕 */
+.snip-tray .snip-tip {
+  bottom: auto;
+  top: calc(100% + 8px);
+}
+
+/* 选区 HUD：宽高 + 屏幕坐标 + 缩放比，等宽数字（拖动时不抖） */
+.snip-hud {
+  position: absolute;
+  z-index: 12;
   display: flex;
   align-items: center;
-  gap: 5px;
-}
-.snip-opts-row + .snip-opts-row {
-  margin-top: 6px;
-}
-.snip-color {
-  width: 18px;
-  height: 18px;
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
-}
-.snip-color.on {
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22), 0 0 0 2px #1b4fe0;
-}
-.snip-width {
-  width: 32px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border-radius: 2px;
-}
-.snip-width span {
-  display: block;
-  width: 18px;
-  background: #333;
-  border-radius: 2px;
-}
-.snip-width.on {
-  background: rgba(27, 79, 224, 0.16);
-}
-/* 字号档位（只在文字工具时出现）：和线宽同一排、同一尺寸，视觉上是一组 */
-.snip-font,
-.snip-arrowstyle {
-  min-width: 26px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border-radius: 2px;
-  color: #333;
-  font-weight: 600;
+  gap: 8px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: var(--tooltip-bg);
+  border: 1px solid var(--ui-line);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+  color: var(--text-secondary);
+  font-size: 11.5px;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
-.snip-font.on,
-.snip-arrowstyle.on {
-  background: rgba(27, 79, 224, 0.16);
-  color: #1668c8;
+.snip-hud b {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.snip-hud em {
+  font-style: normal;
+  color: var(--text-tertiary);
+}
+.snip-hud .zoom {
+  color: var(--ui-accent);
+}
+
+/* 一次性提示（Enter 不交付 / 有标注再按 Esc 之类）：顶部胶囊，2.6s 自己消失。
+   放顶部是**故意的**：工具条默认贴在选区下方，底部提示会和它撞在一起。 */
+.snip-hint {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(720px, 80vw);
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--tooltip-bg);
+  border: 1px solid var(--ui-line);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 45;
 }
 
 /* 覆盖层底部的一次性提示（Enter 不交付之类）：说完自己消失，不挡操作 */
@@ -4646,8 +5231,8 @@ body.snip-body #root {
 /* 选中的标注：一圈蓝色虚线（和选区实线区分开，一眼能看出"选中的是这一条"） */
 .snip-opsel {
   position: absolute;
-  border: 1px dashed #1b4fe0;
-  background: rgba(27, 79, 224, 0.06);
+  border: 1px dashed var(--ui-accent);
+  background: transparent;
   pointer-events: none;
   z-index: 18;
 }
@@ -4664,12 +5249,14 @@ body.snip-body #root {
   height: 136px;
   image-rendering: pixelated;
   background: #000;
-  border: 1px solid #2b2b2b;
+  border: 1px solid var(--ui-line);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
 .snip-loupe-info {
-  background: rgba(22, 22, 22, 0.88);
-  color: #fff;
+  background: var(--tooltip-bg);
+  border: 1px solid var(--ui-line);
+  border-top: 0;
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.5;
   padding: 5px 8px 7px;
@@ -4684,48 +5271,61 @@ body.snip-body #root {
   align-items: center;
   gap: 6px;
   font-variant-numeric: tabular-nums;
+  /* 色值可点复制：放大镜整体是 pointer-events:none，这里单独放开 */
+  pointer-events: auto;
+  cursor: pointer;
 }
 .snip-swatch-dot {
   width: 12px;
   height: 12px;
   flex: none;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  box-shadow: inset 0 0 0 1px var(--ui-line-hover);
 }
 .snip-hintline {
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--text-secondary);
 }
 
 /* 左下角常驻快捷键面板（Snipaste 那块"键帽 + 说明"） */
+/* 左下角快捷键面板（跟主题走的实色浮层，压到截图角上但不抢视线） */
 .snip-keys {
   position: absolute;
-  left: 0;
-  bottom: 0;
-  padding: 9px 16px 9px 12px;
-  background: rgba(18, 18, 18, 0.78);
-  color: #fff;
-  font-size: 12px;
+  left: 12px;
+  bottom: 12px;
+  padding: 8px 12px 8px 10px;
+  border-radius: 10px;
+  background: var(--tooltip-bg);
+  border: 1px solid var(--ui-line);
+  color: var(--text-secondary);
+  font-size: 11.5px;
   z-index: 15;
+  transition: opacity 0.15s ease;
+}
+/* 和工具条撞上时收掉（见 Snip.tsx 的 keysOverlap） */
+.snip-keys.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 .snip-keyrow {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 26px;
+  gap: 10px;
+  height: 22px;
   white-space: nowrap;
 }
 .snip-keyrow .keys {
   display: inline-flex;
   gap: 3px;
-  min-width: 104px;
+  min-width: 96px;
 }
 .snip-kbd {
   display: inline-block;
-  min-width: 20px;
-  padding: 1px 5px;
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  border-radius: 2px;
-  font-size: 11px;
-  line-height: 15px;
+  min-width: 17px;
+  padding: 1px 4px;
+  border: 1px solid var(--ui-line-hover);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 10px;
+  line-height: 13px;
   text-align: center;
   font-family: inherit;
   font-weight: 400;
@@ -4745,6 +5345,10 @@ body.snip-body #root {
   outline: none;
   z-index: 28;
 }
+/* 浅色主题下深色底 + 深色标注字会糊在一起，输入框换成浅底 */
+html[data-theme="light"] .snip-text {
+  background: rgba(255, 255, 255, 0.55);
+}
 .snip-toast {
   position: absolute;
   left: 50%;
@@ -4753,8 +5357,9 @@ body.snip-body #root {
   padding: 5px 14px;
   border-radius: 4px;
   font-size: 12px;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.78);
+  color: var(--text-primary);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--ui-line);
   z-index: 40;
 }
 .snip-miss {
@@ -4762,8 +5367,8 @@ body.snip-body #root {
   inset: 0;
   display: grid;
   place-items: center;
-  background: #17171a;
-  color: rgba(255, 255, 255, 0.8);
+  background: var(--ui-bg);
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -4970,6 +5575,11 @@ body.board-body #root {
   box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.85), 0 8px 22px rgba(0, 0, 0, 0.45);
   z-index: 2;
 }
+/* 「最近点的那张」置顶（0.4.15）：比普通图和 hover 框高一档，但仍在便签下面 */
+.board-cell.top {
+  z-index: 3;
+  box-shadow: 0 0 0 1px rgba(150, 190, 255, 0.95), 0 10px 28px rgba(0, 0, 0, 0.55);
+}
 .board-cell img {
   display: block;
   width: 100%;
@@ -4995,6 +5605,192 @@ body.board-body #root {
 }
 .board-cell.on .board-handle {
   opacity: 1;
+}
+/* 动图（0.4.14）：底下永远是静态缩略图，这一层只在悬停时挂上来。
+   先透明、onLoad 才加 `.ready` 淡入 —— 原图解码比缩略图慢，直接换会闪一下白。 */
+.board-anim {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+.board-anim.ready {
+  opacity: 1;
+}
+/* 文字便签：画布上唯一一块暖色纸片。位置/宽度走内联 style，高度由文字撑开 */
+.board-note {
+  position: absolute;
+  /* 便签始终在图片上面（它是"贴在图上的标注"）；置顶图 3、便签 4、编辑中的 6 */
+  z-index: 4;
+  min-height: 44px;
+  padding: 9px 11px;
+  border-radius: 4px;
+  background: #f6e7a8;
+  color: #2b2417;
+  font-size: 12.5px;
+  line-height: 1.5;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: move;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.board-note.editing {
+  z-index: 6;
+  cursor: text;
+}
+.board-note-text.empty {
+  color: rgba(43, 36, 23, 0.38);
+}
+.board-note-input {
+  display: block;
+  width: 100%;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  cursor: text;
+  /* 画布整体 user-select:none，输入框必须自己开回来，否则选不了字 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+.board-note-input::placeholder {
+  color: rgba(43, 36, 23, 0.38);
+}
+/* ---------------- 左侧图层面板（0.4.15） ----------------
+   固定贴在左边（不挤压画布：画布本来就是全屏的），列出板上**所有**图片。
+   列表顺序只表示"板上有哪些图"，**不代表上下压盖** —— 层级只认"最近点了谁"
+   （`.board-cell.top`），所以这里没有任何拖拽排序。 */
+.board-layers {
+  position: fixed;
+  left: 0;
+  top: 30px;
+  bottom: 0;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(16, 16, 19, 0.88);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(10px);
+  z-index: 9;
+  color: rgba(255, 255, 255, 0.82);
+}
+.board-layers-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.board-layers-icon {
+  opacity: 0.7;
+}
+.board-layers-title {
+  font-size: 12px;
+}
+.board-layers-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+}
+.board-layers-head button {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.6);
+  background: transparent;
+}
+.board-layers-head button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.board-layers-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0 10px;
+}
+.board-layer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 8px 0 10px;
+  cursor: pointer;
+  transition: background var(--t-quick, 120ms) ease;
+  /* 2000 张的板：屏外那些行不建渲染树，列表拉起来不卡 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+}
+.board-layer:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.board-layer.on {
+  background: rgba(120, 170, 255, 0.16);
+}
+.board-layer img,
+.board-layer-ph {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border-radius: 2px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.board-layer-ph {
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.55);
+}
+.board-layer-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-layer.on .board-layer-name {
+  color: #cfe0ff;
+}
+.board-layer-top {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  font-size: 9.5px;
+  line-height: 15px;
+  border-radius: 3px;
+  background: rgba(120, 170, 255, 0.28);
+  color: #dbe9ff;
+}
+.board-layers-list::-webkit-scrollbar {
+  width: 8px;
+}
+.board-layers-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
 }
 /* 出不了缩略图的格式（.txt / 损坏文件）：占位卡，位置和手感跟真图一样 */
 .board-fallback {
@@ -5139,6 +5935,11 @@ body.board-body #root {
   background: rgba(255, 255, 255, 0.14);
   color: #fff;
 }
+/* 面板开关类按钮（目前是「图层」）的"已打开"态 */
+.board-actions button.on {
+  background: rgba(120, 170, 255, 0.18);
+  color: #a9c8ff;
+}
 .board-zoom {
   min-width: 40px;
   text-align: center;
@@ -5253,7 +6054,7 @@ body.board-body #root {
   font-size: 11px;
   line-height: 14px;
   color: #fff;
-  background: rgba(190, 48, 40, 0.92);
+  background: var(--danger);
   pointer-events: none;
   z-index: 42;
 }
@@ -5331,22 +6132,6 @@ body.board-body #root {
   flex-direction: column;
   gap: 16px;
   padding: 14px 16px 28px;
-}
-
-.detail-close {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 5px;
-  color: var(--text-3);
-  transition: background var(--t-quick) ease, color var(--t-quick) ease;
-}
-.detail-close:hover {
-  background: var(--ui-hover);
-  color: var(--text-1);
 }
 
 /* 拖宽握把：静止什么都不画，靠近才出一条竖线 + 抓握图标 */
@@ -6874,6 +7659,10 @@ body.board-body #root {
     padding: 0 2px;
     opacity: 0;
   }
+  /* 这么窄的时候图层面板只会把画面占满：直接不显示（L 键仍然能切状态，放大回来自动恢复） */
+  .board-layers {
+    display: none;
+  }
   .board-top:hover {
     opacity: 1;
   }
@@ -7173,11 +7962,24 @@ html[data-motion="reduced"] .set-update-spin {
   background: var(--accent, #3b82f6);
 }
 
-/* 松手会落到的这一行（同一时刻只有一行） */
-.tree-row.drop-hot,
-.tag-row.drop-hot,
-.coll-row.drop-hot,
-.snap-row.drop-hot {
+/* 松手会落到的这一行（同一时刻只有一行）。
+   高亮用 `[data-hot]` 而不是 `.drop-hot` class：拖拽的高亮是 App 里手动
+   classList.add 的，而 React 重渲染会整体重写 className —— class 一被抹，
+   落点就再也不亮（owner 2026-11-20 复测报「亮都不亮」）。
+   data-* 属性不在 JSX 里，React 不碰它。下面的 .drop-hot 组保留给
+   `.board-root.drop-hot`（灵感板的另一套机制）。 */
+.tree-row[data-hot],
+.tag-row[data-hot],
+.coll-row[data-hot],
+.snap-row[data-hot],
+.tag-dock-head[data-hot],
+.snap-heading[data-hot] {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-1);
+}
+.tag-dock-head.drop-hot,
+.snap-heading.drop-hot {
   box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--accent-soft);
   color: var(--text-1);
@@ -7485,4 +8287,63 @@ body.am-dragging * {
    ============================================================================ */
 html[data-theme="light"] .set-card {
   background: var(--e1);
+}
+
+/* ---------------------------------------------------------------- 导出选库
+   多库时「导出整个库（ZIP）」弹的小选择框（0.4.4）。
+   为什么不用三个按钮的确认框：库最多 3 个但名字长，按钮排不下；列表能带完整路径，
+   用户才分得清「新建文件夹 (4)」和「New folder (4)」。 */
+.zippick {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.zippick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-6);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.zippick-row:hover {
+  background: var(--e2);
+}
+
+.zippick-name {
+  font-size: 13px;
+  font-weight: 500;
+  flex: none;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zippick-path {
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 面板**头部**在拖拽中作为「面板级落点」被点亮（0.4.7）：
+   行的 drop-hot 样式只覆盖 .tag-row/.coll-row/.snap-row，头部（.tag-dock-head /
+   .snap-heading）是另一个元素，不补的话命中了头部也不亮 —— 用户看着没反应。 */
+.tag-dock-head.drop-hot,
+.snap-heading.drop-hot {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-1);
 }

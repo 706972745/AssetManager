@@ -1,8 +1,9 @@
 #![cfg(target_os = "windows")]
 //! 三种导出文件的 Windows 文件关联 + 各自的文件图标。
 //!
-//! 职责：把 `.L-AssetManager`（用户数据）/ `.S-AssetManager`（快照清单）/
-//! `.P-AssetManager`（资产包）注册到 HKCU，让资源管理器双击时以 `--open "%1"` 启动本程序，
+//! 职责：把 `.D-AssetManager`（用户数据，0.4.5 起；`.L` 作为旧格式兼容保留）/
+//! `.S-AssetManager`（快照清单）/ `.P-AssetManager`（资产包）注册到 HKCU，
+//! 让资源管理器双击时以 `--open "%1"` 启动本程序，
 //! 并且**列表里显示各自的图标**（data / snapshot / pack）。
 //!
 //! 边界：
@@ -32,8 +33,18 @@ struct Assoc {
     icon_bytes: &'static [u8],
 }
 
-/// 三种导出各自的图标（owner 指定：L→data / S→snapshot / P→pack，原样使用）
-const ASSOCS: [Assoc; 3] = [
+/// 导出文件各自的图标（owner 指定：D→data / S→snapshot / P→pack，原样使用）。
+///
+/// **`.L` 为什么还留着**：0.4.5 起导出改用 `.D`，但用户手上已有的 `.L` 备份
+/// 不该因为升级就双击失效。所以 `.L` 只作为**只读兼容**保留一条关联，
+/// 程序里没有任何地方再产出它（`file_kind` 判定本来就不看扩展名）。
+const ASSOCS: [Assoc; 4] = [
+    Assoc {
+        ext: "D-AssetManager",
+        prog_id: "AssetManager.D",
+        icon_name: "assetmanager-data.ico",
+        icon_bytes: include_bytes!("../icons/file-types/data.ico"),
+    },
     Assoc {
         ext: "L-AssetManager",
         prog_id: "AssetManager.L",
@@ -235,7 +246,7 @@ pub fn ensure_associations() -> Result<bool, String> {
     for a in &ASSOCS {
         let icon_path = dir.join(a.icon_name);
         /* 图标内容换了（注册表里的路径没变）也要让 Explorer 重读一遍，
-           否则它会继续拿缓存里的旧图标画 .S/.P/.L */
+           否则它会继续拿缓存里的旧图标画 .D/.S/.P */
         if write_if_changed(&icon_path, a.icon_bytes)
             .map_err(|e| format!("写不了 {}（{e}）", icon_path.display()))?
         {
@@ -295,11 +306,17 @@ mod tests {
     }
 
     #[test]
-    fn three_extensions_are_the_agreed_suffixes() {
+    fn extensions_are_the_agreed_suffixes() {
         let exts: Vec<&str> = ASSOCS.iter().map(|a| a.ext).collect();
-        assert_eq!(exts, vec!["L-AssetManager", "S-AssetManager", "P-AssetManager"]);
+        assert_eq!(
+            exts,
+            vec!["D-AssetManager", "L-AssetManager", "S-AssetManager", "P-AssetManager"]
+        );
         let ids: Vec<&str> = ASSOCS.iter().map(|a| a.prog_id).collect();
-        assert_eq!(ids, vec!["AssetManager.L", "AssetManager.S", "AssetManager.P"]);
+        assert_eq!(
+            ids,
+            vec!["AssetManager.D", "AssetManager.L", "AssetManager.S", "AssetManager.P"]
+        );
     }
 
     /// 项目规定「ico 必须七帧」（16/24/32/48/64/128/256）——

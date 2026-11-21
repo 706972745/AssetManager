@@ -99,6 +99,12 @@ export function CollDock({
     if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current);
     leaveTimer.current = window.setTimeout(() => {
       leaveTimer.current = null;
+      /* 拖拽期间**不清**：面板展开/收起会让指针"离开"再"回来"，而拖拽时鼠标停住
+         不产生 mousemove，这个 200ms 一到就会把刚展开的面板收回去 ——
+         表现就是"展开收起反复横跳、怎么也放不进去"（owner 2026-11-20）。
+         拖拽结束由 App 的 clearDrag 统一清空。 */
+      if (document.body.classList.contains("am-dragging")) return;
+      // 只在「还是自己」的时候清：期间指针可能已经进了另一个面板
       if (getActiveDock() === DOCK_ID) setActiveDock(null);
     }, DOCK_LEAVE_DELAY);
   };
@@ -176,6 +182,9 @@ export function CollDock({
         aria-expanded={open}
         aria-label={showingPinned ? "取消固定并收起分组面板" : "固定展开分组面板"}
         title={showingPinned ? "已固定：点一下取消固定" : "点一下固定展开（不点则随鼠标离开自动收起）"}
+        /* 拖放到**头部** = 投到当前筛选的分组（没有就投第一个）。头部不接落点的话，
+           拖到「分组」这条上松手就是毫无反应（owner 2026-11-20 复测）。 */
+        data-drop-head="collections"
         onClick={togglePin}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
