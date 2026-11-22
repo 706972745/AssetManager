@@ -12,6 +12,10 @@
  * 链接（照 FontManager 两张卡的做法）：**本项目仓库** + **GitHub 主页**。
  * 两张卡图标必须不同 —— 都画 GitHub 字形会看着像重复（FontManager 那条注释同理）。
  * 插件仓库还没建，等建了再加第三张（用拼图图标）。
+ *
+ * 赞助区（2026-11-23）：链接卡下面「现在还早，刚好；」整块居中 —— 标题 / 三段正文 /
+ * 一段弱化的声明 / 两张二维码（左支付宝、右微信）。二维码图是用户给的手机截图，
+ * 已用 PIL 裁掉底部那行「…服务部 经营」、补白边后导出到 `assets/about/`。
  */
 import { motion, useReducedMotion } from "motion/react";
 import {
@@ -28,6 +32,10 @@ import {
 } from "lucide-react";
 import { spring, springSnappy, springSoft, staggerDelay } from "../design/springs";
 import { useT, type TKey } from "../lib/i18n";
+// 二维码（640×640 PNG，白边已烘焙进图里）。用 ESM import 让 vite 带 hash 打包，
+// 不走 `public/` —— `public/` 里的文件不会被 tauri 的资源指纹处理。
+import qrAlipay from "../assets/about/sponsor-alipay.png";
+import qrWechat from "../assets/about/sponsor-wechat.png";
 
 const FEATURES: { key: TKey; icon: React.ReactNode }[] = [
   { key: "about.featIndex", icon: <FolderOpen size={14} strokeWidth={1.5} /> },
@@ -118,6 +126,12 @@ function LinkCard({
   );
 }
 
+/** 赞助二维码：左支付宝、右微信（顺序是 owner 定的，别调）。 */
+const QR_CODES: { src: string; key: TKey }[] = [
+  { src: qrAlipay, key: "about.stillEarly.alipay" },
+  { src: qrWechat, key: "about.stillEarly.wechat" },
+];
+
 export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
   const t = useT();
   const reduce = useNoMotion();
@@ -179,6 +193,29 @@ export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
           <LinkCard key={l.url} item={l} delay={staggerDelay(i)} onOpenUrl={onOpenUrl} />
         ))}
       </div>
+
+      {/* 赞助区：文案一字不改（owner 手写），标点（；——「」）照抄 */}
+      <motion.section
+        className="about-sponsor"
+        aria-label={t("about.stillEarly.title")}
+        initial={reduce ? false : { opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={reduce ? { duration: 0 } : { ...springSoft, delay: 0.12 }}
+      >
+        <h2 className="about-sponsor-title">{t("about.stillEarly.title")}</h2>
+        <p className="about-sponsor-copy">{t("about.stillEarly.p1")}</p>
+        <p className="about-sponsor-copy">{t("about.stillEarly.p2")}</p>
+        <p className="about-sponsor-copy">{t("about.stillEarly.p3")}</p>
+        <p className="about-sponsor-note">{t("about.stillEarly.disclaimer")}</p>
+        <div className="about-sponsor-qr">
+          {QR_CODES.map((q) => (
+            <figure key={q.key} className="about-sponsor-card">
+              <img src={q.src} alt="" draggable={false} />
+              <figcaption className="about-sponsor-cap">{t(q.key)}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </motion.section>
     </motion.div>
   );
 }
