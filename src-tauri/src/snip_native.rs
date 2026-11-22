@@ -349,7 +349,7 @@ const BAR_TAIL: BarKind = BarKind::Act("cancel");
    分行语义：中性（白→黑）/ 暖色警示 / 冷色与强调；蓝这一列用软件强调色。 */
 const SWATCHES: [u32; 21] = [
     0xFFFFFF, 0xF5F7FA, 0xC9CFDA, 0x8A93A5, 0x4B5464, 0x232936, 0x000000, 0xFF4D4F,
-    0xFF7A45, 0xFFB020, 0xFFE14D, 0xA0E64B, 0x34D399, 0x22D3EE, 0x5B8CFF, 0x1B4FE0,
+    0xFF7A45, 0xFFB020, 0xFFE14D, 0xA0E64B, 0x34D399, 0x22D3EE, 0xA78BFA, 0x6C3FD1,
     0x7C6BFF, 0xC084FC, 0xF472B6, 0xFB7185, 0x14B8A6,
 ];
 /// 线宽范围（滚轮 / `[` `]` 连续调，单位物理像素）
@@ -414,8 +414,8 @@ impl Palette {
             /* 比 bg 亮三档：第一版用 #333330，离屏预览里几乎看不见 */
             sep: 0x3F3F3B,
             hover: 0x2A2A27,
-            active: 0x1F6FEB,
-            accent: 0x4A9EFF,
+            active: 0x8B5CF6,
+            accent: 0xA78BFA,
             danger: 0xE05A4A,
             key_bg: 0x2E2E2B,
             key_edge: 0x4A4A46,
@@ -432,8 +432,8 @@ impl Palette {
             icon: 0x3A3A37,
             sep: 0xE2E2DD,
             hover: 0xEAEAE5,
-            active: 0x1F6FEB,
-            accent: 0x1F6FEB,
+            active: 0x8B5CF6,
+            accent: 0x6C3FD1,
             danger: 0xC0392B,
             key_bg: 0xF1F1ED,
             key_edge: 0xD4D4CC,
@@ -3017,17 +3017,17 @@ impl Ctx {
             if Some(r) == act || r[2] <= 0 || r[3] <= 0 {
                 continue;
             }
-            self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], 1, 0x1B4FE0);
+            self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], 1, 0x6C3FD1);
         }
         let Some([x, y, w, h]) = self.sel else { return };
         if w <= 0 || h <= 0 {
             return;
         }
         // 2px 蓝框 + 四角把手（像素直绘，理由同上：GDI 画笔在这块 DIB 上不可靠）
-        self.pframe(x, y, x + w, y + h, 2, 0x1B4FE0);
+        self.pframe(x, y, x + w, y + h, 2, 0x6C3FD1);
         for (cx, cy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
             self.pfill(cx - 4, cy - 4, cx + 5, cy + 5, 0xFFFFFF);
-            self.pframe(cx - 4, cy - 4, cx + 5, cy + 5, 1, 0x1B4FE0);
+            self.pframe(cx - 4, cy - 4, cx + 5, cy + 5, 1, 0x6C3FD1);
         }
         // 尺寸标签（文字只能是 GDI：中文/字形没法自己点像素）
         /* v2 的 HUD：宽高 + 屏幕坐标（等宽数字靠字体本身；缩放比拿不到——

@@ -428,9 +428,9 @@ export function Settings({
         rows: [
           {
             id: "closeToTray",
-            label: "关闭到托盘",
-            hint: "点关闭时收进托盘，程序继续在后台跑；点托盘图标就回来",
-            kw: "托盘 tray 最小化 关闭 后台",
+            label: "点叉号时收进托盘",
+            hint: "开：叉号只把窗口收进托盘小图标，程序在后台继续跑，点图标就回来；关：叉号直接退出程序",
+            kw: "托盘 tray 最小化 关闭 退出 后台 叉号",
             node: sw(draft.closeToTray, () => patch({ closeToTray: !draft.closeToTray })),
           },
           {

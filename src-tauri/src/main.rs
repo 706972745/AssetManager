@@ -2898,6 +2898,32 @@ fn board_tags() -> &'static Mutex<HashMap<String, String>> {
     BOARD_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 主程序退出时，把所有**附属窗口**一起关掉：灵感板（`board-N`）与贴图窗（`peek-N`）。
+///
+/// 为什么要有这个：Tauri 的退出条件是"最后一个窗口关闭"。主窗口点叉号（且没开
+/// 「关闭到托盘」）时，只要还有一块板或一张贴图活着，进程就不退 —— 任务栏里留着
+/// 几个没有主程序、也点不出功能的小窗，用户看到的就是"关掉了但没退"。
+/// 板子更彻底：它的 key 来自主库的标签 / 分组 / 快照，没有主窗口既刷新不了也回不去。
+///
+/// 为什么直接遍历 `webview_windows()` 而不再查 `BOARD_TAGS`：贴图窗是 `PEEK_SEQ`
+/// 现编号的，根本没有注册表；而且 `close()` 会触发各窗 `Destroyed` 回调再去拿
+/// `BOARD_TAGS` 的锁，持锁遍历会死锁（std Mutex 不可重入）。所以先拷 label 再关。
+///
+/// 只关这两类：`snip` 是截图会话自己的覆盖层，由会话结束流程销毁，不在这里抢。
+fn close_aux_windows(app: &AppHandle) {
+    let labels: Vec<String> = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with("board") || l.starts_with("peek"))
+        .cloned()
+        .collect();
+    for l in labels {
+        if let Some(w) = app.get_webview_window(&l) {
+            let _ = w.close();
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct BoardItem {
     id: i64,
@@ -4793,9 +4819,9 @@ mod splash {
             Some(unsafe { self.bits.add(o) })
         }
 
-        /// 1px 蓝色边框（#1B4FE0）
+        /// 1px 紫色边框（#6C3FD1）
         fn stroke_rect(&mut self, rx: i32, ry: i32, rw: i32, rh: i32) {
-            let (b, g, r) = (0xE0u8, 0x4Fu8, 0x1Bu8);
+            let (b, g, r) = (0xD1u8, 0x3Fu8, 0x6Cu8);
             let put = |s: &mut Self, x: i32, y: i32| {
                 if let Some(p) = s.px(x, y) {
                     unsafe {
@@ -6759,6 +6785,10 @@ fn main() {
                                 if let Some(w) = h2.get_webview_window("main") {
                                     let _ = w.hide();
                                 }
+                            } else {
+                                /* 真的退出：灵感板 / 贴图窗都是主窗口的附属窗口，一起关
+                                   （否则进程被它们吊着不退，见 close_aux_windows 注释）。 */
+                                close_aux_windows(&h2);
                             }
                         }
                     });
