@@ -324,6 +324,8 @@ export function BlinkCaretInput({
   const mirrorRef = useRef<HTMLSpanElement>(null);
   const [focused, setFocused] = useState(false);
   const [composing, setComposing] = useState(false);
+  /* 上一次 `reposition()` 的输入指纹（值 / 光标 / 焦点 / 组合态），见下面那个无依赖 effect。 */
+  const lastRepositionKey = useRef("");
 
   const reposition = useCallback(() => {
     const input = inputRef.current;
@@ -402,8 +404,15 @@ export function BlinkCaretInput({
     }
   }, []);
 
-  // 受控值被外部改写（清空、点建议项）不产生原生 input 事件，每次渲染兜一次
+  // 受控值被外部改写（清空、点建议项）不产生原生 input 事件，每次渲染兜一次。
+  // 但 `reposition()` 里要写 mirror.textContent 再读 offsetWidth（强制同步布局），
+  // 而输入框跟着 App 的每次重渲都会重渲（扫描进度 8–10Hz）—— 值/光标/焦点都没变时直接跳过。
+  // 光标移动由下面那段原生 select/click/keyup 监听兜；宽度变化由 resize 兜。
   useEffect(() => {
+    const input = inputRef.current;
+    const key = `${value}|${input?.selectionStart ?? -1}|${focused}|${composing}`;
+    if (lastRepositionKey.current === key) return;
+    lastRepositionKey.current = key;
     reposition();
   });
 

@@ -914,29 +914,43 @@ pub fn sync_dir(c: &Connection, dir_id: i64, entries: &[crate::scan::RawEntry]) 
         }
     }
 
-    // 删除磁盘上已不存在的行
-    let stale: Vec<(i64, String)> = c
-        .prepare("SELECT id, name FROM assets WHERE dir_id=?1")
-        .map_err(e2s)?
-        .query_map(params![dir_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        .map_err(e2s)?
-        .filter_map(|x| x.ok())
-        .filter(|(_, n)| !seen.contains(n.as_str()))
+    // 删除磁盘上已不存在的行。
+    // 上方 `existing` 里已经有这个目录的全部 (name → id/…)，这里不再整表查第二遍 ——
+    // 每扫一个目录都多一次全目录扫描，纯冗余（行数多时是扫描热路径里的一笔固定税）。
+    let stale: Vec<(i64, String)> = existing
+        .iter()
+        .filter(|(n, _)| !seen.contains(n.as_str()))
+        .map(|(n, (id, _, _, _))| (*id, n.clone()))
         .collect();
     for (id, name) in stale {
-        let _ = fts_del(c, id, &name, "", "");
+        /* FTS 删除失败不阻断资产行删除（列表/筛选都以 assets 为准），但留日志 ——
+           以前 `let _ =` 吞掉，索引残留孤儿行时无从查起。 */
+        if let Err(e) = fts_del(c, id, &name, "", "") {
+            eprintln!("[AssetManager] FTS 删除失败（asset id={id}）：{e}");
+        }
         c.execute("DELETE FROM assets WHERE id=?1", params![id]).map_err(e2s)?;
         st.removed += 1;
     }
 
+    /* `cnt_all` 只可能在两种情况下变：本目录素材有增删改，或子目录数变了。
+       全量扫描时绝大多数目录「一行都没变」，无条件跑 `recalc_dir_chain` 等于
+       每目录再付 O(深度) 次 UPDATE（10 万目录 = 几十万次写 + 索引脏页）。
+       判据保守：只要有一项不确定就照旧重算。 */
+    let old_child_cnt: Option<i64> = c
+        .query_row("SELECT child_cnt FROM dirs WHERE id=?1", params![dir_id], |r| r.get(0))
+        .optional()
+        .map_err(e2s)?;
+    let new_child_cnt: i64 = c
+        .query_row("SELECT COUNT(*) FROM dirs WHERE parent_id=?1", params![dir_id], |r| r.get(0))
+        .map_err(e2s)?;
     c.execute(
-        "UPDATE dirs SET scanned_at=?1,
-           child_cnt=(SELECT COUNT(*) FROM dirs WHERE parent_id=?2)
-         WHERE id=?2",
-        params![now_ts(), dir_id],
+        "UPDATE dirs SET scanned_at=?1, child_cnt=?2 WHERE id=?3",
+        params![now_ts(), new_child_cnt, dir_id],
     )
     .map_err(e2s)?;
-    recalc_dir_chain(c, dir_id)?;
+    if st.inserted + st.updated + st.removed > 0 || old_child_cnt != Some(new_child_cnt) {
+        recalc_dir_chain(c, dir_id)?;
+    }
 
     Ok(st)
 }
@@ -986,9 +1000,12 @@ pub fn list_assets(c: &Connection, q: &AssetQuery) -> Res<Vec<Asset>> {
     if let Some(did) = q.dir_id {
         if q.recursive {
             if let Some((base, _)) = dir_by_id(c, did)? {
-                where_sql.push_str(" AND (d.path = ? OR d.path LIKE ? ) ");
+                /* 前缀 LIKE **必须转义**：`_` / `%` 是通配符，目录名 `素材_2024` 会匹配到
+                   兄弟目录 `素材X2024`（主列表永远 recursive，用户看到的就是"混进了别的目录的图"）。
+                   转义口径复用规则标签那边的 `like_prefix`（`\` `%` `_` 一律双写）。 */
+                where_sql.push_str(" AND (d.path = ? OR d.path LIKE ? ESCAPE '\\') ");
                 args.push(Box::new(base.clone()));
-                args.push(Box::new(format!("{}%", base.trim_end_matches(['/', '\\']))));
+                args.push(Box::new(like_prefix(&base)));
             }
         } else {
             where_sql.push_str(" AND a.dir_id = ? ");
@@ -1195,7 +1212,23 @@ pub fn list_assets(c: &Connection, q: &AssetQuery) -> Res<Vec<Asset>> {
     let mut st = c.prepare(&sql).map_err(e2s)?;
     let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     let rows = st.query_map(refs.as_slice(), row_to_asset).map_err(e2s)?;
-    Ok(rows.filter_map(|x| x.ok()).collect())
+    /* 坏行不静默吞：`filter_map(ok)` 会让"某行类型不对"表现成"这张图凭空消失"，
+       排查时毫无线索（WORKLOG §10.5 #39 的同类教训）。这里记日志后跳过 ——
+       部分可见好过整个列表报错。 */
+    let mut out = Vec::new();
+    let mut bad = 0usize;
+    for row in rows {
+        match row {
+            Ok(a) => out.push(a),
+            Err(e) => {
+                if bad < 3 {
+                    eprintln!("[AssetManager] 列表里有一行读不出来（已跳过）：{e}");
+                }
+                bad += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /* ------------------------------------------------------------------ 标签 */
@@ -1344,6 +1377,14 @@ pub fn count_rule(c: &Connection, r: &crate::reg::AutoRule) -> Res<i64> {
     c.query_row(&sql, refs.as_slice(), |r| r.get(0)).map_err(e2s)
 }
 
+/// 自动标签计数：0 的桶不出现（与历史行为一致 —— 侧栏不显示"0 张"的自动标签）。
+fn push_count(out: &mut Vec<TagCount>, n: Option<i64>, tag: &str) {
+    let n = n.unwrap_or(0);
+    if n > 0 {
+        out.push(TagCount { name: tag.to_string(), count: n, ..Default::default() });
+    }
+}
+
 /// 自动标签 + 使用数：全部在 SQL 里按列聚合（百万行也只是几次扫索引），
 /// 阈值直接复用 `autotag` 里的档位表，和详情面板的推导口径一致。
 pub fn auto_tag_counts(c: &Connection) -> Res<Vec<TagCount>> {
@@ -1382,64 +1423,71 @@ pub fn auto_tag_counts(c: &Connection) -> Res<Vec<TagCount>> {
         }
     }
 
-    // 像素档：按长边落区间（和 PLACE_STEPS 同一张表）
+    /* 像素档 / 比例 / 体积档一次扫完（0.4.28）。
+       原来 place 6 条 + orient 3 条 + size 4 条 + size:xs 1 条 = 14 条 `COUNT(*)`，
+       每条都是一次 assets 全表扫；侧栏每次刷新（打标签 / 文件变化 / 切库）都跑一遍。
+       条件仍然从 PLACE_STEPS / SIZE_STEPS 生成，口径与详情面板的推导共用同一张表。 */
     let longest = "MAX(COALESCE(width,0), COALESCE(height,0))";
-    for (i, (px, tag)) in PLACE_STEPS.iter().enumerate() {
+    let mut cols: Vec<(String, String)> = Vec::new();
+    for (i, (px, _)) in PLACE_STEPS.iter().enumerate() {
         let upper = if i == 0 {
             String::new()
         } else {
             format!(" AND {longest} < {}", PLACE_STEPS[i - 1].0)
         };
-        let sql = format!(
-            "SELECT COUNT(*) FROM assets
-             WHERE missing=0 AND kind IN (0,1,3) AND {longest} >= {px}{upper}"
-        );
-        let n: i64 = c.query_row(&sql, [], |r| r.get(0)).map_err(e2s)?;
-        if n > 0 {
-            out.push(TagCount { name: (*tag).to_string(), count: n, ..Default::default() });
-        }
+        cols.push((
+            format!("place_{i}"),
+            format!("missing=0 AND kind IN (0,1,3) AND {longest} >= {px}{upper}"),
+        ));
     }
-
-    // 比例
-    for (tag, cond) in [
-        ("orient:landscape", "width > height"),
-        ("orient:portrait", "width < height"),
-        ("orient:square", "width = height"),
+    for (alias, cond) in [
+        ("orient_landscape", "width > height"),
+        ("orient_portrait", "width < height"),
+        ("orient_square", "width = height"),
     ] {
-        let sql = format!(
-            "SELECT COUNT(*) FROM assets WHERE missing=0 AND kind IN (0,1,3) \
-             AND width > 0 AND height > 0 AND {cond}"
-        );
-        let n: i64 = c.query_row(&sql, [], |r| r.get(0)).map_err(e2s)?;
-        if n > 0 {
-            out.push(TagCount { name: tag.to_string(), count: n, ..Default::default() });
-        }
+        cols.push((
+            alias.to_string(),
+            format!("missing=0 AND kind IN (0,1,3) AND width > 0 AND height > 0 AND {cond}"),
+        ));
     }
-
-    // 体积档
-    for (i, (bytes, tag)) in SIZE_STEPS.iter().enumerate() {
+    for (i, (bytes, _)) in SIZE_STEPS.iter().enumerate() {
         let upper = if i == 0 {
             String::new()
         } else {
             format!(" AND size < {}", SIZE_STEPS[i - 1].0)
         };
-        let sql = format!("SELECT COUNT(*) FROM assets WHERE missing=0 AND size >= {bytes}{upper}");
-        let n: i64 = c.query_row(&sql, [], |r| r.get(0)).map_err(e2s)?;
-        if n > 0 {
-            out.push(TagCount { name: (*tag).to_string(), count: n, ..Default::default() });
-        }
+        cols.push((format!("size_{i}"), format!("missing=0 AND size >= {bytes}{upper}")));
     }
+    let smallest = SIZE_STEPS.last().map(|(b, _)| *b).unwrap_or(0);
+    cols.push(("size_xs".into(), format!("missing=0 AND size < {smallest}")));
+
+    let select = cols
+        .iter()
+        .map(|(alias, cond)| format!("SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) AS {alias}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     {
-        let smallest = SIZE_STEPS.last().map(|(b, _)| *b).unwrap_or(0);
-        let n: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM assets WHERE missing=0 AND size < ?1",
-                params![smallest],
-                |r| r.get(0),
-            )
+        let mut st = c
+            .prepare(&format!("SELECT {select} FROM assets"))
             .map_err(e2s)?;
-        if n > 0 {
-            out.push(TagCount { name: "size:xs".into(), count: n, ..Default::default() });
+        let mut rows = st.query([]).map_err(e2s)?;
+        if let Some(r) = rows.next().map_err(e2s)? {
+            let mut idx = 0usize;
+            let mut take = |idx: &mut usize| -> Res<Option<i64>> {
+                let v = r.get::<_, Option<i64>>(*idx).map_err(e2s)?;
+                *idx += 1;
+                Ok(v)
+            };
+            for (_, tag) in PLACE_STEPS {
+                push_count(&mut out, take(&mut idx)?, tag);
+            }
+            for tag in ["orient:landscape", "orient:portrait", "orient:square"] {
+                push_count(&mut out, take(&mut idx)?, tag);
+            }
+            for (_, tag) in SIZE_STEPS {
+                push_count(&mut out, take(&mut idx)?, tag);
+            }
+            push_count(&mut out, take(&mut idx)?, "size:xs");
         }
     }
 
@@ -1535,6 +1583,65 @@ pub fn set_asset_tags(c: &Connection, asset_id: i64, tag_ids: &[i64]) -> Res<()>
         .map_err(e2s)?;
     }
     Ok(())
+}
+
+/// 备份恢复专用：把一批「评分 / 备注 / 来源 / 标签」在**一个事务**里写回。
+///
+/// 为什么不能复用 `set_rating` / `set_note` / `set_source_url` / `set_asset_tags`：
+/// 它们各自会开事务，1 万条素材 = 3~4 万次 WAL 提交，恢复 10 万条备份要几分钟。
+/// 空串 / 0 / 空标签表示「备份里没有这项」—— 与导入的「只补非空」语义一致，不擦现有数据。
+///
+/// 返回真正被写过（至少一项非空）的行数。
+pub fn apply_userdata_batch(
+    c: &Connection,
+    rows: &[(i64, i32, String, String, Vec<i64>)],
+) -> Res<usize> {
+    let tx = c.unchecked_transaction().map_err(e2s)?;
+    let mut touched = 0usize;
+    {
+        let mut up_rating = tx
+            .prepare("UPDATE assets SET rating=?2 WHERE id=?1")
+            .map_err(e2s)?;
+        let mut up_note = tx
+            .prepare("UPDATE assets SET note=?2 WHERE id=?1")
+            .map_err(e2s)?;
+        let mut up_src = tx
+            .prepare("UPDATE assets SET source_url=?2 WHERE id=?1")
+            .map_err(e2s)?;
+        let mut del_tags = tx
+            .prepare("DELETE FROM asset_tags WHERE asset_id=?1")
+            .map_err(e2s)?;
+        let mut ins_tag = tx
+            .prepare("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?1,?2)")
+            .map_err(e2s)?;
+        for (id, rating, note, src, tags) in rows {
+            let mut did = false;
+            if *rating > 0 {
+                up_rating.execute(params![id, rating]).map_err(e2s)?;
+                did = true;
+            }
+            if !note.is_empty() {
+                up_note.execute(params![id, note]).map_err(e2s)?;
+                did = true;
+            }
+            if !src.is_empty() {
+                up_src.execute(params![id, src]).map_err(e2s)?;
+                did = true;
+            }
+            if !tags.is_empty() {
+                del_tags.execute(params![id]).map_err(e2s)?;
+                for tg in tags {
+                    ins_tag.execute(params![id, tg]).map_err(e2s)?;
+                }
+                did = true;
+            }
+            if did {
+                touched += 1;
+            }
+        }
+    }
+    tx.commit().map_err(e2s)?;
+    Ok(touched)
 }
 
 /// 去标签时连带清空所有库里的关联（`App::delete_tag` 逐库调）。
@@ -1733,22 +1840,29 @@ pub struct RefRow {
     pub missing: bool,
 }
 
-/// 重写一个工程文件的引用清单（扫一次写一次，整体替换）
+/// 重写一个工程文件的引用清单（扫一次写一次，整体替换）。
+///
+/// 整个函数在**一个事务**里：一个工程几百条引用，逐条 autocommit 等于几百次 WAL 提交，
+/// `refs_scan` 一批 120 个文件就是几万次。失败时整份回滚（不会留半套引用）。
 pub fn set_refs(c: &Connection, src_id: i64, rows: &[(String, Option<i64>, i32)]) -> Res<()> {
-    c.execute("DELETE FROM refs WHERE src_id=?1", params![src_id])
+    let tx = c.unchecked_transaction().map_err(e2s)?;
+    tx.execute("DELETE FROM refs WHERE src_id=?1", params![src_id])
         .map_err(e2s)?;
-    let mut st = c
-        .prepare(
-            "INSERT OR IGNORE INTO refs (src_id, dst_path, dst_id, kind, missing)
-             VALUES (?1,?2,?3,?4,?5)",
-        )
-        .map_err(e2s)?;
-    for (path, dst, kind) in rows {
-        st.execute(params![src_id, path, dst, kind, if dst.is_none() { 1 } else { 0 }])
+    {
+        let mut st = tx
+            .prepare(
+                "INSERT OR IGNORE INTO refs (src_id, dst_path, dst_id, kind, missing)
+                 VALUES (?1,?2,?3,?4,?5)",
+            )
             .map_err(e2s)?;
+        for (path, dst, kind) in rows {
+            st.execute(params![src_id, path, dst, kind, if dst.is_none() { 1 } else { 0 }])
+                .map_err(e2s)?;
+        }
     }
-    c.execute("UPDATE assets SET refs_at=?1 WHERE id=?2", params![now_ts(), src_id])
+    tx.execute("UPDATE assets SET refs_at=?1 WHERE id=?2", params![now_ts(), src_id])
         .map_err(e2s)?;
+    tx.commit().map_err(e2s)?;
     Ok(())
 }
 
@@ -2026,27 +2140,24 @@ pub fn asset_by_id(c: &Connection, id: i64) -> Res<Option<Asset>> {
 ///
 /// **不能用 `INSERT INTO assets_fts(assets_fts) VALUES('rebuild')`**：这张表是
 /// contentless（`content=''`，故意不存副本），没有"内容表"可读，rebuild 会静默什么都不干。
-/// 所以只能自己灌：清空 → 逐行从 assets 取名字/备注写回去。
+/// 所以只能自己灌：清空 → 从 assets 一条 SELECT 灌回名字/备注。
 pub fn rebuild_fts(c: &Connection) -> Res<i64> {
-    c.execute("INSERT INTO assets_fts(assets_fts) VALUES('delete-all')", [])
+    /* 一条 INSERT … SELECT 重建，整表一个事务。
+       原来是 Rust 里逐行 `ins.execute()`（每行一次 autocommit）：10 万行 = 10 万次提交，
+       FTS 索引页反复脏写；`rebuild-fts` / 老库拆分都走这里。
+       实测「contentless FTS5 支持 INSERT INTO(fts) SELECT」且匹配结果与逐行写入一致。 */
+    let tx = c.unchecked_transaction().map_err(e2s)?;
+    tx.execute("INSERT INTO assets_fts(assets_fts) VALUES('delete-all')", [])
         .map_err(e2s)?;
-    let mut n = 0i64;
-    {
-        let mut st = c
-            .prepare("SELECT id, name, COALESCE(note,'') FROM assets")
-            .map_err(e2s)?;
-        let rows = st
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
-            .map_err(e2s)?;
-        let mut ins = c
-            .prepare("INSERT INTO assets_fts (rowid, name, note, tags) VALUES (?1,?2,?3,'')")
-            .map_err(e2s)?;
-        for row in rows.flatten() {
-            ins.execute(params![row.0, row.1, row.2]).map_err(e2s)?;
-            n += 1;
-        }
-    }
-    Ok(n)
+    let n = tx
+        .execute(
+            "INSERT INTO assets_fts (rowid, name, note, tags)
+             SELECT id, name, COALESCE(note,''), '' FROM assets",
+            [],
+        )
+        .map_err(e2s)?;
+    tx.commit().map_err(e2s)?;
+    Ok(n as i64)
 }
 
 // ---------------------------------------------------------------- ops
@@ -2364,19 +2475,26 @@ pub fn count_missing_meta(c: &Connection) -> Res<(i64, i64)> {
     Ok((pal, hsh))
 }
 
+/* 点查 SQL 单独提出来：`tests::lookup_queries_use_name_index` 要拿它跑 EXPLAIN QUERY PLAN，
+   防止以后有人改回 `lower(列)=lower(?)`。
+   **大小写不敏感必须写 `COLLATE NOCASE`**：把列包进 `lower()` 会让
+   `idx_assets_name2(name COLLATE NOCASE,id)` 整条报废 —— 实测 10 万行「未命中」一次
+   从 0.003ms 退化成 20ms（全表扫）。这三个函数都在循环里被调：
+   引用扫描（每批 120 个工程 × 上千条引用）、跨库/整目录移动的 carry、备份恢复。 */
+const SQL_ASSET_ID_BY_PATH: &str = "\
+    SELECT a.id FROM assets a JOIN dirs d ON d.id = a.dir_id
+     WHERE a.missing=0 AND a.name=?1 COLLATE NOCASE AND d.path=?2 COLLATE NOCASE
+     LIMIT 1";
+
 /// 按绝对路径点查素材 id（引用里的绝对路径命中）。Windows 上大小写不敏感。
+///
+/// 失败：路径里没有分隔符（不是绝对路径）时返回 `Ok(None)`，不算错误。
 pub fn asset_id_by_path(c: &Connection, path: &str) -> Res<Option<i64>> {
     let p = path.replace('/', "\\");
     let Some((dir, name)) = p.rsplit_once('\\') else { return Ok(None) };
-    c.query_row(
-        "SELECT a.id FROM assets a JOIN dirs d ON d.id = a.dir_id
-         WHERE a.missing=0 AND lower(a.name)=lower(?1) AND lower(d.path)=lower(?2)
-         LIMIT 1",
-        params![name, dir],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(e2s)
+    c.query_row(SQL_ASSET_ID_BY_PATH, params![name, dir], |r| r.get(0))
+        .optional()
+        .map_err(e2s)
 }
 
 /// 一棵目录子树下的全部素材：`(id, 绝对路径, 评分, 备注, 来源, 内容哈希)`。
@@ -2526,15 +2644,14 @@ pub fn ids_by_size(c: &Connection, size: i64, limit: i64) -> Res<Vec<(i64, Optio
     Ok(rows.flatten().collect())
 }
 
+const SQL_ASSET_ID_BY_NAME: &str = "\
+    SELECT id FROM assets WHERE missing=0 AND name=?1 COLLATE NOCASE ORDER BY id LIMIT 1";
+
 /// 按文件名在**全库**找（相对路径引用时文件名是唯一线索；同名取 id 最小，只当提示）
 pub fn asset_id_by_name(c: &Connection, name: &str) -> Res<Option<i64>> {
-    c.query_row(
-        "SELECT id FROM assets WHERE missing=0 AND lower(name)=lower(?1) ORDER BY id LIMIT 1",
-        params![name],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(e2s)
+    c.query_row(SQL_ASSET_ID_BY_NAME, params![name], |r| r.get(0))
+        .optional()
+        .map_err(e2s)
 }
 
 /// 谁引用了这张图：`(工程 id, 工程名, 工程路径, 是否缺失)`
@@ -2621,6 +2738,153 @@ mod tests {
         let mut st = lib(app).prepare("SELECT id FROM assets ORDER BY name").unwrap();
         let rows = st.query_map([], |r| r.get::<_, i64>(0)).unwrap();
         rows.flatten().map(|id| crate::gid(lib_id, id)).collect()
+    }
+
+    /* ---------------- 0.4.28 性能回归：点查索引 / FTS 一条 SQL 重建 ---------------- */
+
+    /// 点查找路径/文件名**必须走 `idx_assets_name2`**。
+    ///
+    /// 这条测试钉的是性能契约：改回 `lower(列)=lower(?)` 时结果仍然正确，
+    /// 但索引会整条报废（10 万行未命中 20ms/次，且这些函数全在循环里被调）。
+    #[test]
+    fn lookup_queries_use_name_index() {
+        let d = tmp("idxplan");
+        let c = open(&d.join("plan.db")).unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (1, 'C:\\x', 'x')", [])
+            .unwrap();
+        c.execute(
+            "INSERT INTO assets (dir_id, name, ext, kind, size, mtime, added_at)
+             VALUES (1, 'a.png', 'png', 0, 10, 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        /* EXPLAIN 的占位符和原查询一致，参数要照原样绑上（否则 bind count 不对）。 */
+        let path_plan: Vec<String> = {
+            let mut st = c
+                .prepare(&format!("EXPLAIN QUERY PLAN {SQL_ASSET_ID_BY_PATH}"))
+                .unwrap();
+            st.query_map(params!["a.png", "C:\\x"], |r| r.get::<_, String>(3))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(
+            path_plan.iter().any(|p| p.contains("idx_assets_name2")),
+            "按路径点查没走 idx_assets_name2（是不是改回 lower()=lower() 了？）：{path_plan:?}"
+        );
+        let name_plan: Vec<String> = {
+            let mut st = c
+                .prepare(&format!("EXPLAIN QUERY PLAN {SQL_ASSET_ID_BY_NAME}"))
+                .unwrap();
+            st.query_map(params!["a.png"], |r| r.get::<_, String>(3))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(
+            name_plan.iter().any(|p| p.contains("idx_assets_name2")),
+            "按文件名点查没走 idx_assets_name2：{name_plan:?}"
+        );
+
+        /* 行为同时钉住：大小写不敏感、路径分隔符两种写法都认。 */
+        assert_eq!(asset_id_by_path(&c, "C:/X/A.PNG").unwrap(), Some(1));
+        assert_eq!(asset_id_by_name(&c, "A.PNG").unwrap(), Some(1));
+        assert_eq!(asset_id_by_name(&c, "nope.png").unwrap(), None);
+    }
+
+    /// `rebuild_fts` 现在是一条 `INSERT … SELECT` + 一个事务；条数和命中都要与逐行写入一致。
+    #[test]
+    fn rebuild_fts_from_assets_in_one_statement() {
+        let d = tmp("ftsrebuild");
+        let c = open(&d.join("fts.db")).unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (1, '/x', 'x')", [])
+            .unwrap();
+        for (id, name, note) in [(1, "alpha.png", ""), (2, "beta.jpg", "一张备注")] {
+            c.execute(
+                "INSERT INTO assets (id, dir_id, name, ext, kind, size, mtime, note, added_at)
+                 VALUES (?1, 1, ?2, 'png', 0, 10, 1, ?3, 1)",
+                params![id, name, note],
+            )
+            .unwrap();
+        }
+        assert_eq!(rebuild_fts(&c).unwrap(), 2, "条数必须等于 assets 行数");
+        let hits: Vec<i64> = c
+            .prepare("SELECT rowid FROM assets_fts WHERE assets_fts MATCH 'alpha'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(hits, vec![1], "重建后必须能按名字命中");
+    }
+
+    /// `auto_tag_counts` 改成「一条 SQL + SUM(CASE)」后，每个桶的口径必须和档位表一致。
+    #[test]
+    fn auto_tag_counts_match_bucket_tables() {
+        let d = tmp("autotagcounts");
+        let c = open(&d.join("autotag.db")).unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (1, '/x', 'x')", [])
+            .unwrap();
+        let rows = [
+            ("a.png", "png", 0, 5_000_000i64, 4000i64, 3000i64), // 4k / landscape / md
+            ("b.jpg", "jpg", 0, 30_000_000, 1200, 1500),         // hd(长边1500) / portrait / lg
+            ("c.webp", "webp", 0, 100_000, 800, 800),            // sd / square / xs
+            ("d.json", "json", 4, 10_000, 0, 0),                 // 文档不算 place / orient
+        ];
+        for (name, ext, kind, size, w, h) in rows {
+            c.execute(
+                "INSERT INTO assets (dir_id, name, ext, kind, size, mtime, width, height, added_at)
+                 VALUES (1, ?1, ?2, ?3, ?4, 1, ?5, ?6, 1)",
+                params![name, ext, kind, size, w, h],
+            )
+            .unwrap();
+        }
+        let map: std::collections::HashMap<String, i64> = auto_tag_counts(&c)
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.name, t.count))
+            .collect();
+        assert_eq!(map.get("place:4k"), Some(&1), "4000 长边应落 4k");
+        assert_eq!(map.get("place:hd"), Some(&1), "1000 长边应落 hd");
+        assert_eq!(map.get("place:sd"), Some(&1), "800 长边应落 sd");
+        assert_eq!(map.get("orient:landscape"), Some(&1));
+        assert_eq!(map.get("orient:portrait"), Some(&1));
+        assert_eq!(map.get("orient:square"), Some(&1));
+        assert_eq!(map.get("size:md"), Some(&1));
+        assert_eq!(map.get("size:lg"), Some(&1));
+        assert_eq!(map.get("size:xs"), Some(&2), "100KB webp + 10KB json");
+        assert_eq!(map.get("fmt:png"), Some(&1));
+        assert_eq!(map.get("kind:doc"), Some(&1));
+        assert!(map.get("place:8k").is_none(), "0 的桶不出现");
+    }
+
+    /// 递归目录筛的前缀 LIKE 必须转义：目录名 `素材_2024` 不能连带匹配兄弟 `素材X2024`。
+    #[test]
+    fn recursive_filter_escapes_like_wildcards() {
+        let d = tmp("likeesc");
+        let c = open(&d.join("like.db")).unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (1, 'E:\\t\\a_b', 'a_b')", [])
+            .unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (2, 'E:\\t\\axb', 'axb')", [])
+            .unwrap();
+        for (id, dir_id) in [(1i64, 1i64), (2, 2)] {
+            c.execute(
+                "INSERT INTO assets (id, dir_id, name, ext, kind, size, mtime, added_at)
+                 VALUES (?1, ?2, ?3, 'png', 0, 10, 1, 1)",
+                params![id, dir_id, format!("{id}.png")],
+            )
+            .unwrap();
+        }
+        let q = AssetQuery {
+            dir_id: Some(1),
+            recursive: true,
+            limit: Some(100),
+            ..Default::default()
+        };
+        let rows = list_assets(&c, &q).unwrap();
+        assert_eq!(rows.len(), 1, "只应命中 a_b 里的那张，不该串到 axb");
+        assert_eq!(rows[0].id, 1);
     }
 
     /* ---------------- P3 T44 / T45：结构版本 与 崩溃恢复演练 ---------------- */

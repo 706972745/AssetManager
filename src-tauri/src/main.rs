@@ -247,17 +247,25 @@ async fn am_update_download(
     .map_err(|e| format!("下载任务异常：{e}"))?
 }
 
+/// 安装更新：整条流程（含结尾 1.2s「让前端画完」的等待 + `app.exit`）都丢到 blocking 线程。
+///
+/// 同步命令跑在主线程上，那 1.2 秒会让窗口进"未响应"；前端 `await updateInstall` 之后
+/// 没有任何后继动作，所以提前返回不影响用户看到的东西（进程仍在原定时刻退出）。
 #[tauri::command]
-fn am_update_install(
+async fn am_update_install(
     app: AppHandle,
     path: String,
     sha256: String,
     version: Option<String>,
 ) -> Result<(), String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        update::install_setup(&app, &path, &sha256, version.as_deref().unwrap_or(""))
-    }))
-    .unwrap_or_else(|_| Err("安装出错（已拦下，软件继续运行）".into()))
+    tauri::async_runtime::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            update::install_setup(&app, &path, &sha256, version.as_deref().unwrap_or(""))
+        }))
+        .unwrap_or_else(|_| Err("安装出错（已拦下，软件继续运行）".into()))
+    })
+    .await
+    .map_err(|e| format!("安装任务异常：{e}"))?
 }
 
 #[tauri::command]
@@ -766,7 +774,12 @@ fn am_watch(app: AppHandle, dirs: Vec<String>, watch_state: State<WatchState>) -
     let stop2 = stop.clone();
 
     std::thread::spawn(move || {
-        let Some(w) = watch::watch_dirs(&paths) else { return };
+        let Some(w) = watch::watch_dirs(&paths) else {
+            /* 监听装不上（目录被移走 / 权限 / 句柄耗尽）时命令仍返回 Ok(n)，
+               按钮看着"成功"但外部改文件永远不会刷新 —— 至少留一行日志。 */
+            log_runtime_opt("watch: 目录监听安装失败，外部变更不会自动刷新");
+            return;
+        };
         let mut pending: HashSet<String> = HashSet::new();
         loop {
             if stop2.load(Ordering::Relaxed) {
@@ -1067,27 +1080,42 @@ fn local_stamp() -> String {
 ///
 /// 后缀 0.4.2 从 `.json` → `.L-AssetManager`，0.4.5 再改成 `.D-AssetManager`（D = Data）。
 /// **内容格式一个字都没改** —— 老的 `.L` 文件照样能导入（类型判定只看内容，不看扩展名）。
+/// 导出库数据（评分 / 备注 / 标签关联）。大库要序列化几十 MB，别在主线程做。
+///
+/// 短锁只取「数据目录 + 目标库」，真正的读库 + 序列化 + 写盘放在 blocking 线程的
+/// **独立 App 连接**里（和 `am_scan_start` / `am_move_start` 同一条路线，不抢全局锁）。
 #[tauri::command]
-fn am_export_userdata(path: Option<String>, state: State<AppState>) -> Result<String, String> {
-    let app = lock(&state);
-    let lib_id = match path.as_deref() {
-        Some(p) => app
-            .lib_for_path(p)
-            .ok_or_else(|| format!("这个路径不在任何素材库里：{p}"))?,
-        None => app
-            .current_lib_id()
-            .ok_or_else(|| "还没有选中素材库".to_string())?,
+async fn am_export_userdata(
+    path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let (data_dir, lib_id, label) = {
+        let app = lock(&state);
+        let lib_id = match path.as_deref() {
+            Some(p) => app
+                .lib_for_path(p)
+                .ok_or_else(|| format!("这个路径不在任何素材库里：{p}"))?,
+            None => app
+                .current_lib_id()
+                .ok_or_else(|| "还没有选中素材库".to_string())?,
+        };
+        let label = app.lib_label(lib_id).unwrap_or_else(|| "素材库".into());
+        (app.data_dir.clone(), lib_id, label)
     };
-    let json = app.export_userdata(Some(lib_id))?;
-    let label = app.lib_label(lib_id).unwrap_or_else(|| "素材库".into());
-    let name = format!(
-        "{}-userdata-{}.D-AssetManager",
-        am_core::snapshot::safe_file_stem(&label),
-        local_stamp()
-    );
-    let target = app.data_dir.join(name);
-    std::fs::write(&target, json).map_err(|e| format!("写文件失败：{}", e))?;
-    Ok(target.to_string_lossy().to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = open_app(&data_dir)?;
+        let json = app.export_userdata(Some(lib_id))?;
+        let name = format!(
+            "{}-userdata-{}.D-AssetManager",
+            am_core::snapshot::safe_file_stem(&label),
+            local_stamp()
+        );
+        let target = app.data_dir.join(name);
+        std::fs::write(&target, json).map_err(|e| format!("写文件失败：{e}"))?;
+        Ok::<String, String>(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("导出任务异常：{e}"))?
 }
 
 /// 原生文件夹选择器（T15）。`rfd` 走系统 IFileDialog，比让用户手打路径靠谱得多。
@@ -1675,10 +1703,21 @@ fn am_meta_missing(state: State<AppState>) -> Result<(i64, i64), String> {
 }
 
 /// 补算主色板（读缓存里的缩略图，不重解原图）。返回 `(本次补了, 还剩)`。
+///
+/// 一次 1200 张 × 1–3ms ≈ 1–3.6 秒，跑在主线程上窗口会硬冻；这里放 blocking 线程 +
+/// 独立 App 连接（写 palette / phash 两列，主连接靠 WAL 立刻可见，不抢全局锁）。
 #[tauri::command]
-fn am_fill_palette(limit: Option<i64>, state: State<AppState>) -> Result<(i64, i64), String> {
-    let mut app = lock(&state);
-    app.fill_palette(limit.unwrap_or(800))
+async fn am_fill_palette(
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(i64, i64), String> {
+    let data_dir = lock(&state).data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut app = open_app(&data_dir)?;
+        app.fill_palette(limit.unwrap_or(800))
+    })
+    .await
+    .map_err(|e| format!("补算任务异常：{e}"))?
 }
 
 /// 各色桶的素材数（侧栏颜色筛选的口径）
@@ -1687,14 +1726,22 @@ fn am_color_counts(state: State<AppState>) -> Result<Vec<(String, i64)>, String>
     lock(&state).color_counts()
 }
 
-/// 精确重复：先按批算哈希，再返回重复组 + 还剩多少没算
+/// 精确重复：先按批算哈希，再返回重复组 + 还剩多少没算。
+///
+/// 2000 个文件读全文件算 xxh3 是秒级活（100 MB 文件约 0.1s），必须在 blocking 线程跑；
+/// 独立 App 连接，不占全局锁（主窗口这时还能正常滚动/切目录）。
 #[tauri::command]
-fn am_dupes_exact(
+async fn am_dupes_exact(
     limit: Option<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(Vec<am_core::model::DupGroup>, i64), String> {
-    let mut app = lock(&state);
-    app.dupes_exact(limit.unwrap_or(2000))
+    let data_dir = lock(&state).data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut app = open_app(&data_dir)?;
+        app.dupes_exact(limit.unwrap_or(2000))
+    })
+    .await
+    .map_err(|e| format!("查重任务异常：{e}"))?
 }
 
 #[tauri::command]
@@ -1706,11 +1753,21 @@ fn am_dupes_similar(
     lock(&state).dupes_similar(max_dist.unwrap_or(6), limit.unwrap_or(200))
 }
 
-/// 扫一批工程文件的外部引用
+/// 扫一批工程文件的外部引用（最多 120 个 × 16MB 文件头解析）。
+///
+/// 读盘 + 解析 + 每条引用点查都在 blocking 线程的独立连接里做，不占全局锁。
 #[tauri::command]
-fn am_refs_scan(limit: Option<i64>, state: State<AppState>) -> Result<(i64, i64), String> {
-    let mut app = lock(&state);
-    app.refs_scan(limit.unwrap_or(120))
+async fn am_refs_scan(
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(i64, i64), String> {
+    let data_dir = lock(&state).data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut app = open_app(&data_dir)?;
+        app.refs_scan(limit.unwrap_or(120))
+    })
+    .await
+    .map_err(|e| format!("引用扫描任务异常：{e}"))?
 }
 
 #[tauri::command]
@@ -1792,36 +1849,53 @@ fn am_lib_files(state: State<AppState>) -> Result<Vec<(String, String, i64)>, St
 }
 
 /* ---------------- 缓存（设置面板要用真实的数字，不能写死） ---------------- */
+
+/// 缓存目录实际占用（遍历几万个缩略图文件）。打开设置页就会调一次，
+/// 主线程上遍历机械盘可达数百 ms —— 短锁取根目录后丢给 blocking 线程。
 #[tauri::command]
-fn am_cache_stat(state: State<AppState>) -> Result<(i64, i64), String> {
-    let app = lock(&state);
-    let mut bytes = 0i64;
-    let mut files = 0i64;
-    let root = app.thumbs.root.clone();
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for ent in rd.flatten() {
-            let p = ent.path();
-            match ent.metadata() {
-                Ok(m) if m.is_dir() => stack.push(p),
-                Ok(m) => {
-                    bytes += m.len() as i64;
-                    files += 1;
+async fn am_cache_stat(state: State<'_, AppState>) -> Result<(i64, i64), String> {
+    let root = lock(&state).thumbs.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut bytes = 0i64;
+        let mut files = 0i64;
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for ent in rd.flatten() {
+                let p = ent.path();
+                match ent.metadata() {
+                    Ok(m) if m.is_dir() => stack.push(p),
+                    Ok(m) => {
+                        bytes += m.len() as i64;
+                        files += 1;
+                    }
+                    Err(_) => {}
                 }
-                Err(_) => {}
             }
         }
-    }
-    Ok((bytes, files))
+        (bytes, files)
+    })
+    .await
+    .map_err(|e| format!("统计缓存任务异常：{e}"))
 }
 
 /// `limit` = 当前上限；`target` = 要降到多少。清理缓存传 (0, 0) 就是全清。
+///
+/// 全清要读全部 LRU 行 + 删几万个文件 + 分批写库，属于秒级破坏性操作，
+/// 放 blocking 线程 + 独立连接，窗口和滚动不受影响。
 #[tauri::command]
-fn am_cache_gc(limit: i64, target: i64, state: State<AppState>) -> Result<(i64, i64), String> {
-    let app = lock(&state);
-    let mut app = app;
-    app.gc_thumbs(limit, target)
+async fn am_cache_gc(
+    limit: i64,
+    target: i64,
+    state: State<'_, AppState>,
+) -> Result<(i64, i64), String> {
+    let data_dir = lock(&state).data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut app = open_app(&data_dir)?;
+        app.gc_thumbs(limit, target)
+    })
+    .await
+    .map_err(|e| format!("清理缓存任务异常：{e}"))?
 }
 
 /// 设置面板「关于」要显示数据目录与库根，避免用户去猜。
@@ -2009,6 +2083,130 @@ fn not_found() -> Response<Vec<u8>> {
         .header(header::CACHE_CONTROL, "no-store")
         .body(Vec::new())
         .unwrap()
+}
+
+/// 处理 `thumb://` 请求（异步协议的工作线程里跑，**绝不在 UI 线程**）。
+///
+/// 失败：id 非法 / 资产不存在 / 文件缺失 / 解码失败 → 404（带 `Cache-Control: no-store`）。
+fn serve_thumb(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let state = app.state::<AppState>();
+    let id: i64 = req
+        .uri()
+        .path()
+        .trim_start_matches('/')
+        .trim_end_matches(".jpg")
+        .parse()
+        .unwrap_or(0);
+    if id <= 0 {
+        return not_found();
+    }
+    let px = parse_query(req.uri().query());
+    // 给预热线程一个"有人在等我"的信号（见 am_warm_start 的让路逻辑）
+    LAST_THUMB_REQ.store(now_ms(), Ordering::Relaxed);
+
+    // ① 短锁
+    let (path, store, need_dims, known_key, known_state, db_px) = {
+        let app = lock(&state);
+        let Ok(Some(a)) = app.asset(id) else {
+            return not_found();
+        };
+        (
+            PathBuf::from(&a.path),
+            thumb::ThumbStore::new(app.thumbs.root.clone()),
+            a.width.unwrap_or(0) == 0 || a.height.unwrap_or(0) == 0,
+            a.thumb_key.clone(),
+            a.thumb_state,
+            a.width.unwrap_or(0) as u64 * a.height.unwrap_or(0) as u64,
+        )
+    };
+
+    if !path.is_file() {
+        // 只标一次：已经是 FAILED 的不再重复写库（缺文件时每滚一次写一次纯属浪费）
+        if known_state != am_core::model::THUMB_FAILED {
+            let mut app = lock(&state);
+            let _ = app.mark_thumb_state(id, am_core::model::THUMB_FAILED);
+        }
+        return not_found();
+    }
+
+    /* `px=0` = 要**原图**（不是缩略图）。
+       长截图 / 全景图铺满一屏时，1600 档的缩略图也才一百多像素宽，放大就是一坨；
+       原文件本来就是 1080×11942，直接给原图更小更快。这条不占解码配额。
+       超过 48 MB 的（巨型 PNG / PSD 导出）退回 1600 档 —— 一次读几十上百兆不值当。 */
+    if px == 0 {
+        let big = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 48 * 1024 * 1024;
+        if !big {
+            return match std::fs::read(&path) {
+                Ok(bytes) => Response::builder()
+                    .status(200)
+                    .header(header::CONTENT_TYPE, mime_of(&path))
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .body(bytes)
+                    .unwrap(),
+                Err(_) => not_found(),
+            };
+        }
+    }
+    let px = if px == 0 { 1600 } else { px };
+
+    let _slot = acquire_decode(decode_cost(&path, px, db_px));
+
+    // ② 不持锁：这里可能是几十到几百毫秒
+    match thumb::ensure_path(&path, &store, px) {
+        Ok(o) => {
+            // ③ 短锁回写：命中缓存时 known_key 早就等于 o.key，一行都不写
+            if known_key.as_deref() != Some(o.key.as_str()) || need_dims {
+                let mut app = lock(&state);
+                /* **一个事务写完**（0.4.24）：原来 thumb/尺寸/主色/指纹是
+                   4 条独立写事务，滚一屏新图 = 40×4 = 160 次 autocommit、
+                   次次抢全局锁，后面排着 `am_list`，表现是"边滚边掉帧"。
+                   ⚠️ 主色板 / 指纹必须在这里写（教训见下面原注释的历史）：
+                   "算出来了"和"存进去了"是两件事，两条写库路径都得写。 */
+                let dims = need_dims.then_some((o.width, o.height));
+                let palette = (!o.palette.is_empty())
+                    .then(|| (o.palette.as_str(), o.color.as_str()));
+                let phash = (o.phash != 0).then_some(o.phash);
+                let _ = app.set_thumb_bundle(
+                    id,
+                    &o.key,
+                    am_core::model::THUMB_OK,
+                    o.quality,
+                    o.bytes,
+                    dims,
+                    palette,
+                    phash,
+                );
+            }
+            match std::fs::read(&o.path) {
+                Ok(bytes) => Response::builder()
+                    .status(200)
+                    .header(header::CONTENT_TYPE, "image/webp")
+                    .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                    .body(bytes)
+                    .unwrap(),
+                Err(_) => not_found(),
+            }
+        }
+        Err(_) => {
+            // 「不支持」只在两条路都走不通时才成立：自己解不了 **且** 系统也没给缩略图
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let unsupported = !am_core::formats::builtin_thumbable(&ext)
+                && !am_core::formats::shell_thumbable(&ext);
+            let mut app = lock(&state);
+            let _ = app.mark_thumb_state(
+                id,
+                if unsupported {
+                    am_core::model::THUMB_UNSUPPORTED
+                } else {
+                    am_core::model::THUMB_FAILED
+                },
+            );
+            not_found()
+        }
+    }
 }
 
 /* ---------------- 无边框看图窗口（0.9.0 → 0.10.0） ----------------
@@ -3363,7 +3561,6 @@ fn today_day() -> String {
 /// - 标签是这块板的标签（一块板 = 一个标签），所以粘进来的图下次打开同一块板还在。
 ///
 /// 返回的是**新入库那张素材**的信息，前端拿它直接贴到视口中心。
-#[tauri::command]
 /// 剪贴板图片 → `程序目录\screenshots\粘贴 <时间戳>.png`。
 /// 标签板和快照板的 Ctrl+V 共用这一条（先落盘，再入库，最后挂到板上）。
 fn save_clip_png() -> Result<(PathBuf, u32, u32), String> {
@@ -6876,134 +7073,19 @@ fn main() {
             }
             Ok(())
         })
-        // 缩略图走自定义协议：字节永不经过 IPC（IPC 会序列化成 JSON 数组）
+        // 缩略图走自定义协议：字节永不经过 IPC（IPC 会序列化成 JSON 数组）。
         //
-        // ⚠️ 锁的粒度：以前整个请求（含解码 + 读文件 + 写库）都握着全局 `Mutex<App>`，
-        // 一张 36MP 的图解码 0.5 秒，这 0.5 秒里 am_list / am_children / 详情全部排在后面 ——
-        // 滚到一屏新图就"卡住"。现在拆成三段：
-        //   ① 短锁：只取「路径 + 要不要回写」，微秒级；
-        //   ② 不持锁：查缓存 / 解码 / 编码（几十到几百毫秒，互不阻塞）；
-        //   ③ 短锁：仅在 key 或尺寸真的变了时写一行 —— 缓存命中是**零写入**。
+        // ⚠️ 必须用**异步**协议：WebView2 的 WebResourceRequested 回调跑在宿主 UI 线程
+        // （Microsoft「Threading model for WebView2 apps」：All callbacks occur on that thread；
+        //  wry 也是在该回调里同步调 handler）。同步注册 = 在 UI 线程上解码几十到几百毫秒，
+        // 「不持锁」只解决了锁竞争，没解决线程。这里只把请求丢给 blocking 线程池，
+        // 算完 `responder` 回包；锁仍是 0.3.2 的三段式（短锁取路径 → 不持锁解码 → 短锁回写）。
         .register_uri_scheme_protocol("peekfile", |_ctx, req| serve_media(req.uri().path()))
-        .register_uri_scheme_protocol("thumb", |ctx, req| {
-            let state = ctx.app_handle().state::<AppState>();
-            let id: i64 = req
-                .uri()
-                .path()
-                .trim_start_matches('/')
-                .trim_end_matches(".jpg")
-                .parse()
-                .unwrap_or(0);
-            if id <= 0 {
-                return not_found();
-            }
-            let px = parse_query(req.uri().query());
-            // 给预热线程一个"有人在等我"的信号（见 am_warm_start 的让路逻辑）
-            LAST_THUMB_REQ.store(now_ms(), Ordering::Relaxed);
-
-            // ① 短锁
-            let (path, store, need_dims, known_key, known_state, db_px) = {
-                let app = lock(&state);
-                let Ok(Some(a)) = app.asset(id) else {
-                    return not_found();
-                };
-                (
-                    PathBuf::from(&a.path),
-                    thumb::ThumbStore::new(app.thumbs.root.clone()),
-                    a.width.unwrap_or(0) == 0 || a.height.unwrap_or(0) == 0,
-                    a.thumb_key.clone(),
-                    a.thumb_state,
-                    a.width.unwrap_or(0) as u64 * a.height.unwrap_or(0) as u64,
-                )
-            };
-
-            if !path.is_file() {
-                // 只标一次：已经是 FAILED 的不再重复写库（缺文件时每滚一次写一次纯属浪费）
-                if known_state != am_core::model::THUMB_FAILED {
-                    let mut app = lock(&state);
-                    let _ = app.mark_thumb_state(id, am_core::model::THUMB_FAILED);
-                }
-                return not_found();
-            }
-
-            /* `px=0` = 要**原图**（不是缩略图）。
-               长截图 / 全景图铺满一屏时，1600 档的缩略图也才一百多像素宽，放大就是一坨；
-               原文件本来就是 1080×11942，直接给原图更小更快。这条不占解码配额。
-               超过 48 MB 的（巨型 PNG / PSD 导出）退回 1600 档 —— 一次读几十上百兆不值当。 */
-            if px == 0 {
-                let big = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 48 * 1024 * 1024;
-                if !big {
-                    return match std::fs::read(&path) {
-                        Ok(bytes) => Response::builder()
-                            .status(200)
-                            .header(header::CONTENT_TYPE, mime_of(&path))
-                            .header(header::CACHE_CONTROL, "no-store")
-                            .body(bytes)
-                            .unwrap(),
-                        Err(_) => not_found(),
-                    };
-                }
-            }
-            let px = if px == 0 { 1600 } else { px };
-
-            let _slot = acquire_decode(decode_cost(&path, px, db_px));
-
-            // ② 不持锁：这里可能是几十到几百毫秒
-            match thumb::ensure_path(&path, &store, px) {
-                Ok(o) => {
-                    // ③ 短锁回写：命中缓存时 known_key 早就等于 o.key，一行都不写
-                    if known_key.as_deref() != Some(o.key.as_str()) || need_dims {
-                        let mut app = lock(&state);
-                        /* **一个事务写完**（0.4.24）：原来 thumb/尺寸/主色/指纹是
-                           4 条独立写事务，滚一屏新图 = 40×4 = 160 次 autocommit、
-                           次次抢全局锁，后面排着 `am_list`，表现是"边滚边掉帧"。
-                           ⚠️ 主色板 / 指纹必须在这里写（教训见下面原注释的历史）：
-                           "算出来了"和"存进去了"是两件事，两条写库路径都得写。 */
-                        let dims = need_dims.then_some((o.width, o.height));
-                        let palette = (!o.palette.is_empty())
-                            .then(|| (o.palette.as_str(), o.color.as_str()));
-                        let phash = (o.phash != 0).then_some(o.phash);
-                        let _ = app.set_thumb_bundle(
-                            id,
-                            &o.key,
-                            am_core::model::THUMB_OK,
-                            o.quality,
-                            o.bytes,
-                            dims,
-                            palette,
-                            phash,
-                        );
-                    }
-                    match std::fs::read(&o.path) {
-                        Ok(bytes) => Response::builder()
-                            .status(200)
-                            .header(header::CONTENT_TYPE, "image/webp")
-                            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                            .body(bytes)
-                            .unwrap(),
-                        Err(_) => not_found(),
-                    }
-                }
-                Err(_) => {
-                    // 「不支持」只在两条路都走不通时才成立：自己解不了 **且** 系统也没给缩略图
-                    let ext = path
-                        .extension()
-                        .map(|e| e.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    let unsupported = !am_core::formats::builtin_thumbable(&ext)
-                        && !am_core::formats::shell_thumbable(&ext);
-                    let mut app = lock(&state);
-                    let _ = app.mark_thumb_state(
-                        id,
-                        if unsupported {
-                            am_core::model::THUMB_UNSUPPORTED
-                        } else {
-                            am_core::model::THUMB_FAILED
-                        },
-                    );
-                    not_found()
-                }
-            }
+        .register_asynchronous_uri_scheme_protocol("thumb", |ctx, req, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(serve_thumb(&app, &req));
+            });
         })
         .invoke_handler(tauri::generate_handler![
             am_roots,

@@ -1222,12 +1222,8 @@ impl App {
             }
         }
         // 排序口径与 0.5.0 一致：先按分组（未分组最后），组内按命中数降序
-        let group_rank: HashMap<String, i64> = self
-            .groups()?
-            .into_iter()
-            .enumerate()
-            .map(|(i, g)| (g.name, i as i64))
-            .collect();
+        // 只取「分组名 → 位置」，**不重跑 groups()**（那个会再算一遍 tags_meta + 计数聚合）。
+        let group_rank: HashMap<String, i64> = self.group_rank_map()?;
         out.sort_by(|a, b| {
             let ga = a.group.as_ref().and_then(|g| group_rank.get(g)).copied().unwrap_or(i64::MAX);
             let gb = b.group.as_ref().and_then(|g| group_rank.get(g)).copied().unwrap_or(i64::MAX);
@@ -1236,6 +1232,21 @@ impl App {
                 .then(b.count.cmp(&a.count))
                 .then(a.name.cmp(&b.name))
         });
+        Ok(out)
+    }
+
+    /// 「分组名 → 排序位」：只读分组表的名字与顺序，不聚合任何计数。
+    ///
+    /// 合并顺序与 [`Self::groups`] 完全一致（逐个 tag 源、同名取第一次出现的位次），
+    /// 只是不跑 `counts_by_tag` —— `tags()` 排序只需要位置。
+    fn group_rank_map(&self) -> Result<HashMap<String, i64>, String> {
+        let mut out: HashMap<String, i64> = HashMap::new();
+        for (c, _real) in self.tag_sources() {
+            for name in reg::group_names(c)? {
+                let next = out.len() as i64;
+                out.entry(name).or_insert(next);
+            }
+        }
         Ok(out)
     }
 
@@ -1515,30 +1526,42 @@ impl App {
             return Ok((total, 0));
         }
         all.sort_by_key(|e| e.last_used);
-        /* 先只挑出要淘汰的，**不在循环里写库**（0.4.24）：
-           原来是"每淘汰一张就 DELETE + UPDATE 各一次 autocommit"，而
-           `UPDATE assets ... WHERE thumb_key=?` 在加索引前是**全表扫**
-           （20 万行 18.5 ms）→ 淘汰 2 万张 ≈ 30 分钟，还全程持锁。 */
+        /* 挑淘汰项的同时**顺手删文件**（0.4.28）：
+           删不掉的（被占用 / 杀软锁）**不写库、不计入"释放"**，否则会把"释放了 3 GB"
+           报给用户、同时清掉 `thumb_lru` 行，文件留在盘上变成以后永远找不到的孤儿。
+           文件本来就不在（NotFound）→ 记账行照样清，但不算释放（旧实现会虚报）。 */
         let mut pick: Vec<Entry> = Vec::new();
+        let mut freed: i64 = 0;
         let mut cur = total;
         for e in all {
             if cur <= target {
                 break;
             }
-            cur -= e.bytes;
+            let got = match self.lib(e.lib) {
+                Ok(l) => {
+                    let p = l.thumbs.file_for(&e.key);
+                    let legacy = p.with_extension("jpg");
+                    match std::fs::remove_file(&p) {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(&legacy);
+                            Some(e.bytes)
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            let _ = std::fs::remove_file(&legacy);
+                            Some(0)
+                        }
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            };
+            let Some(got) = got else { continue };
+            cur -= got;
+            freed += got;
             pick.push(e);
         }
-        let freed: i64 = pick.iter().map(|e| e.bytes).sum();
 
-        // ① 先删磁盘文件（不持库锁）
-        for e in &pick {
-            if let Ok(l) = self.lib(e.lib) {
-                let _ = std::fs::remove_file(l.thumbs.file_for(&e.key));
-                let _ = std::fs::remove_file(l.thumbs.file_for(&e.key).with_extension("jpg"));
-            }
-        }
-
-        // ② 再按库分组、一个事务 + 分批 IN 写库
+        // 再按库分组、一个事务 + 分批 IN 写库
         use std::collections::HashMap as Map;
         let mut by_lib: Map<i64, Vec<String>> = Map::new();
         for e in pick {
@@ -1653,7 +1676,19 @@ impl App {
             }
         }
 
-        /* ② 逐条回填 */
+        /* ② 预扫 + 按库分组：库归属、标签 id、补丁都先算好，最后逐库一个事务写回。
+           原来每张素材都要：点查 1 次 + 若干次写事务，标签还每条 ensure 一次
+           （10 万条备份 = 几十万次 WAL 提交，恢复要好几分钟）。 */
+        let norm_roots: HashMap<String, i64> = self
+            .libs
+            .iter()
+            .map(|l| (norm_path(&l.root), l.id))
+            .collect();
+        /* 每个库一份「标签名 → tag_id」：标签本体在注册库，id 是库内 id */
+        let mut tag_ids_by_lib: HashMap<i64, HashMap<String, i64>> = HashMap::new();
+        /* lib_id → 待写补丁：(asset_id, rating, note, source, tag_ids) */
+        let mut patches: HashMap<i64, Vec<(i64, i32, String, String, Vec<i64>)>> = HashMap::new();
+
         for a in &assets {
             let dir = a.get("dir").and_then(|x| x.as_str()).unwrap_or("").trim();
             let name = a.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
@@ -1662,21 +1697,19 @@ impl App {
             }
             let full = join_path(dir, name);
             let lib_field = a.get("lib").and_then(|x| x.as_str()).unwrap_or("");
-            let lib_id = self
-                .libs
-                .iter()
-                .find(|l| !lib_field.is_empty() && norm_path(&l.root) == norm_path(lib_field))
-                .map(|l| l.id)
+            let lib_id = norm_roots
+                .get(&norm_path(lib_field))
+                .copied()
                 .or_else(|| self.lib_for_path(&full));
             let Some(lib_id) = lib_id else {
                 report.assets_unknown += 1;
                 continue;
             };
 
-            let rating = a.get("rating").and_then(|x| x.as_i64()).unwrap_or(0);
-            let note = a.get("note").and_then(|x| x.as_str()).unwrap_or("").trim();
-            let src = a.get("sourceUrl").and_then(|x| x.as_str()).unwrap_or("").trim();
-            let tags: Vec<String> = a
+            let rating = a.get("rating").and_then(|x| x.as_i64()).unwrap_or(0).clamp(0, 5) as i32;
+            let note = a.get("note").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let src = a.get("sourceUrl").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            let tag_names: Vec<String> = a
                 .get("tags")
                 .and_then(|x| x.as_array())
                 .map(|arr| {
@@ -1688,52 +1721,43 @@ impl App {
                 })
                 .unwrap_or_default();
 
-            let found = {
+            let aid = {
                 let l = self.lib(lib_id)?;
                 db::asset_id_by_path(&l.conn, &full)?
             };
-            let Some(aid) = found else {
+            let Some(aid) = aid else {
                 report.assets_unknown += 1;
                 continue;
             };
 
-            let mut touched = false;
+            /* 标签名 → id：同库同名只建一次；非法名字跳过（别让一条脏数据废掉整份导入） */
+            let mut tag_ids: Vec<i64> = Vec::new();
             {
                 let l = self.lib(lib_id)?;
-                if rating > 0 {
-                    db::set_rating(&l.conn, &[aid], rating.clamp(0, 5) as i32)?;
-                    touched = true;
-                }
-                if !note.is_empty() {
-                    db::set_note(&l.conn, aid, note)?;
-                    touched = true;
-                }
-                if !src.is_empty() {
-                    db::set_source_url(&l.conn, aid, src)?;
-                    touched = true;
-                }
-                if !tags.is_empty() {
-                    /* 标签名走同一套校验：非法名字跳过，别让一条脏数据废掉整份导入 */
-                    let mut ids: Vec<i64> = Vec::new();
-                    for t in &tags {
-                        if let Ok(ok) = reg::validate_tag_name(t) {
-                            if let Ok(id) = reg::ensure_tag(&l.conn, &ok) {
-                                ids.push(id);
-                            }
-                        }
+                let cache = tag_ids_by_lib.entry(lib_id).or_default();
+                for t in &tag_names {
+                    if let Some(&id) = cache.get(t) {
+                        tag_ids.push(id);
+                        continue;
                     }
-                    if !ids.is_empty() {
-                        ids.sort_unstable();
-                        ids.dedup();
-                        db::set_asset_tags(&l.conn, aid, &ids)?;
-                        touched = true;
+                    let Ok(ok) = reg::validate_tag_name(t) else { continue };
+                    if let Ok(id) = reg::ensure_tag(&l.conn, &ok) {
+                        cache.insert(t.clone(), id);
+                        tag_ids.push(id);
                     }
                 }
             }
-            if touched {
-                report.assets_updated += 1;
-            }
+            tag_ids.sort_unstable();
+            tag_ids.dedup();
+            patches.entry(lib_id).or_default().push((aid, rating, note, src, tag_ids));
         }
+
+        /* ③ 逐库一个事务写回：评分 / 备注 / 来源 / 标签（只补非空，空值不擦现有数据） */
+        for (lib_id, rows) in patches {
+            let l = self.lib(lib_id)?;
+            report.assets_updated += db::apply_userdata_batch(&l.conn, &rows)?;
+        }
+
         Ok(report)
     }
 
@@ -3542,6 +3566,8 @@ impl App {
         let stored = reg::snapshot_items(&l.conn, local)?;
         let mut items = Vec::with_capacity(stored.len());
         let mut found = 0usize;
+        /* 位置刷新的待写队列：几千条快照逐条 UPDATE = 几千次提交，攒到循环末尾一个事务写完。 */
+        let mut touches: Vec<(String, String, String, String)> = Vec::new();
 
         for it in stored {
             let Some(hash) = snapshot::unhex(&it.hash) else {
@@ -3561,15 +3587,8 @@ impl App {
             match self.match_by_hash(&hash, it.size)? {
                 Some((g, a, lib_root)) => {
                     found += 1;
-                    // 位置变了就更新（改名 / 换库 / 换目录都走这条），失败不影响对账
-                    let _ = reg::snapshot_touch_item(
-                        &l.conn,
-                        local,
-                        &it.hash,
-                        &a.name,
-                        &a.path,
-                        &lib_root,
-                    );
+                    // 位置变了就更新（改名 / 换库 / 换目录都走这条）：先攒着，循环末尾一批写
+                    touches.push((it.hash.clone(), a.name.clone(), a.path.clone(), lib_root.clone()));
                     items.push(ResolvedItem {
                         hash: it.hash,
                         name: a.name,
@@ -3594,6 +3613,11 @@ impl App {
                     mtime: 0,
                 }),
             }
+        }
+
+        /* 位置刷新一个事务写完；失败不影响对账（和原来一样是"尽力更新"）。 */
+        if !touches.is_empty() {
+            let _ = reg::snapshot_touch_items(&l.conn, local, &touches);
         }
 
         let missing = items.len() - found;

@@ -577,6 +577,21 @@ pub struct TagGroupRow {
     pub tags: i64,
 }
 
+/// 分组名，按与 [`groups`] **完全相同的排序**（`sort ASC, name COLLATE NOCASE`）。
+///
+/// 给 `App::tags()` 算排序位用：它只要「分组名 → 第几个」，不需要任何计数；
+/// 而 `groups()` 内部要 `tags_meta` + `counts_by_tag`（关联表 GROUP BY），
+/// 侧栏同一 tick 还会另调一次 `am_tag_groups` —— 不能为了排序把聚合跑三遍。
+pub fn group_names(c: &Connection) -> Res<Vec<String>> {
+    let mut st = c
+        .prepare("SELECT name FROM tag_groups ORDER BY sort ASC, name COLLATE NOCASE ASC")
+        .map_err(e2s)?;
+    let rows = st
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(e2s)?;
+    Ok(rows.filter_map(|x| x.ok()).collect())
+}
+
 /* ------------------------------------------------------------------ 快照 */
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -702,15 +717,18 @@ pub fn snapshot_items(c: &Connection, id: i64) -> Res<Vec<crate::snapshot::SnapI
 }
 
 /// 批量塞条目。返回**真正新增**的条数（同一张图重复加入是幂等的）。
+///
+/// 整批一个事务：5000 张的快照原来是 5000 次 autocommit（一次加几千张时秒级且卡全局锁）。
 pub fn snapshot_insert_items(
     c: &Connection,
     id: i64,
     items: &[crate::snapshot::SnapItem],
 ) -> Res<usize> {
     let now = db::now_ts();
+    let tx = c.unchecked_transaction().map_err(e2s)?;
     let mut n = 0usize;
     {
-        let mut st = c
+        let mut st = tx
             .prepare(
                 "INSERT OR IGNORE INTO snapshot_items
                    (snapshot_id, hash, name, size, w, h, path, lib, added_at)
@@ -733,7 +751,8 @@ pub fn snapshot_insert_items(
                 .map_err(e2s)?;
         }
     }
-    snapshot_touch(c, id)?;
+    snapshot_touch(&tx, id)?;
+    tx.commit().map_err(e2s)?;
     Ok(n)
 }
 
@@ -748,17 +767,47 @@ pub fn snapshot_touch_item(c: &Connection, id: i64, hash: &str, name: &str, path
     Ok(())
 }
 
+/// 批量刷新"最后一次见到的位置"（对账时一个快照几千条，逐条 UPDATE 太贵）。
+///
+/// 一个事务写完；失败时整批回滚（这些字段只用于显示，回滚不会影响"找不找得到"）。
+pub fn snapshot_touch_items(
+    c: &Connection,
+    id: i64,
+    updates: &[(String, String, String, String)],
+) -> Res<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let tx = c.unchecked_transaction().map_err(e2s)?;
+    {
+        let mut st = tx
+            .prepare(
+                "UPDATE snapshot_items SET name = ?3, path = ?4, lib = ?5
+                 WHERE snapshot_id = ?1 AND hash = ?2",
+            )
+            .map_err(e2s)?;
+        for (hash, name, path, lib) in updates {
+            st.execute(params![id, hash, name, path, lib]).map_err(e2s)?;
+        }
+    }
+    snapshot_touch(&tx, id)?;
+    tx.commit().map_err(e2s)?;
+    Ok(())
+}
+
 pub fn snapshot_remove_items(c: &Connection, id: i64, hashes: &[String]) -> Res<usize> {
+    let tx = c.unchecked_transaction().map_err(e2s)?;
     let mut n = 0usize;
     {
-        let mut st = c
+        let mut st = tx
             .prepare("DELETE FROM snapshot_items WHERE snapshot_id = ?1 AND hash = ?2")
             .map_err(e2s)?;
         for h in hashes {
             n += st.execute(params![id, h]).map_err(e2s)?;
         }
     }
-    snapshot_touch(c, id)?;
+    snapshot_touch(&tx, id)?;
+    tx.commit().map_err(e2s)?;
     Ok(n)
 }
 

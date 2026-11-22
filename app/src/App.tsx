@@ -12,6 +12,7 @@ import { onAppEvent, source } from "./data/source";
 import { setActiveDock, useDockHover } from "./lib/dockHover";
 import { setOwnDrag } from "./lib/ownDrag";
 import { loadHotkeys } from "./lib/hotkeys";
+import { clearProgress, setProgress, useProgress } from "./lib/progressStore";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
   fmtNum,
@@ -73,6 +74,9 @@ const CONFIRM_DELETE_COUNT = 20;
 const MAX_LIBS = 3;
 /** 批量操作的每片大小：一次丢几千个路径给 Shell，回收站 API 会卡住好几十秒 */
 const CHUNK = 200;
+/** `am://drag-move` push 通道的静默阈值：push 是 16ms 一拍，50ms 内来过就说明它活着，
+ *  这一帧不必再走 `cursorPosition` 轮询；push 真丢了时 50ms 后轮询自动接管。 */
+const DRAG_PUSH_QUIET_MS = 50;
 
 /**
  * 现在是不是「用户想复制文字」的语境。
@@ -224,7 +228,6 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [busy, setBusy] = useState(false);
-  const [batch, setBatch] = useState<{ done: number; total: number; label?: string } | null>(null);
   const [lightbox, setLightbox] = useState<number | null>(null);
   /** 灯箱的换图入口（由 Lightbox 注册，带逐帧闸门）。全局方向键都从这里走 */
   const lightNav = useRef<((dir: number) => void) | null>(null);
@@ -287,12 +290,9 @@ export default function App() {
   /* 0.4.24：主界面右键 = 在鼠标旁弹详情（不再让右侧详情栏常驻占位）。
      非空即浮层开启，坐标就是右键点；菜单挪到 Shift+右键。 */
   const [detailPop, setDetailPop] = useState<{ x: number; y: number } | null>(null);
-  const [scan, setScan] = useState<{ active: boolean; dirs: number; files: number; current: string }>({
-    active: false,
-    dirs: 0,
-    files: 0,
-    current: "",
-  });
+  /* 扫描 / 批量进度**不在这里**：后端分别每 120ms / 100ms 推一次，放 App state 会把整棵树
+     按 8–10Hz 重渲（而真正变的只有底部那条进度条）。它们住在 `lib/progressStore`，
+     由底部的 `ProgressStrip` 自己订阅——取消按钮等要读的人也从那个 store 取。 */
 
   const reqRef = useRef(0);
   const dirRef = useRef<DirNode | null>(null);
@@ -704,7 +704,7 @@ export default function App() {
     async (path: string, label = "开始扫描") => {
       try {
         await source.scanStart(path);
-        setScan({ active: true, dirs: 0, files: 0, current: path });
+        setProgress("scan", { active: true, dirs: 0, files: 0, current: path });
         toast(label, false, "正在后台建立索引，可以继续浏览；随时能取消");
       } catch (e) {
         toast(String(e), true);
@@ -831,14 +831,15 @@ export default function App() {
     };
   }, [openImportFile]);
 
-  /* 进度事件：只在扫描期间订阅，避免无谓的 JSON 解析 */
+  /* 扫描进度：这里只负责把值写进 store（进度条自己订阅，App 不因进度重渲）；
+     `done` 里的 toast / 刷新键是全局副作用，留在 App。 */
   useEffect(() => {
     const offP = onAppEvent<ScanProgress>("scan://progress", (p) => {
       if (p.done) return;
-      setScan({ active: true, dirs: p.dirs, files: p.files, current: p.current });
+      setProgress("scan", { active: true, dirs: p.dirs, files: p.files, current: p.current });
     });
     const offD = onAppEvent<ScanResult>("scan://done", (r) => {
-      setScan({ active: false, dirs: 0, files: 0, current: "" });
+      clearProgress("scan");
       toast(r.ok ? "扫描完成" : "扫描没跑完", !r.ok, r.message);
       setRefreshKey((k) => k + 1);
     });
@@ -902,13 +903,14 @@ export default function App() {
   }, []);
 
   /* 后台移动的进度与收尾（缺陷 #7）：跨盘走「复制 → 删源」，几百 MB 要十几秒，
-     以前同步执行时界面只能干等。现在 Rust 在独立线程里跑，这里只接事件。 */
+     以前同步执行时界面只能干等。现在 Rust 在独立线程里跑，这里只接事件：
+     进度写进 store（进度条自己订阅），toast 与刷新键留在 App。 */
   useEffect(() => {
     const offP = onAppEvent<MoveProgress>("move://progress", (p) => {
-      setBatch({ done: p.done, total: p.total, label: `正在移动 · ${p.current}` });
+      setProgress("batch", { done: p.done, total: p.total, label: `正在移动 · ${p.current}` });
     });
     const offD = onAppEvent<MoveResult>("move://done", (r) => {
-      setBatch(null);
+      clearProgress("batch");
       toast(r.ok ? "已移动到目标文件夹" : "没有移动任何文件", !r.ok, r.message);
       setRefreshKey((k) => k + 1);
     });
@@ -920,14 +922,17 @@ export default function App() {
 
   /* ---------------- 标签：清单 / 当前页标签 / 单张自动标签 ---------------- */
 
-  // 侧栏要的两份清单（手工 + 自动），随刷新更新
+  // 侧栏要的两份清单（手工 + 自动），随刷新更新。
+  // **只跟 `refreshKey`**：改标签/改色/改分组/删标签/导入/扫描都走 `setRefreshKey`；
+  // 打开「编辑卡 / 打标签 / 加进快照」这些弹层只是 UI 状态，不改变清单数据 ——
+  // 跟它们会让一次编辑会话白拉 10 次 IPC（还要抢全局锁）。
   useEffect(() => {
     void source.tags().then(setTags).catch(() => {});
     void source.tagGroups().then(setTagGroups).catch(() => {});
     void source.autoTags().then(setAutoTagCounts).catch(() => {});
     void source.snapshotList().then(setSnaps).catch(() => {});
     void source.collList().then(setColls).catch(() => {});
-  }, [refreshKey, tagPrompt, tagEdit, snapPrompt]);
+  }, [refreshKey]);
 
   /* 切库：每个库**自带一套标签 / 标签分组 / 分组 / 快照**（存在库自己的 `.AssetManager/lib.db`），
      所以当前库一换，侧栏这几份清单必须重拉 —— 否则会看到上一个库的数据，
@@ -1927,7 +1932,7 @@ export default function App() {
            逐项进度与收尾走 move://progress / move://done 两个事件。
            跨盘复制几百 MB 时界面仍然能滚动、能看缩略图。 */
         await source.moveStart(paths, target, policy);
-        setBatch({ done: 0, total: paths.length, label: "正在移动" });
+        setProgress("batch", { done: 0, total: paths.length, label: "正在移动" });
       } catch (e) {
         toast(String(e), true);
       } finally {
@@ -1967,7 +1972,7 @@ export default function App() {
         if (paths.length <= CHUNK) {
           removed = await source.remove(paths);
         } else {
-          setBatch({ done: 0, total: paths.length });
+          setProgress("batch", { done: 0, total: paths.length });
           for (let i = 0; i < paths.length; i += CHUNK) {
             const part = paths.slice(i, i + CHUNK);
             try {
@@ -1975,16 +1980,16 @@ export default function App() {
             } catch (e) {
               toast(`第 ${i + 1}~${i + part.length} 个没删成`, true, String(e));
             }
-            setBatch({ done: Math.min(paths.length, i + part.length), total: paths.length });
+            setProgress("batch", { done: Math.min(paths.length, i + part.length), total: paths.length });
           }
-          setBatch(null);
+          clearProgress("batch");
         }
         toast(`已移到回收站 ${removed} 项`, false, "在左侧「回收站」里可以还原");
         setSelected(null);
         setSelectedIds(new Set());
         setRefreshKey((k) => k + 1);
       } catch (e) {
-        setBatch(null);
+        clearProgress("batch");
         toast(String(e), true);
       } finally {
         setBusy(false);
@@ -2384,6 +2389,14 @@ export default function App() {
   /** 交给系统拖放的那一趟的完整载荷：拖回窗口时恢复自己的浮层用
       （`dragPaths/dragIds/dragPreview` 只够 `am://drag-end` 投放，不够画缩略图）。 */
   const handoffPayload = useRef<DragPayload | null>(null);
+  /** 最后一条 `am://drag-move` 的时间戳：push 通道（Rust 16ms 一拍）刚喂过坐标，
+      下面的 `cursorPosition` 轮询就在这 50ms 里让路，别再重复要一次位置。 */
+  const lastDragPushAt = useRef(-Infinity);
+  /** 启动 `cursorPosition` 轮询（实现在下面挂载一次的 effect 里）。
+      轮询以前是整窗生命周期的常驻 rAF，每帧空跑；现在只在"有 handoff 载荷"期间跑：
+      交接给系统拖放时踢一脚，载荷清空（drag-end / drop）后下一帧自己停。
+      用 ref 而不是 state：它只是命令通道，变了也不该触发重渲。 */
+  const startCursorPoll = useRef<() => void>(() => {});
 
   /** 这趟拖出窗口了 → 交给系统拖放（CF_HDROP，出口是磁盘原文件） */
   const handoffToSystem = useCallback(
@@ -2393,6 +2406,8 @@ export default function App() {
          整段时间都算"拖拽中"，落地那一刻补发的 click 必须还在闸里 */
       armDragGate();
       handoffPayload.current = d;
+      /* 载荷挂上了 → 踢一脚跟手轮询：它现在只在载荷期间排帧（以前是整窗常驻空跑） */
+      startCursorPoll.current();
       /* 告诉各处的「文件拖入」监听：这一批是**自己拖出去的**，别当成新文件导入 */
       setOwnDrag(d.paths);
       dragPaths.current = d.paths;
@@ -2511,10 +2526,12 @@ export default function App() {
     });
     /* Rust 轮询线程推的光标位置（16ms 一拍）：OLE 拖放期间 WebView 收不到
        mousemove、drag-over 又不持续，这是跟手的主力通道（坐标已是窗口内 CSS 像素）。
-       与 cursorPosition 轮询、drag-over 事件互为备份，都是幂等操作。 */
+       与 cursorPosition 轮询、drag-over 事件互为备份，都是幂等操作。
+       顺手记下时间戳：轮询发现 push 刚喂过坐标就跳过自己那趟 IPC（见下面的 poll）。 */
     const offMove = onAppEvent<{ x: number; y: number }>("am://drag-move", (p) => {
       const mine = handoffPayload.current;
       if (!mine) return;
+      lastDragPushAt.current = performance.now();
       if (ghostEl.current) moveGhost(p.x, p.y);
       else showGhost(mine, p.x, p.y);
       markDropAt(p.x, p.y);
@@ -2589,16 +2606,30 @@ export default function App() {
      又不持续（实测浮层恢复了也不跟手），改用 `cursorPosition()` 轮询 ——
      它走 Win32 GetCursorPos，不依赖消息循环，系统拖放期间照样每帧都拿得到。
      窗口原点缓存一次：拖拽进行时鼠标被拖放占用，窗口不可能移动。
-     「还在拖」的判定就是 `handoffPayload` 非空（drop / drag-end / 取消都会清）。 */
+     「还在拖」的判定就是 `handoffPayload` 非空（drop / drag-end / 取消都会清）——
+     所以排帧也只在载荷期间进行：交接给系统拖放时由 `startCursorPoll` 踢一脚，
+     载荷一清（drag-end / webview drop）下一帧自己停。以前是无条件常驻 rAF，
+     窗口整个生命周期每帧都要醒一次空跑。 */
   useEffect(() => {
     if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
     let dead = false;
     let raf = 0;
+    /** 是否已排帧：`start` 幂等，一帧只会排一次 */
+    let running = false;
     let busy = false;
     let origin: { x: number; y: number; scale: number } | null = null;
     const poll = () => {
+      /* 载荷没了就停排帧：接下来只剩收尾动作，没有跟手要做；下一次交接会再踢一脚 */
+      if (dead || !handoffPayload.current) {
+        running = false;
+        return;
+      }
       raf = requestAnimationFrame(poll);
-      if (dead || busy || !handoffPayload.current) return;
+      if (busy) return;
+      /* push 通道刚喂过坐标（16ms 一拍），这一帧就不必再要一次 cursorPosition：
+         两条通道做的是同一件事，系统拖放期间那是每帧 2 次 IPC + 2 次强制布局的重复劳动。
+         50ms 没 push 就恢复轮询 —— 真机上 push 可能丢事件，兜底不能断。 */
+      if (performance.now() - lastDragPushAt.current < DRAG_PUSH_QUIET_MS) return;
       busy = true;
       void (async () => {
         try {
@@ -2632,9 +2663,17 @@ export default function App() {
         }
       })();
     };
-    raf = requestAnimationFrame(poll);
+    /* 由 handoffToSystem 调用（挂载时不自动开始：没有载荷时它什么都没得跟） */
+    const start = () => {
+      if (dead || running) return;
+      running = true;
+      raf = requestAnimationFrame(poll);
+    };
+    startCursorPoll.current = start;
     return () => {
       dead = true;
+      running = false;
+      startCursorPoll.current = () => {};
       cancelAnimationFrame(raf);
     };
   }, [showGhost, hideGhost, moveGhost, markDropAt]);
@@ -4159,40 +4198,9 @@ export default function App() {
               </div>
             )}
 
-            {batch ? (
-              <div className="progress-bar" role="status" aria-live="polite">
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.round((batch.done / Math.max(1, batch.total)) * 100)}%` }}
-                  />
-                </div>
-                <span className="progress-text">
-                  {batch.label ?? "批量处理"} · {fmtNum(batch.done)} / {fmtNum(batch.total)}
-                </span>
-              </div>
-            ) : scan.active ? (
-              <div className="progress-bar scan-strip" role="status" aria-live="polite">
-                <div className="progress-track">
-                  <div className="progress-fill indet" />
-                </div>
-                <span className="progress-text">
-                  正在扫描 · {fmtNum(scan.dirs)} 目录 / {fmtNum(scan.files)} 文件
-                </span>
-                <button className="btn btn-tiny" onClick={() => void cancelScan()}>
-                  取消
-                </button>
-              </div>
-            ) : (
-              loading && (
-                <div className="progress-bar" role="status" aria-live="polite">
-                  <div className="progress-track">
-                    <div className="progress-fill indet" />
-                  </div>
-                  <span className="progress-text">载入中 · 已取 {items.length} 项</span>
-                </div>
-              )
-            )}
+            {/* 底部进度（批量 > 扫描 > 载入中）：只订阅 `lib/progressStore`，
+                App 不再因为进度事件（100–120ms 一拍）整树重渲。 */}
+            <ProgressStrip loading={loading} loadedCount={items.length} onCancelScan={cancelScan} />
           </div>
         </div>
 
@@ -4427,6 +4435,61 @@ export default function App() {
       <HoverHintHost />
 
     </div>
+  );
+}
+
+/* -------------------------------------------------------------- 底部进度条 */
+
+/**
+ * 底部进度条 —— 批量 > 扫描 > 载入中，三条互斥（优先级 / 文案 / DOM 与拆出前逐字一致）。
+ *
+ * 为什么单独成组件：进度事件 100–120ms 一拍，挂在 App state 上会带着整棵树重渲；
+ * 这里只订阅 `lib/progressStore`，App 不再为进度重渲（原因见该文件头）。
+ * `loading` / `loadedCount` 是 App 自己的 state —— 它们变时 App 本来就重渲，直接传下来。
+ */
+function ProgressStrip({
+  loading,
+  loadedCount,
+  onCancelScan,
+}: {
+  loading: boolean;
+  loadedCount: number;
+  onCancelScan: () => void;
+}) {
+  const { scan, batch } = useProgress();
+  return batch ? (
+    <div className="progress-bar" role="status" aria-live="polite">
+      <div className="progress-track">
+        <div
+          className="progress-fill"
+          style={{ width: `${Math.round((batch.done / Math.max(1, batch.total)) * 100)}%` }}
+        />
+      </div>
+      <span className="progress-text">
+        {batch.label ?? "批量处理"} · {fmtNum(batch.done)} / {fmtNum(batch.total)}
+      </span>
+    </div>
+  ) : scan.active ? (
+    <div className="progress-bar scan-strip" role="status" aria-live="polite">
+      <div className="progress-track">
+        <div className="progress-fill indet" />
+      </div>
+      <span className="progress-text">
+        正在扫描 · {fmtNum(scan.dirs)} 目录 / {fmtNum(scan.files)} 文件
+      </span>
+      <button className="btn btn-tiny" onClick={() => void onCancelScan()}>
+        取消
+      </button>
+    </div>
+  ) : (
+    loading && (
+      <div className="progress-bar" role="status" aria-live="polite">
+        <div className="progress-track">
+          <div className="progress-fill indet" />
+        </div>
+        <span className="progress-text">载入中 · 已取 {loadedCount} 项</span>
+      </div>
+    )
   );
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "assetmanager"
-version = "0.4.27"
+version = "0.4.28"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"
@@ -43,5 +43,8 @@ sha2 = "0.10"
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+# 0.4.28：`s` → `3`。这个软件的热路径是图片解码/编码（libwebp / zune-jpeg）、xxh3 哈希和 SQLite，
+# 体积优化(`s`)在这些循环上会明显减速；发布版安装包本来就只有 ~5 MB，值得换性能。
+# 代价：exe/安装包略大、全量编译更久（LTO 下两者本来就慢，不影响日常增量）。
+opt-level = 3
 strip = true

@@ -82,7 +82,11 @@ pub fn maybe_migrate(reg: &mut Connection, data_dir: &Path) -> Res<()> {
             params![rel, lib_id],
         )
         .map_err(|e| e.to_string())?;
-        let _ = db::rebuild_fts(&lib);
+        /* 重建 FTS 失败不打断迁移，但要留一行日志 —— 否则用户只会觉得"搜索坏了"，
+           排查时毫无线索（WORKLOG §10.5 里已经有一堆"静默失败"的教训）。 */
+        if let Err(e) = db::rebuild_fts(&lib) {
+            eprintln!("[AssetManager] 库 {root} 的全文索引重建失败（搜索可能不全）：{e}");
+        }
     }
 
     // 拆完把老表清掉：不清的话下次启动会再拆一遍（而且会把已删素材复活）

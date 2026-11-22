@@ -223,11 +223,11 @@ where
                     stats.skipped += 1;
                     continue;
                 }
-                // 用 canonicalize 解掉 junction / symlink 后判重，防止无限递归
-                if let Ok(real) = std::fs::canonicalize(&path) {
-                    if !visited.insert(real) {
-                        continue;
-                    }
+                /* 去重不再 `canonicalize`：Windows 上它要为路径的每一段开句柄（百微秒级），
+                   10 万目录就是好几秒；而 junction / symlink 在上一行已被 `is_reparse` 挡掉，
+                   普通目录在一棵树里不可能以两个路径出现。这里只按路径判重（一次 Hash）。 */
+                if !visited.insert(path.clone()) {
+                    continue;
                 }
                 let dm = meta
                     .modified()
@@ -242,13 +242,13 @@ where
                     stats.skipped += 1;
                     continue;
                 }
-                files.push(entry_of(&path, &meta, opts.read_dims));
-                if formats::kind_of(&formats::lower_ext(
-                    &path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
-                )) == KIND_IMAGE
-                {
+                /* 统计张数直接复用 `entry_of` 算好的 kind —— 以前这里把文件名分配 +
+                   `lower_ext` + `kind_of` 又跑了一遍，只为一条计数。 */
+                let entry = entry_of(&path, &meta, opts.read_dims);
+                if entry.kind == KIND_IMAGE {
                     stats.images += 1;
                 }
+                files.push(entry);
             }
         }
 

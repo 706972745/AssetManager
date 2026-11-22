@@ -341,6 +341,9 @@ export function AssetView({
      用 ref 转存回调，避免 onPrefetch 每次重建都把定时器重置一遍。 */
   const prefetchRef = useRef(onPrefetch);
   prefetchRef.current = onPrefetch;
+  /* 上一次预取请求的签名。小幅滚动会反复落在同一批图上，签名没变就别再发 ——
+     后端收到后要为每个 id 抢一次全局锁、逐个查盘，还会起线程（旧线程靠 epoch 自杀）。 */
+  const prefetchSig = useRef("");
   useEffect(() => {
     if (!prefetchRef.current) return;
     const top = scrollTop - vh * 1.2;
@@ -353,7 +356,11 @@ export function AssetView({
             r.y + r.h >= top && r.y <= bottom && PREVIEWABLE_KINDS.has(r.a.kind)
         )
         .map((r) => r.a.id);
-      if (ids.length) prefetchRef.current?.(ids, px);
+      if (!ids.length) return;
+      const sig = `${px}|${ids.length}|${ids[0]}|${ids[ids.length - 1]}`;
+      if (prefetchSig.current === sig) return;
+      prefetchSig.current = sig;
+      prefetchRef.current?.(ids, px);
     }, 220);
     return () => window.clearTimeout(t);
   }, [layout, scrollTop, vh, sizeIndex]);
@@ -679,4 +686,18 @@ const Tile = memo(function Tile({
       {!noPreview && <span className="tile-name">{a.name}</span>}
     </div>
   );
-});
+}, (p, n) =>
+  /* 值语义比较：`layout` 每次重算都会给**同一张图生成新的 Rect 对象**，默认浅比较会把
+     整屏瓦片全判成"变了"（翻一页 / 点一颗星就重渲 ~40 个瓦片）。这里只比值：
+     `rect.a` 的引用（`patchAsset` 对没改动的素材保持原对象）+ 四个坐标 + 其余已稳定 props。
+     回调由上层 `cbRef`/`useCallback` 固定引用，是常量，所以不参与比较。 */
+  p.rect.a === n.rect.a &&
+  p.rect.x === n.rect.x &&
+  p.rect.y === n.rect.y &&
+  p.rect.w === n.rect.w &&
+  p.rect.h === n.rect.h &&
+  p.selected === n.selected &&
+  p.failed === n.failed &&
+  p.src === n.src &&
+  p.scrollInside === n.scrollInside
+);
