@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { DirNode, Source } from "../types";
 import { onAppEvent } from "../data/source";
 import { Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 /**
  * 设置 → 素材库（照 FontManager 的「字体库文件夹」重排，0.1.35）。
@@ -42,6 +43,7 @@ export function LibraryCard({
   onRemoveLib: (path: string) => Promise<void>;
   onToast: (msg: string, err?: boolean, detail?: string) => void;
 }) {
+  const t = useT();
   const [roots, setRoots] = useState<DirNode[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -77,13 +79,13 @@ export function LibraryCard({
     try {
       const r = await source.exportLibraryZip(root);
       if (!r) return; // 用户取消了选文件夹
-      const names = r.parts.map((p) => p.name).join("、");
+      const names = r.parts.map((p) => p.name).join(t("app.common.list_sep"));
       const notes: string[] = [];
-      if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
-      if (r.skipped > 0) notes.push(`${r.skipped} 张不在原位，没进包`);
-      if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
+      if (r.parts.length > 1) notes.push(t("app.toast.zip_parts", { count: r.parts.length }));
+      if (r.skipped > 0) notes.push(t("app.toast.zip_skipped", { count: r.skipped }));
+      if (r.oversized > 0) notes.push(t("app.toast.zip_oversized", { count: r.oversized }));
       onToast(
-        `已导出 ${r.files} 张 → ${names}`,
+        t("app.toast.zip_exported", { count: r.files, names }),
         r.skipped > 0 || r.oversized > 0,
         notes.join(" · ") || undefined
       );
@@ -98,7 +100,7 @@ export function LibraryCard({
   const exportBtn = (root: string) => (
     <button
       className="lib-act"
-      title="把这个素材库导出成一个 zip（文件名带年月日，只导这一个库）"
+      title={t("lib.exportZipTip")}
       disabled={busy || exporting !== null || !source.desktop}
       onClick={() => void doExport(root)}
     >
@@ -117,7 +119,7 @@ export function LibraryCard({
     setDataExporting(root);
     try {
       const p = await source.exportUserdata(root);
-      onToast("已导出这个库的用户数据", false, p);
+      onToast(t("settings.toast.userdataExported"), false, p);
     } catch (e) {
       onToast(String(e), true);
     } finally {
@@ -128,7 +130,7 @@ export function LibraryCard({
   const dataBtn = (root: string) => (
     <button
       className="lib-act"
-      title="只导出这个库的用户数据（评分 / 备注 / 标签 / 分组，.D-AssetManager）"
+      title={t("lib.exportDataTip")}
       disabled={busy || dataExporting !== null || !source.desktop}
       onClick={() => void doExportData(root)}
     >
@@ -169,17 +171,17 @@ export function LibraryCard({
   const full = count >= max;
 
   const addTitle = !source.desktop
-    ? "浏览器预览下不能添加素材库"
+    ? t("lib.addDesktopOnly")
     : full
-      ? `最多 ${max} 个素材库，先移除一个`
-      : "选一个文件夹加入素材库（只建索引，不动里面的文件）";
+      ? t("lib.addFull", { max })
+      : t("lib.addTip");
 
   return (
     <div className="lib-card">
       <div className="lib-head">
         {/* 不再重复写一遍「素材库」：页面标题已经是它了，标题叠标题只会让人以为有两块 */}
         <span className="lib-sub">
-          {count}/{max} 个 · 只建索引，不移动、不复制原文件
+          {t("lib.count", { count, max })}
         </span>
         <span className="grow" />
         {/* 虚线按钮 = 「这里还能放东西」（照 FM 的 .settings-add-folder 数值）。
@@ -201,14 +203,14 @@ export function LibraryCard({
           }}
         >
           <Icon name="plus" size={12} stroke={1.7} />
-          添加文件夹…
+          {t("lib.addFolder")}
         </button>
       </div>
 
-      {err && <div className="lib-note">{`读取素材库失败：${err}`}</div>}
+      {err && <div className="lib-note">{t("lib.readFailed", { error: err })}</div>}
 
       {!roots ? (
-        <div className="lib-note">正在读取…</div>
+        <div className="lib-note">{t("lib.loading")}</div>
       ) : (
         <>
           {builtinRows.length > 0 && (
@@ -217,21 +219,23 @@ export function LibraryCard({
                 <div
                   className="lib-row is-builtin"
                   key={r.id}
-                  title="内置库不能移除：删了索引，截图就凭空消失了（文件还在磁盘上）"
+                  title={t("lib.builtinTip")}
                 >
                   <Icon name="folder" size={14} stroke={1.5} className="lib-row-icon" />
                   <span className="lib-path mono" title={r.path}>
                     {r.path}
                   </span>
-                  <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
-                  <span className="lib-tag" title="软件自己的截图目录：不占名额，不可移除">
-                    内置
+                  <span className="lib-cnt">
+                    {t("app.common.n_assets", { count: r.assetCnt.toLocaleString() })}
+                  </span>
+                  <span className="lib-tag" title={t("lib.builtinChipTip")}>
+                    {t("tree.builtin_chip")}
                   </span>
                   {dataBtn(r.path)}
                   {exportBtn(r.path)}
                   <button
                     className="lib-act lib-open"
-                    title="在资源管理器中打开"
+                    title={t("app.menu.reveal_open")}
                     onClick={() => void source.reveal(r.path).catch((e) => onToast(String(e), true))}
                   >
                     <Icon name="reveal" size={12} stroke={1.5} />
@@ -249,19 +253,21 @@ export function LibraryCard({
                   <span className="lib-path mono" title={r.path}>
                     {r.path}
                   </span>
-                  <span className="lib-cnt">{r.assetCnt.toLocaleString()} 个素材</span>
+                  <span className="lib-cnt">
+                    {t("app.common.n_assets", { count: r.assetCnt.toLocaleString() })}
+                  </span>
                   {dataBtn(r.path)}
                   {exportBtn(r.path)}
                   <button
                     className="lib-act lib-open"
-                    title="在资源管理器中打开"
+                    title={t("app.menu.reveal_open")}
                     onClick={() => void source.reveal(r.path).catch((e) => onToast(String(e), true))}
                   >
                     <Icon name="reveal" size={12} stroke={1.5} />
                   </button>
                   <button
                     className="lib-act is-danger"
-                    title="从素材库移除（磁盘文件不动）"
+                    title={t("lib.removeTip")}
                     disabled={busy}
                     onClick={async () => {
                       setBusy(true);
@@ -289,11 +295,8 @@ export function LibraryCard({
               {/* 措辞必须区分「一个库都没有」和「只有内置库」：全新安装时上面那条
                   内置截图库是存在的，写「还没有素材库」会让用户觉得界面在胡说。
                   `count` 仍然只数用户的库（内置库不占 3 个名额，这条判定不能动）。 */}
-              <div className="lib-empty-title">还没有添加自己的素材库</div>
-              <div className="lib-empty-hint">
-                点右上角「添加文件夹…」选一个放素材的目录。软件只读它、建索引，
-                不会动里面的文件。上面的内置截图库是软件自己的，不算在你的 3 个名额里。
-              </div>
+              <div className="lib-empty-title">{t("lib.emptyTitle")}</div>
+              <div className="lib-empty-hint">{t("lib.emptyHint")}</div>
             </div>
           )}
         </>
@@ -301,9 +304,7 @@ export function LibraryCard({
 
       <div className="lib-foot">
         <Icon name="info" size={12} stroke={1.5} />
-        <span>
-          素材库是「你的文件夹在哪」；索引与缩略图缓存存在别处（见「缓存与索引」页），两者不是一回事。
-        </span>
+        <span>{t("lib.foot")}</span>
       </div>
     </div>
   );

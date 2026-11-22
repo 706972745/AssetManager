@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { onAppEvent, source } from "../data/source";
 import type { Prefs, UpdateInfo, UpdateProgress } from "../types";
 import { Icon } from "./ui";
+import { useT, type TKey } from "../lib/i18n";
 
 /**
  * 设置 → 更新（0.1.35）。
@@ -29,27 +30,33 @@ import { Icon } from "./ui";
  * 后端会回报 `autoInstallBlocked`，不再只有一句含糊的「这一版没有可直接安装的包」——
  * 用户以为「点了下载」却什么都没发生时，界面要能直接说清是哪条闸没过。
  */
-const BLOCKED_HINT: Record<string, string> = {
-  system: "这一版是按系统范围安装的（MSI），静默升级要过一次 UAC。点「打开发布页」下载新的安装包手动装一次。",
-  portable: "这份是从文件夹里直接跑的副本，没有安装记录，覆盖不了自己。点「打开发布页」下载新的安装包。",
-  "no-asset": "这一版的发布里没有 NSIS 安装包，只能手动下载。",
-  "no-digest": "发布里没给安装包的校验值，为了不装来路不明的文件，不做静默安装。点「打开发布页」手动下载。",
+const BLOCKED_HINT: Record<string, TKey> = {
+  system: "update.blockedSystem",
+  portable: "update.blockedPortable",
+  "no-asset": "update.blockedNoAsset",
+  "no-digest": "update.blockedNoDigest",
 };
 
-const blockedHint = (code: string): string =>
-  BLOCKED_HINT[code] ?? "这一版不能自动安装，点「打开发布页」手动下载。";
+type Tr = (key: TKey, vars?: Record<string, string | number>) => string;
+
+const blockedHint = (code: string, t: Tr): string =>
+  t(BLOCKED_HINT[code] ?? "update.blockedGeneric");
 
 /** 进度条下面那行字：三个阶段各一句话 */
-function progressText(p: UpdateProgress): string {
+function progressText(p: UpdateProgress, t: Tr): string {
   if (p.phase === "download") {
     const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
     return p.total > 0
-      ? `正在下载安装包 ${p.percent}%（${mb(p.received)} / ${mb(p.total)} MB）`
-      : "正在下载安装包…";
+      ? t("update.downloadingPct", {
+          percent: p.percent,
+          received: mb(p.received),
+          total: mb(p.total),
+        })
+      : t("update.downloading");
   }
-  if (p.phase === "verify") return "正在校验安装包…";
-  if (p.phase === "ready") return "安装包已就绪，正在安装…";
-  return "出错了";
+  if (p.phase === "verify") return t("update.verifying");
+  if (p.phase === "ready") return t("update.installing");
+  return t("update.error");
 }
 
 export function UpdateSection({
@@ -61,6 +68,7 @@ export function UpdateSection({
   onPrefs: (p: Partial<Prefs>) => void;
   onToast: (m: string, err?: boolean, d?: string) => void;
 }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,19 +103,23 @@ export function UpdateSection({
         return next;
       } catch (e) {
         setError(String(e));
-        if (!silent) onToast("检查更新失败", true, String(e));
+        if (!silent) onToast(t("update.toast.checkFailed"), true, String(e));
         return null;
       } finally {
         setBusy(false);
       }
     },
-    [onPrefs, onToast]
+    [onPrefs, onToast, t]
   );
 
   const skip = () => {
     if (!info) return;
     onPrefs({ updateSkipped: info.latest });
-    onToast(`已跳过 ${info.latest}`, false, "下一版出来还会提醒；想提前看就去项目主页");
+    onToast(
+      t("update.toast.skipped", { version: info.latest }),
+      false,
+      t("update.toast.skippedDetail")
+    );
   };
 
   /**
@@ -129,15 +141,15 @@ export function UpdateSection({
       const cur = info?.hasUpdate ? info : await check(true, true);
       if (!cur) return;
       if (!cur.hasUpdate) {
-        onToast("已是最新版本");
+        onToast(t("update.toast.latest"));
         return;
       }
       if (!cur.canAutoInstall) {
         /* 不擅自把浏览器顶到前面（用户以为「点了下载」结果跳走很莫名其妙）。
            说清是哪条闸没过，按钮自己会变成「打开发布页」，跳不跳由用户决定。 */
-        const why = blockedHint(cur.autoInstallBlocked);
+        const why = blockedHint(cur.autoInstallBlocked, t);
         setError(why);
-        onToast("这一版不能自动安装", true, why);
+        onToast(t("update.toast.cannotAutoInstall"), true, why);
         return;
       }
       setProgress({ phase: "download", received: 0, total: 0, percent: 0 });
@@ -153,7 +165,7 @@ export function UpdateSection({
     } catch (e) {
       setProgress(null);
       setError(String(e));
-      onToast("下载或安装失败", true, String(e));
+      onToast(t("update.toast.failed"), true, String(e));
     } finally {
       installLock.current = false;
     }
@@ -170,11 +182,11 @@ export function UpdateSection({
         <button
           className="btn"
           disabled={busy || downloading || !desktop}
-          title={desktop ? "问一次 GitHub 上最新的版本号" : "浏览器预览下不可用"}
+          title={desktop ? t("update.checkTip") : t("update.desktopOnlyTip")}
           onClick={() => void check(true)}
         >
           <Icon name="refresh" size={12} stroke={1.6} className={busy ? "set-update-spin" : undefined} />
-          {busy ? "检查中…" : "立即检查"}
+          {busy ? t("update.checking") : t("update.checkNow")}
         </button>
 
         {/* 「下载并安装」常驻（不要求先点检查）。只有查到新版但这一版装不了
@@ -184,11 +196,11 @@ export function UpdateSection({
           <button
             className="btn"
             disabled={busy || !desktop}
-            title={desktop ? "下载这一版的安装包并安装（会重启软件）" : "浏览器预览下不可用"}
+            title={desktop ? t("update.installTip") : t("update.desktopOnlyTip")}
             onClick={() => void downloadAndInstall()}
           >
             <Icon name={manualOnly ? "link" : "download"} size={12} stroke={1.6} />
-            {manualOnly ? "打开发布页" : "下载并安装"}
+            {manualOnly ? t("update.openRelease") : t("update.downloadInstall")}
           </button>
         )}
 
@@ -198,10 +210,10 @@ export function UpdateSection({
             disabled={!desktop}
             /* 禁用时必须说"为什么不能点"，不能还写着"这一版不再提醒" ——
                三个按钮的 disabled 态文案口径要一致。 */
-            title={desktop ? "这一版不再提醒（下一版出来还会提醒）" : "浏览器预览下不可用"}
+            title={desktop ? t("update.skipTip") : t("update.desktopOnlyTip")}
             onClick={skip}
           >
-            跳过这个版本
+            {t("update.skip")}
           </button>
         )}
       </div>
@@ -214,12 +226,12 @@ export function UpdateSection({
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={progress.percent}
-            aria-label="安装包下载进度"
+            aria-label={t("update.progressAria")}
           >
             {/* 下限 2%：刚点下的时候也要看得见有东西在动，0% 的空槽看起来像没反应 */}
             <i style={{ width: `${Math.max(progress.percent, 2)}%` }} />
           </div>
-          <div className="set-update-line">{progressText(progress)}</div>
+          <div className="set-update-line">{progressText(progress, t)}</div>
         </div>
       )}
 
@@ -228,24 +240,22 @@ export function UpdateSection({
       ) : info ? (
         <div className="set-update-line">
           {info.hasUpdate
-            ? `发现新版本 ${info.latest}（当前 ${info.current}）`
-            : `已是最新（${info.current}）`}
+            ? t("update.found", { version: info.latest, current: info.current })
+            : t("update.upToDate", { current: info.current })}
           {/* 只有 raw / cdn 兜底时才说明「没有发布说明」：正常路径不用画蛇添足 */}
-          {info.hasUpdate && info.source !== "github" ? " · 这一版没有发布说明" : ""}
-          {skipped ? " · 这一版你选择了跳过，不再提醒" : ""}
+          {info.hasUpdate && info.source !== "github" ? t("update.noNotes") : ""}
+          {skipped ? t("update.skippedNote") : ""}
         </div>
       ) : (
-        <div className="set-update-line">还没查过。点「立即检查」问一次远端版本号。</div>
+        <div className="set-update-line">{t("update.neverChecked")}</div>
       )}
 
       {/* 有新版但这一版装不了：说清楚是为什么，别让用户以为按钮坏了 */}
       {manualOnly && info && !error && (
-        <div className="set-update-line">{blockedHint(info.autoInstallBlocked)}</div>
+        <div className="set-update-line">{blockedHint(info.autoInstallBlocked, t)}</div>
       )}
 
-      {!desktop && (
-        <div className="set-update-line">浏览器预览下不能检查更新，也下载不了安装包 —— 请用桌面版。</div>
-      )}
+      {!desktop && <div className="set-update-line">{t("update.desktopOnly")}</div>}
 
       {/* 发布说明是纯文本（后端已截断到 4000 字）：用 <pre> 保换行，
           绝不当 HTML 渲染 —— 那是远端内容，渲染进来就是一个注入面。 */}

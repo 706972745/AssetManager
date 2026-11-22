@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { TagCount, TagGroup } from "../types";
 import { autoTagLabel, colorClass, groupAutoTags, isAutoTag } from "../lib/tags";
 import { DOCK_LEAVE_DELAY, getActiveDock, setActiveDock, useDockHover } from "../lib/dockHover";
 import { setDockOpen, useDockOpen } from "../lib/dockOpen";
 import { BlinkCaretInput, Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 /**
  * 侧栏「标签」停靠面板。
@@ -44,7 +45,7 @@ function saveClosed(s: Set<string>) {
   }
 }
 
-export function TagDock({
+function TagDockImpl({
   tags,
   groups,
   autoTags,
@@ -75,6 +76,7 @@ export function TagDock({
   /** 有弹层开着（编辑卡 / 批量打标签 / 右键菜单）→ 面板必须留在原地 */
   hold?: boolean;
 }) {
+  const t = useT();
   const [pinned, setPinned] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(loadClosed);
   const [autoOpen, setAutoOpen] = useState(false);
@@ -192,26 +194,26 @@ export function TagDock({
   const sortIn = (list: TagCount[]) =>
     [...list].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
-  const row = (t: TagCount, isAuto = false) => (
+  const row = (tag: TagCount, isAuto = false) => (
     <div
-      key={`${isAuto ? "auto:" : ""}${t.name}`}
-      className={`tag-row ${isAuto ? "auto" : ""} ${colorClass(t.color)} ${
-        activeTag === t.name ? "sel" : ""
+      key={`${isAuto ? "auto:" : ""}${tag.name}`}
+      className={`tag-row ${isAuto ? "auto" : ""} ${colorClass(tag.color)} ${
+        activeTag === tag.name ? "sel" : ""
       }`}
       role="option"
       tabIndex={0}
-      aria-selected={activeTag === t.name}
+      aria-selected={activeTag === tag.name}
       /* 拖放落点：把素材拖到标签上 = 打这个标签（只建关联，文件不动）。
          自动标签**不是落点** —— 它由规则推导，手工塞不进去。 */
-      data-drop-tag={isAuto ? undefined : t.name}
-      onClick={() => onPickTag(activeTag === t.name ? null : t.name)}
+      data-drop-tag={isAuto ? undefined : tag.name}
+      onClick={() => onPickTag(activeTag === tag.name ? null : tag.name)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onPickTag(activeTag === t.name ? null : t.name);
+          onPickTag(activeTag === tag.name ? null : tag.name);
         } else if (e.key === "F2" && !isAuto) {
           e.preventDefault();
-          onEditTag(t.name);
+          onEditTag(tag.name);
         }
       }}
       onContextMenu={(e) => {
@@ -219,26 +221,26 @@ export function TagDock({
         e.stopPropagation();
         /* 自动标签也要能弹（只是卡片里只读）—— 以前这里 `if (!isAuto)` 直接吞掉，
            用户右键自动标签时"什么都没发生"，报的就是「标签右击菜单打不开」。 */
-        onTagMenu(t.name, e.clientX, e.clientY);
+        onTagMenu(tag.name, e.clientX, e.clientY);
       }}
-      title={`${isAuto ? autoTagLabel(t.name) : t.name} · ${t.count}`}
+      title={`${isAuto ? autoTagLabel(tag.name) : tag.name} · ${tag.count}`}
     >
       <span className="tag-dot" aria-hidden />
-      <span className="tag-row-name">{isAuto ? autoTagLabel(t.name) : t.name}</span>
+      <span className="tag-row-name">{isAuto ? autoTagLabel(tag.name) : tag.name}</span>
       {!isAuto && (
         <button
           className="tag-row-more"
-          title="改颜色 / 分组 / 改名"
-          aria-label={`编辑标签 ${t.name}`}
+          title={t("dock.tags.more_tip")}
+          aria-label={t("dock.tags.edit_aria", { name: tag.name })}
           onClick={(e) => {
             e.stopPropagation();
-            onEditTag(t.name);
+            onEditTag(tag.name);
           }}
         >
           <Icon name="more" size={12} stroke={2} />
         </button>
       )}
-      <span className="tag-row-count tabular">{t.count}</span>
+      <span className="tag-row-count tabular">{tag.count}</span>
     </div>
   );
 
@@ -257,8 +259,8 @@ export function TagDock({
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        aria-label={showingPinned ? "取消固定并收起标签面板" : "固定展开标签面板"}
-        title={showingPinned ? "已固定：点一下取消固定" : "点一下固定展开（不点则随鼠标离开自动收起）"}
+        aria-label={showingPinned ? t("dock.head_aria_unpin", { panel: t("dock.tags.panel") }) : t("dock.head_aria_pin", { panel: t("dock.tags.panel") })}
+        title={showingPinned ? t("dock.head_title_pinned") : t("dock.head_title")}
         /* 拖放到**头部** = 投到当前筛选的标签（没有就投第一个）：用户瞄准的就是
            「标签」这一条，展开后指针多半停在头部上，头部不接的话松手毫无反应。 */
         data-drop-head="tags"
@@ -271,10 +273,10 @@ export function TagDock({
         }}
       >
         <Icon name="tag" size={15} stroke={1.5} className="tag-dock-icon" />
-        <span className="tag-dock-title">标签</span>
+        <span className="tag-dock-title">{t("dock.tags.panel")}</span>
         {/* 0.4.24：同分组 —— 点标签只在**当前素材库**里筛，标出范围省得用户猜 */}
-        <span className="tag-dock-scope" title="只在当前素材库里生效；当前库里没有时才临时放宽到全部库">
-          仅当前库
+        <span className="tag-dock-scope" title={t("dock.scope_tip")}>
+          {t("dock.scope")}
         </span>
 
         {/* 收起时也要看得见「正在按什么筛」，否则状态被藏起来 */}
@@ -288,8 +290,8 @@ export function TagDock({
               className="tag-dock-filter-x"
               role="button"
               tabIndex={0}
-              aria-label="清除标签筛选"
-              title="清除筛选"
+              aria-label={t("dock.tags.clear_filter_aria")}
+              title={t("dock.clear_filter")}
               onClick={(e) => {
                 e.stopPropagation();
                 onPickTag(null);
@@ -314,32 +316,32 @@ export function TagDock({
           <BlinkCaretInput
             value={q}
             onChange={setQ}
-            placeholder="过滤标签…"
+            placeholder={t("dock.tags.filter_placeholder")}
             fieldClassName="tag-dock-search"
-            ariaLabel="过滤标签"
+            ariaLabel={t("dock.tags.filter_aria")}
             onFocus={() => setFocusHold(true)}
             onBlur={() => setFocusHold(false)}
           />
           <button
             className={`tag-tool-btn ${showingPinned ? "on" : ""}`}
-            title={showingPinned ? "取消固定（收起后随鼠标离开自动收起）" : "固定展开（鼠标离开也不收）"}
+            title={showingPinned ? t("dock.pin_tip_on") : t("dock.pin_tip_off")}
             aria-pressed={showingPinned}
             onClick={togglePin}
           >
             <span className="tag-pin-dot" aria-hidden />
-            <span>{showingPinned ? "已固定" : "固定"}</span>
+            <span>{showingPinned ? t("dock.pinned") : t("dock.pin")}</span>
           </button>
           <button
             className="tag-tool-btn"
-            title="新建标签"
-            aria-label="新建标签"
+            title={t("dock.tags.new")}
+            aria-label={t("dock.tags.new")}
             onClick={() => {
               setAdding((v) => !v);
               setDraft("");
             }}
           >
             <Icon name="plus" size={11} stroke={1.8} />
-            <span>标签</span>
+            <span>{t("dock.tags.new_short")}</span>
           </button>
         </div>
 
@@ -348,8 +350,8 @@ export function TagDock({
             <BlinkCaretInput
               value={draft}
               onChange={setDraft}
-              placeholder="新标签名，回车建立"
-              ariaLabel="新标签名"
+              placeholder={t("dock.tags.new_placeholder")}
+              ariaLabel={t("dock.tags.new_aria")}
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitTag();
                 else if (e.key === "Escape") {
@@ -363,7 +365,7 @@ export function TagDock({
           </div>
         )}
 
-        <div className="tag-dock-scroll scroll-hot" role="listbox" aria-label="标签">
+        <div className="tag-dock-scroll scroll-hot" role="listbox" aria-label={t("dock.tags.panel")}>
           {groups.map((g) => {
             if (needle && !hit(g.name) && shownTags.filter((t) => t.group === g.name).length === 0)
               return null;
@@ -388,8 +390,8 @@ export function TagDock({
                   <span className="tag-row-name">{g.name}</span>
                   <button
                     className="tag-row-more"
-                    title="改颜色 / 改名 / 解散分组"
-                    aria-label={`编辑分组 ${g.name}`}
+                    title={t("dock.group_more_tip")}
+                    aria-label={t("dock.group_edit_aria", { name: g.name })}
                     onClick={(e) => {
                       e.stopPropagation();
                       onEditGroup(g.name);
@@ -403,20 +405,21 @@ export function TagDock({
                 </div>
                 {!isClosed && items.map((t) => row(t))}
                 {!isClosed && items.length === 0 && (
-                  <div className="tag-dock-empty tag-dock-empty-inline">空分组。右键任意标签 → 分组</div>
+                  <div className="tag-dock-empty tag-dock-empty-inline">{t("dock.tags.group_empty")}</div>
                 )}
               </div>
             );
           })}
 
           {groups.length > 0 && ungrouped.length > 0 && (
-            <div className="tag-subheading">未分组</div>
+            <div className="tag-subheading">{t("dock.tags.ungrouped")}</div>
           )}
           {ungrouped.map((t) => row(t))}
 
           {tags.length === 0 && shownAuto.length === 0 && (
             <div className="tag-dock-empty">
-              还没有标签。选中素材后按 <b>T</b> 打标签；打完会出现在这里，可以上色、分组。
+              {t("dock.tags.empty_lead")} <b>T</b>{" "}
+              {t("dock.tags.empty_tail")}
             </div>
           )}
 
@@ -425,12 +428,12 @@ export function TagDock({
               <div
                 className="tag-subheading tag-subheading-toggle"
                 onClick={() => setAutoOpen((v) => !v)}
-                title="按原始文件的格式 / 类型 / 像素 / 比例 / 体积自动推导，不能手工修改"
+                title={t("dock.tags.auto_tip")}
               >
                 <span className={`tag-caret ${autoOpen ? "" : "closed"}`}>
                   <Icon name="chevron" size={9} stroke={2} />
                 </span>
-                自动标签
+                {t("dock.tags.auto")}
               </div>
               {autoOpen &&
                 groupAutoTags(shownAuto).map((sec) => (
@@ -443,10 +446,14 @@ export function TagDock({
           )}
 
           {needle && shownTags.length === 0 && shownAuto.length === 0 && (
-            <div className="tag-dock-empty">没有匹配「{q.trim()}」的标签</div>
+            <div className="tag-dock-empty">{t("dock.tags.no_match", { q: q.trim() })}</div>
           )}
         </div>
       </div>
     </div>
   );
 }
+
+/* memo 边界：标签清单只在 `tags` / `tagGroups` / `autoTags` / 选中标签 / hold 变化时重渲。
+   App 侧的回调全是 `useEvent`（引用恒定），所以这里的浅比较才有效。 */
+export const TagDock = memo(TagDockImpl);

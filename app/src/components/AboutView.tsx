@@ -1,11 +1,19 @@
 /**
- * 关于（**照 FontManager 的 AboutView 版式**，owner 2026-11-17）。
+ * 关于（**照 FontManager 的 AboutView 版式与动效**，owner 2026-11-17）。
  *
  * 结构：图标 → 名称 → 版本 + 许可 → 一句话说明 → 能力网格 → 技术栈 chips → 链接卡。
+ * 动效（2026-11-22 照 FM 逐项搬，曲线直接用 `design/springs.ts` 的同一条）：
+ *   · 整页淡入 + 上移 16px（spring）
+ *   · 图标轻微缩放淡入、版本行延迟淡入
+ *   · 功能格 8px 上移 + 40ms 交错（springSoft）
+ *   · 链接卡 10px 上移 + 交错、hover 抬 1px、按下透明度 0.96
+ * 颜色一律用 AM 令牌（强调色是 --ui-accent 紫，不是 FM 的蓝）。
+ *
  * 链接（照 FontManager 两张卡的做法）：**本项目仓库** + **GitHub 主页**。
  * 两张卡图标必须不同 —— 都画 GitHub 字形会看着像重复（FontManager 那条注释同理）。
  * 插件仓库还没建，等建了再加第三张（用拼图图标）。
  */
+import { motion, useReducedMotion } from "motion/react";
 import {
   ArrowUpRight,
   FolderOpen,
@@ -18,17 +26,19 @@ import {
   UserRound,
   Zap,
 } from "lucide-react";
+import { spring, springSnappy, springSoft, staggerDelay } from "../design/springs";
+import { useT, type TKey } from "../lib/i18n";
 
-const FEATURES: { label: string; icon: React.ReactNode }[] = [
-  { label: "索引式素材库：不搬动原文件", icon: <FolderOpen size={14} strokeWidth={1.5} /> },
-  { label: "缩略图预热与惰性加载", icon: <Zap size={14} strokeWidth={1.5} /> },
-  { label: "标签：手动 + 自动 + 分组配色", icon: <Tags size={14} strokeWidth={1.5} /> },
-  { label: "评分 / 备注 / 来源 URL", icon: <Star size={14} strokeWidth={1.5} /> },
-  { label: "快照：记住你选中的那批", icon: <Sparkles size={14} strokeWidth={1.5} /> },
-  { label: "灵感板：无限画布拼图", icon: <ImageIcon size={14} strokeWidth={1.5} /> },
-  { label: "命令面板与全套快捷键", icon: <Search size={14} strokeWidth={1.5} /> },
-  { label: "拖出即用：PS / 资源管理器", icon: <ArrowUpRight size={14} strokeWidth={1.5} /> },
-  { label: "本地优先，不上传任何文件", icon: <ShieldCheck size={14} strokeWidth={1.5} /> },
+const FEATURES: { key: TKey; icon: React.ReactNode }[] = [
+  { key: "about.featIndex", icon: <FolderOpen size={14} strokeWidth={1.5} /> },
+  { key: "about.featWarmup", icon: <Zap size={14} strokeWidth={1.5} /> },
+  { key: "about.featTags", icon: <Tags size={14} strokeWidth={1.5} /> },
+  { key: "about.featRating", icon: <Star size={14} strokeWidth={1.5} /> },
+  { key: "about.featSnapshot", icon: <Sparkles size={14} strokeWidth={1.5} /> },
+  { key: "about.featBoard", icon: <ImageIcon size={14} strokeWidth={1.5} /> },
+  { key: "about.featPalette", icon: <Search size={14} strokeWidth={1.5} /> },
+  { key: "about.featDrag", icon: <ArrowUpRight size={14} strokeWidth={1.5} /> },
+  { key: "about.featLocal", icon: <ShieldCheck size={14} strokeWidth={1.5} /> },
 ];
 
 const STACK = ["Tauri v2", "Rust", "React 18", "TypeScript", "Vite", "SQLite"];
@@ -43,10 +53,19 @@ function GithubGlyph() {
 }
 
 interface LinkItem {
-  label: string;
+  key: TKey;
   sub: string;
   url: string;
   icon: React.ReactNode;
+}
+
+/**
+ * 是否关掉动效：系统偏好（motion 自带）或软件内开关（App 写到 html[data-motion]）。
+ * 两条都看 —— 和分页里 CSS 令牌的「双轨」口径一致（tokens.css §减少动效）。
+ */
+function useNoMotion(): boolean {
+  const system = useReducedMotion() === true;
+  return system || document.documentElement.dataset.motion === "reduced";
 }
 
 const REPO = "https://github.com/706972745/AssetManager";
@@ -54,13 +73,13 @@ const HOME = "https://github.com/706972745";
 
 const LINKS: LinkItem[] = [
   {
-    label: "本项目仓库",
+    key: "about.repo",
     sub: "github.com/706972745/AssetManager",
     url: REPO,
     icon: <GithubGlyph />,
   },
   {
-    label: "GitHub 主页",
+    key: "about.githubHome",
     sub: "github.com/706972745",
     url: HOME,
     // 头像图标：和上面那张的 GitHub 字形拉开，一眼能分清"项目"和"人"
@@ -68,49 +87,98 @@ const LINKS: LinkItem[] = [
   },
 ];
 
-export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
+/** 一张链接卡：入场交错 + hover 抬 1px + 按下透明度 0.96（FM 同款）。 */
+function LinkCard({
+  item,
+  delay,
+  onOpenUrl,
+}: {
+  item: LinkItem;
+  delay: number;
+  onOpenUrl: (url: string) => void;
+}) {
+  const t = useT();
+  const reduce = useNoMotion();
   return (
-    <div className="about-view">
-      <img className="about-icon" src="/icon.png" alt="" draggable={false} />
-      <h1 className="about-name">AssetManager</h1>
-      <div className="about-version">
-        {`版本 ${__APP_VERSION__} · GPL-3.0`}
-      </div>
-      <p className="about-desc">
-        索引式素材管理器：只读你的文件夹、不搬动原始文件。找图、打标签、拼灵感板、拖进设计软件，
-        都在一个窗口里完成。
-      </p>
+    <motion.button
+      type="button"
+      className="about-link"
+      onClick={() => onOpenUrl(item.url)}
+      initial={reduce ? false : { opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={reduce ? { duration: 0 } : { ...springSoft, delay }}
+      whileHover={reduce ? undefined : { y: -1, transition: spring }}
+      whileTap={reduce ? undefined : { opacity: 0.96, transition: springSnappy }}
+    >
+      <span className="about-link-icon">{item.icon}</span>
+      <span className="about-link-label">{t(item.key)}</span>
+      <ArrowUpRight size={14} strokeWidth={1.5} className="about-link-arrow" />
+      <span className="about-link-sub mono">{item.sub}</span>
+    </motion.button>
+  );
+}
 
-      <div className="about-features" aria-label="能力一览">
-        {FEATURES.map((f) => (
-          <div key={f.label} className="about-feature">
+export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
+  const t = useT();
+  const reduce = useNoMotion();
+  return (
+    <motion.div
+      className="about-view"
+      initial={reduce ? false : { opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={reduce ? { duration: 0 } : spring}
+    >
+      <motion.img
+        className="about-icon"
+        src="/icon.png"
+        alt=""
+        draggable={false}
+        initial={reduce ? false : { opacity: 0, scale: 0.92 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={reduce ? { duration: 0 } : { ...springSoft, delay: 0.04 }}
+      />
+      <h1 className="about-name">AssetManager</h1>
+      <motion.div
+        className="about-version tabular"
+        initial={reduce ? false : { opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={reduce ? { duration: 0 } : { ...springSoft, delay: 0.08 }}
+      >
+        {t("about.version", { version: __APP_VERSION__ })}
+      </motion.div>
+      <p className="about-desc">{t("about.desc")}</p>
+
+      <div className="about-features" aria-label={t("about.featuresAria")}>
+        {FEATURES.map((f, i) => (
+          <motion.div
+            key={f.key}
+            className="about-feature"
+            initial={reduce ? false : { opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={reduce ? { duration: 0 } : { ...springSoft, delay: staggerDelay(i) }}
+          >
             <span className="about-feature-icon">{f.icon}</span>
-            <span className="about-feature-text">{f.label}</span>
-          </div>
+            <span className="about-feature-text">{t(f.key)}</span>
+          </motion.div>
         ))}
       </div>
 
-      <div className="about-stack" aria-label="技术栈">
+      <div className="about-stack" aria-label={t("about.stackAria")}>
         {STACK.map((s) => (
-          <span key={s} className="about-chip">
+          <span key={s} className="about-chip tabular">
             {s}
           </span>
         ))}
       </div>
 
       <div className="about-section">
-        <span className="about-section-title">本项目仓库</span>
+        <span className="about-section-title">{t("about.sectionTitle")}</span>
       </div>
       <div className="about-links">
-        {LINKS.map((l) => (
-          <button key={l.url} className="about-link" onClick={() => onOpenUrl(l.url)}>
-            <span className="about-link-icon">{l.icon}</span>
-            <span className="about-link-label">{l.label}</span>
-            <ArrowUpRight size={14} strokeWidth={1.5} className="about-link-arrow" />
-            <span className="about-link-sub mono">{l.sub}</span>
-          </button>
+        {LINKS.map((l, i) => (
+          <LinkCard key={l.url} item={l} delay={staggerDelay(i)} onOpenUrl={onOpenUrl} />
         ))}
       </div>
-    </div>
+    </motion.div>
   );
 }

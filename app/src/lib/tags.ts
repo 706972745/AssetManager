@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 /**
  * 标签的前端小工具：命名空间判定 + 「不再建议」否决名单。
  *
@@ -47,13 +49,24 @@ export function autoTagLabel(tag: string): string {
   return v.toUpperCase();
 }
 
-/** 维度中文名（侧栏分组用） */
+/** 维度名（侧栏分组用）。**取值时才翻译**：这些表是模块级常量，导入时语言还没定，
+ *  用 getter 才能在切换语言后跟着变（消费方本来就会因 useT 重渲染）。 */
 export const NS_LABEL: Record<string, string> = {
-  fmt: "格式",
-  kind: "类型",
-  place: "像素",
-  orient: "比例",
-  size: "体积",
+  get fmt() {
+    return t("tag.ns_fmt");
+  },
+  get kind() {
+    return t("tag.ns_kind");
+  },
+  get place() {
+    return t("tag.ns_place");
+  },
+  get orient() {
+    return t("tag.ns_orient");
+  },
+  get size() {
+    return t("tag.ns_size");
+  },
 };
 
 /* ------------------------------- 颜色 ------------------------------- */
@@ -80,21 +93,50 @@ export const TAG_COLORS = [
 
 export type TagColor = (typeof TAG_COLORS)[number];
 
+/* 色名直接复用顶栏筛选菜单的翻译（同一批词，没必要各存一份） */
 export const COLOR_LABEL: Record<string, string> = {
-  gray: "灰",
-  red: "红",
-  orange: "橙",
-  amber: "琥珀",
-  yellow: "黄",
-  green: "绿",
-  teal: "青",
-  blue: "蓝",
-  indigo: "靛",
-  violet: "紫",
-  pink: "粉",
-  brown: "棕",
-  black: "黑",
-  white: "白",
+  get gray() {
+    return t("topbar.color_gray");
+  },
+  get red() {
+    return t("topbar.color_red");
+  },
+  get orange() {
+    return t("topbar.color_orange");
+  },
+  get amber() {
+    return t("topbar.color_amber");
+  },
+  get yellow() {
+    return t("topbar.color_yellow");
+  },
+  get green() {
+    return t("topbar.color_green");
+  },
+  get teal() {
+    return t("topbar.color_teal");
+  },
+  get blue() {
+    return t("topbar.color_blue");
+  },
+  get indigo() {
+    return t("topbar.color_indigo");
+  },
+  get violet() {
+    return t("topbar.color_violet");
+  },
+  get pink() {
+    return t("topbar.color_pink");
+  },
+  get brown() {
+    return t("topbar.color_brown");
+  },
+  get black() {
+    return t("topbar.color_black");
+  },
+  get white() {
+    return t("topbar.color_white");
+  },
 };
 
 /** 颜色键 → class（`tc-blue` 这类，CSS 里负责把 `--tc` / `--tcs` 设好） */
@@ -124,23 +166,23 @@ export function groupAutoTags<T extends { name: string; count: number }>(list: T
 }
 
 /**
- * 色桶（T24）的中文名 + 色值。**必须和 Rust `core/src/palette.rs` 的 BUCKETS 逐字一致**，
+ * 色桶（T24）的名字 + 色值。**必须和 Rust `core/src/palette.rs` 的 BUCKETS 逐字一致**，
  * 顺序也一致（侧栏按这个顺序排，用户看到的顺序才是稳定的）。
  * 色值只用于侧栏那个小圆点与详情里的名字，不参与筛选。
  */
 export const COLOR_BUCKETS: { key: string; label: string; hex: string }[] = [
-  { key: "red", label: "红", hex: "#d94a45" },
-  { key: "orange", label: "橙", hex: "#e08a3c" },
-  { key: "amber", label: "琥珀", hex: "#d9b23f" },
-  { key: "yellow", label: "黄", hex: "#e3d94a" },
-  { key: "green", label: "绿", hex: "#4f9d5d" },
-  { key: "teal", label: "青", hex: "#3f9d94" },
-  { key: "blue", label: "蓝", hex: "#4a7fd9" },
-  { key: "indigo", label: "靛", hex: "#5b5fd0" },
-  { key: "violet", label: "紫", hex: "#8a5bc9" },
-  { key: "pink", label: "粉", hex: "#cf5b94" },
-  { key: "brown", label: "棕", hex: "#8a6647" },
-  { key: "black", label: "黑", hex: "#1d1d1b" },
-  { key: "gray", label: "灰", hex: "#8b8b86" },
-  { key: "white", label: "白", hex: "#ececea" },
+  { key: "red", get label() { return t("topbar.color_red"); }, hex: "#d94a45" },
+  { key: "orange", get label() { return t("topbar.color_orange"); }, hex: "#e08a3c" },
+  { key: "amber", get label() { return t("topbar.color_amber"); }, hex: "#d9b23f" },
+  { key: "yellow", get label() { return t("topbar.color_yellow"); }, hex: "#e3d94a" },
+  { key: "green", get label() { return t("topbar.color_green"); }, hex: "#4f9d5d" },
+  { key: "teal", get label() { return t("topbar.color_teal"); }, hex: "#3f9d94" },
+  { key: "blue", get label() { return t("topbar.color_blue"); }, hex: "#4a7fd9" },
+  { key: "indigo", get label() { return t("topbar.color_indigo"); }, hex: "#5b5fd0" },
+  { key: "violet", get label() { return t("topbar.color_violet"); }, hex: "#8a5bc9" },
+  { key: "pink", get label() { return t("topbar.color_pink"); }, hex: "#cf5b94" },
+  { key: "brown", get label() { return t("topbar.color_brown"); }, hex: "#8a6647" },
+  { key: "black", get label() { return t("topbar.color_black"); }, hex: "#1d1d1b" },
+  { key: "gray", get label() { return t("topbar.color_gray"); }, hex: "#8b8b86" },
+  { key: "white", get label() { return t("topbar.color_white"); }, hex: "#ececea" },
 ];

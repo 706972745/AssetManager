@@ -105,7 +105,12 @@ export function AssetView({
   const pickTile = useCallback((a: Asset, mods: { ctrl: boolean; shift: boolean }) => {
     cbRef.current.onPick(a, mods);
   }, []);
-  const openTile = useCallback((a: Asset) => cbRef.current.onOpen(a), []);
+  const openTile = useCallback((a: Asset) => {
+    /* 拖拽刚结束的 400ms 内浏览器可能补一个 dblclick，框选过程同理：
+       手还在拖动时不当成「打开大图」，避免拖完素材突然弹灯箱。 */
+    if (fired.current || marquee.current) return;
+    cbRef.current.onOpen(a);
+  }, []);
   const failTile = useCallback((id: number) => {
     setFailed((s) => {
       if (s.has(id)) return s; // 同一个 id 重复失败不重建 Set
@@ -618,7 +623,11 @@ const Tile = memo(function Tile({
       data-asset-id={a.id}
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h, transform: "translateZ(0)" }}
       onClick={(e) => onPick(a, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
-      onDoubleClick={() => onOpen(a)}
+      onDoubleClick={(e) => {
+        /* 多选手势（Ctrl / Shift + 双击）不打开大图：否则选着选着就弹灯箱 */
+        if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+        onOpen(a);
+      }}
       onMouseEnter={(e) => onHintEnter(a, e.clientX, e.clientY)}
       onMouseMove={(e) => onHintMove(e.clientX, e.clientY)}
       onMouseLeave={onHintLeave}

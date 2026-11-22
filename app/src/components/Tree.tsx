@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, type ReactNode } from "react";
+import { memo, useRef, useEffect, useState, type ReactNode } from "react";
 import { motion } from "motion/react";
 import type { DirNode, Source } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
@@ -120,7 +120,7 @@ interface Props {
   holdOpen?: boolean;
 }
 
-export function Tree({
+function TreeImpl({
   source,
   selected,
   onSelect,
@@ -825,3 +825,8 @@ export function Tree({
       </aside>
   );
 }
+
+/* memo 边界：选中 / 筛选 / 列表变化时侧栏不需要重渲（重渲的是网格）。
+   props 的稳定化在 App 里（回调用 `useEvent`、三块面板用 `useMemo`）；
+   这里只做浅比较。别改回 `export function`，那会悄悄把优化丢掉。 */
+export const Tree = memo(TreeImpl);

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { scrimFade, springSnappy } from "../design/springs";
 import { fmtSize, type Asset, type DupGroup, type RefItem, type RenameItem, type RenameRule, type SimilarPair, type Source } from "../types";
 import { Icon } from "./ui";
+import { useT, type TKey } from "../lib/i18n";
 
 /**
  * 工具面板：**重复检测 / 丢失的引用 / 批量重命名** 三件事共用一个浮层。
@@ -17,10 +18,10 @@ import { Icon } from "./ui";
 
 export type ToolTab = "dupes" | "refs" | "rename";
 
-const TABS: { key: ToolTab; label: string }[] = [
-  { key: "dupes", label: "重复素材" },
-  { key: "refs", label: "丢失的引用" },
-  { key: "rename", label: "批量重命名" },
+const TABS: { key: ToolTab; label: TKey }[] = [
+  { key: "dupes", label: "tools.tabDupes" },
+  { key: "refs", label: "tools.tabRefs" },
+  { key: "rename", label: "tools.tabRename" },
 ];
 
 const EMPTY_RULE: RenameRule = {
@@ -57,6 +58,7 @@ export function Tools({
   onPick: (ids: number[]) => void;
   thumbSrc: (a: Asset, px: number) => string;
 }) {
+  const t = useT();
   const [cur, setCur] = useState<ToolTab>(tab);
   /* `useState` 只在首次挂载取一次 `tab`，而这个面板是常驻挂载的（`open` 只控制显隐）——
      不补这个同步，从批量条点「批量重命名」打开的还是上次那个页签，
@@ -127,14 +129,16 @@ export function Tools({
         setGroups(g);
         setLeft(rest);
         onToast(
-          g.length ? `找到 ${g.length} 组重复` : "没有发现完全相同的文件",
+          g.length ? t("tools.toast.dupesFound", { count: g.length }) : t("tools.toast.dupesNone"),
           false,
-          rest > 0 ? `还有 ${rest} 个文件没算哈希，再点一次继续` : undefined
+          rest > 0 ? t("tools.toast.dupesLeft", { count: rest }) : undefined
         );
       } else {
         const list = await source.dupesSimilar(6, 200);
         setSimilar(list);
-        onToast(list.length ? `找到 ${list.length} 对相似素材` : "没有发现相似素材");
+        onToast(
+          list.length ? t("tools.toast.similarFound", { count: list.length }) : t("tools.toast.similarNone")
+        );
       }
     } catch (e) {
       onToast(String(e), true);
@@ -147,11 +151,15 @@ export function Tools({
     setBusy(true);
     try {
       const [n, refs] = await source.refsScan(120);
-      const [t, m] = await source.refsSummary();
-      setRefSum([t, m]);
+      const [t2, m] = await source.refsSummary();
+      setRefSum([t2, m]);
       const list = await source.brokenRefs(300);
       setBroken(list);
-      onToast(`扫了 ${n} 个工程文件，记下 ${refs} 条引用`, false, `全库 ${t} 条引用，其中 ${m} 条找不到文件`);
+      onToast(
+        t("tools.toast.refsScanned", { files: n, refs }),
+        false,
+        t("tools.toast.refsDetail", { total: t2, missing: m })
+      );
     } catch (e) {
       onToast(String(e), true);
     } finally {
@@ -161,14 +169,19 @@ export function Tools({
 
   const makePlan = async () => {
     if (!ids.length) {
-      onToast("先在网格里选中要改名的素材", true);
+      onToast(t("tools.toast.renameNeedSelection"), true);
       return;
     }
     try {
       const rows = await source.renamePlan(ids, rule);
       setPlan(rows);
       const bad = rows.filter((r) => r.error).length;
-      onToast(`预览 ${rows.length} 条${bad ? `，其中 ${bad} 条不能改` : ""}`, bad > 0);
+      onToast(
+        bad
+          ? t("tools.toast.renamePreviewBad", { count: rows.length, bad })
+          : t("tools.toast.renamePreview", { count: rows.length }),
+        bad > 0
+      );
     } catch (e) {
       onToast(String(e), true);
     }
@@ -181,9 +194,11 @@ export function Tools({
     try {
       const res = await source.renameApply(ok.map((r) => [r.id, r.newName]));
       onToast(
-        `改名 ${res.ok} 个${res.errors.length ? `，失败 ${res.errors.length} 个` : ""}`,
+        res.errors.length
+          ? t("tools.toast.renamedSome", { ok: res.ok, bad: res.errors.length })
+          : t("tools.toast.renamed", { ok: res.ok }),
         res.errors.length > 0,
-        res.errors.slice(0, 3).join("；")
+        res.errors.slice(0, 3).join(t("app.common.list_sep"))
       );
       setPlan([]);
     } catch (e) {
@@ -217,7 +232,7 @@ export function Tools({
             className="tool-panel"
             role="dialog"
             aria-modal="true"
-            aria-label="工具"
+            aria-label={t("tools.title")}
             onMouseDown={(e) => e.stopPropagation()}
             initial={{ opacity: 0, scale: 0.97, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -226,17 +241,17 @@ export function Tools({
           >
             <header className="tool-head">
               <div className="tool-tabs">
-                {TABS.map((t) => (
+                {TABS.map((tb) => (
                   <button
-                    key={t.key}
-                    className={`tool-tab ${cur === t.key ? "on" : ""}`}
-                    onClick={() => setCur(t.key)}
+                    key={tb.key}
+                    className={`tool-tab ${cur === tb.key ? "on" : ""}`}
+                    onClick={() => setCur(tb.key)}
                   >
-                    {t.label}
+                    {t(tb.label)}
                   </button>
                 ))}
               </div>
-              <button className="kb-close" onClick={onClose} title="关闭（Esc）">
+              <button className="kb-close" onClick={onClose} title={t("tools.closeEsc")}>
                 Esc
               </button>
             </header>
@@ -250,42 +265,46 @@ export function Tools({
                         className={`tool-seg-btn ${mode === "exact" ? "on" : ""}`}
                         onClick={() => setMode("exact")}
                       >
-                        完全相同
+                        {t("tools.exact")}
                       </button>
                       <button
                         className={`tool-seg-btn ${mode === "similar" ? "on" : ""}`}
                         onClick={() => setMode("similar")}
                       >
-                        相似
+                        {t("tools.similar")}
                       </button>
                     </div>
                     <button className="btn btn-accent" disabled={busy} onClick={() => void scanDupes()}>
-                      {busy ? "扫描中…" : mode === "exact" ? "扫描重复文件" : "找相似素材"}
+                      {busy
+                        ? t("tools.scanning")
+                        : mode === "exact"
+                          ? t("tools.scanExact")
+                          : t("tools.scanSimilar")}
                     </button>
                     {mode === "exact" && left > 0 && (
-                      <span className="tool-note">还有 {left} 个文件没算指纹，再点一次继续</span>
+                      <span className="tool-note">{t("tools.leftNote", { count: left })}</span>
                     )}
                     {mode === "exact" && groups.length > 0 && (
                       <span className="tool-note">
-                        {groups.length} 组 · 可省 {fmtSize(dupStats)}
+                        {t("tools.groupStats", { count: groups.length, size: fmtSize(dupStats) })}
                       </span>
                     )}
                   </div>
 
                   {groups.length === 0 && similar.length === 0 && (
                     <p className="tool-empty">
-                      {mode === "exact"
-                        ? "按文件内容比对（改名也能认出来）。照片库第一次扫会慢一些，之后只算新增的。"
-                        : "按缩略图指纹比对：同一张图的不同尺寸 / 不同格式 / 轻度过调都会被抓出来。"}
+                      {mode === "exact" ? t("tools.emptyExact") : t("tools.emptySimilar")}
                     </p>
                   )}
 
                   {groups.map((g) => (
                     <div className="dup-group" key={g.hash}>
                       <div className="dup-head">
-                        <span className="mono">{g.ids.length} 份 · {fmtSize(g.size)}</span>
+                        <span className="mono">
+                          {t("tools.dupHead", { count: g.ids.length, size: fmtSize(g.size) })}
+                        </span>
                         <button className="link-btn" onClick={() => onPick(g.ids)}>
-                          在网格中查看
+                          {t("tools.viewInGrid")}
                         </button>
                       </div>
                       <div className="dup-files">
@@ -314,9 +333,9 @@ export function Tools({
                         );
                       })}
                       <div className="dup-pair-meta">
-                        <span className="mono">差异 {p.dist}</span>
+                        <span className="mono">{t("tools.distance", { dist: p.dist })}</span>
                         <button className="link-btn" onClick={() => onPick([p.a, p.b])}>
-                          查看
+                          {t("tools.view")}
                         </button>
                       </div>
                     </div>
@@ -328,17 +347,14 @@ export function Tools({
                 <>
                   <div className="tool-bar">
                     <button className="btn btn-accent" disabled={busy} onClick={() => void scanRefs()}>
-                      {busy ? "扫描中…" : "扫描工程文件引用"}
+                      {busy ? t("tools.scanning") : t("tools.scanRefs")}
                     </button>
                     <span className="tool-note">
-                      全库 {refSum[0]} 条引用 · 丢失 {refSum[1]} 条
+                      {t("tools.refsStats", { total: refSum[0], missing: refSum[1] })}
                     </span>
                   </div>
                   {broken.length === 0 ? (
-                    <p className="tool-empty">
-                      扫的是 psd / ai / blend / max / c4d 这类工程文件里写的外部素材路径。
-                      没扫过的时候这里是空的，点上面的按钮跑一轮。
-                    </p>
+                    <p className="tool-empty">{t("tools.emptyRefs")}</p>
                   ) : (
                     broken.map((r, i) => (
                       <div className="ref-row" key={`${r.srcId}-${r.dstPath}-${i}`}>
@@ -359,31 +375,31 @@ export function Tools({
                 <>
                   <div className="tool-bar">
                     <span className="tool-note">
-                      已选 {ids.length} 项
-                      {ids.length === 0 && "（先在网格里选中素材）"}
+                      {t("tools.selectedCount", { count: ids.length })}
+                      {ids.length === 0 && t("tools.selectInGrid")}
                     </span>
                   </div>
                   <div className="rn-form">
                     <label>
-                      <span>查找</span>
+                      <span>{t("tools.find")}</span>
                       <input
                         className="mono"
                         value={rule.find}
-                        placeholder="原名字里的片段"
+                        placeholder={t("tools.findPlaceholder")}
                         onChange={(e) => setRule({ ...rule, find: e.target.value })}
                       />
                     </label>
                     <label>
-                      <span>替换为</span>
+                      <span>{t("tools.replace")}</span>
                       <input
                         className="mono"
                         value={rule.replace}
-                        placeholder="留空 = 删掉"
+                        placeholder={t("tools.replacePlaceholder")}
                         onChange={(e) => setRule({ ...rule, replace: e.target.value })}
                       />
                     </label>
                     <label>
-                      <span>前缀</span>
+                      <span>{t("tools.prefix")}</span>
                       <input
                         className="mono"
                         value={rule.prefix}
@@ -391,7 +407,7 @@ export function Tools({
                       />
                     </label>
                     <label>
-                      <span>后缀</span>
+                      <span>{t("tools.suffix")}</span>
                       <input
                         className="mono"
                         value={rule.suffix}
@@ -399,18 +415,18 @@ export function Tools({
                       />
                     </label>
                     <label>
-                      <span>编号起始</span>
+                      <span>{t("tools.numberFrom")}</span>
                       <input
                         className="mono"
                         type="number"
                         min={0}
                         value={rule.numberFrom}
-                        title="0 = 不加序号"
+                        title={t("tools.numberFromTip")}
                         onChange={(e) => setRule({ ...rule, numberFrom: Number(e.target.value) || 0 })}
                       />
                     </label>
                     <label>
-                      <span>补零位数</span>
+                      <span>{t("tools.numberPad")}</span>
                       <input
                         className="mono"
                         type="number"
@@ -428,7 +444,7 @@ export function Tools({
                         checked={rule.keepExt}
                         onChange={(e) => setRule({ ...rule, keepExt: e.target.checked })}
                       />
-                      保留扩展名
+                      {t("tools.keepExt")}
                     </label>
                     <label className="chk">
                       <input
@@ -436,7 +452,7 @@ export function Tools({
                         checked={rule.lower}
                         onChange={(e) => setRule({ ...rule, lower: e.target.checked, upper: false })}
                       />
-                      转小写
+                      {t("tools.lower")}
                     </label>
                     <label className="chk">
                       <input
@@ -444,17 +460,17 @@ export function Tools({
                         checked={rule.upper}
                         onChange={(e) => setRule({ ...rule, upper: e.target.checked, lower: false })}
                       />
-                      转大写
+                      {t("tools.upper")}
                     </label>
                     <button className="btn" disabled={busy || !ids.length} onClick={() => void makePlan()}>
-                      生成预览
+                      {t("tools.makePlan")}
                     </button>
                     <button
                       className="btn btn-accent"
                       disabled={busy || plan.filter((r) => !r.error).length === 0}
                       onClick={() => void applyPlan()}
                     >
-                      执行改名
+                      {t("tools.applyPlan")}
                     </button>
                   </div>
 
@@ -462,9 +478,9 @@ export function Tools({
                     <table className="rn-table">
                       <thead>
                         <tr>
-                          <th>原名</th>
-                          <th>新名</th>
-                          <th>状态</th>
+                          <th>{t("tools.oldName")}</th>
+                          <th>{t("tools.newName")}</th>
+                          <th>{t("tools.status")}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -472,7 +488,7 @@ export function Tools({
                           <tr key={r.id} className={r.error ? "bad" : ""}>
                             <td className="mono">{r.oldName}</td>
                             <td className="mono">{r.newName}</td>
-                            <td>{r.error || "可改"}</td>
+                            <td>{r.error || t("tools.ok")}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -482,9 +498,7 @@ export function Tools({
               )}
             </div>
 
-            <footer className="kb-foot">
-              删除一律进回收站；重命名走同一套文件操作日志，可以 Ctrl+Z 撤销。
-            </footer>
+            <footer className="kb-foot">{t("tools.footer")}</footer>
           </motion.div>
         </motion.div>
       )}

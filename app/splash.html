@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AssetManager</title>
+    <!--
+      启动页（照 FontManager 2.1.7 的 splash 版式移植）。
+
+      这一页的全部价值是「100ms 内出首帧」：不引 React、不引 @fontsource、
+      不引任何 CSS 框架 —— 一个 1120×760 的静态外壳 + 一个不到 4KB 的 ts 脚本。
+      样式全部内联，避免多一次阻塞式请求（这一页只活一两秒）。
+
+      主题：深色是默认（与 AM 主界面的 `:root` 同一条口径），浅色走
+      `@media (prefers-color-scheme: light)`；用户在设置里选过 light/dark 时，
+      由 `src/splash.ts` 读 localStorage（`am.prefs.v1`）后写 `data-theme` 覆盖。
+      **刻意不在这个文件里放内联 <script> 提前写 data-theme**：与 FM 保持同一结构，
+      首帧靠 @media 自己生效，脚本只负责「用户强制」那一种。
+
+      注意：窗口是 `transparent:true` 的，html/body 必须留空背景，圆角才不会被
+      一层黑底吃掉。
+    -->
+    <style>
+      /* ── 深色（默认）：:root 上就是深色值，没读到任何偏好时也不会闪白 ── */
+      :root {
+        --sp-bg: radial-gradient(
+          120% 100% at 50% -18%,
+          #1a1a19 0%,
+          #121211 52%,
+          #0b0b0a 100%
+        );
+        --sp-border: rgba(255, 255, 255, 0.07);
+        /* 品牌紫（与 AM 的 --ui-accent #A78BFA 同一色相）：淡、铺得开，
+           不在深色底上压出一块脏的深紫 */
+        --sp-glow: radial-gradient(
+          circle,
+          rgba(167, 139, 250, 0.24) 0%,
+          rgba(167, 139, 250, 0) 72%
+        );
+        --sp-bar: linear-gradient(90deg, #7c5cf0, #a78bfa);
+        --sp-tile-shadow:
+          0 28px 60px -16px rgba(0, 0, 0, 0.62),
+          0 0 0 2px rgba(255, 255, 255, 0.12);
+        --sp-name: rgba(255, 255, 255, 0.93);
+        --sp-track: rgba(255, 255, 255, 0.1);
+        --sp-status: rgba(255, 255, 255, 0.44);
+        --sp-note: rgba(255, 255, 255, 0.28);
+        --sp-foot: rgba(255, 255, 255, 0.26);
+      }
+
+      /* ── 跟系统：与主界面 `prefers-color-scheme` 的判断同源 ── */
+      @media (prefers-color-scheme: light) {
+        :root {
+          --sp-bg: radial-gradient(
+            120% 100% at 50% -18%,
+            #ffffff 0%,
+            #fdfdff 55%,
+            #f5f4fa 100%
+          );
+          --sp-border: rgba(20, 20, 32, 0.07);
+          --sp-glow: radial-gradient(
+            circle,
+            rgba(108, 63, 209, 0.12) 0%,
+            rgba(108, 63, 209, 0) 60%
+          );
+          --sp-bar: linear-gradient(90deg, #6c3fd1, #8b5cf6);
+          --sp-tile-shadow:
+            0 28px 60px -20px rgba(20, 20, 32, 0.13),
+            0 0 0 2px #e7e5ef;
+          --sp-name: #16161a;
+          --sp-track: #cdcad8;
+          --sp-status: #6f6f7a;
+          --sp-note: #97979f;
+          --sp-foot: #9a9aa4;
+        }
+      }
+
+      /* ── 用户强制：属性选择器排在 @media 之后，永远压过系统 ── */
+      :root[data-theme="dark"] {
+        --sp-bg: radial-gradient(
+          120% 100% at 50% -18%,
+          #1a1a19 0%,
+          #121211 52%,
+          #0b0b0a 100%
+        );
+        --sp-border: rgba(255, 255, 255, 0.07);
+        --sp-glow: radial-gradient(
+          circle,
+          rgba(167, 139, 250, 0.24) 0%,
+          rgba(167, 139, 250, 0) 72%
+        );
+        --sp-bar: linear-gradient(90deg, #7c5cf0, #a78bfa);
+        --sp-tile-shadow:
+          0 28px 60px -16px rgba(0, 0, 0, 0.62),
+          0 0 0 2px rgba(255, 255, 255, 0.12);
+        --sp-name: rgba(255, 255, 255, 0.93);
+        --sp-track: rgba(255, 255, 255, 0.1);
+        --sp-status: rgba(255, 255, 255, 0.44);
+        --sp-note: rgba(255, 255, 255, 0.28);
+        --sp-foot: rgba(255, 255, 255, 0.26);
+      }
+
+      :root[data-theme="light"] {
+        --sp-bg: radial-gradient(
+          120% 100% at 50% -18%,
+          #ffffff 0%,
+          #fdfdff 55%,
+          #f5f4fa 100%
+        );
+        --sp-border: rgba(20, 20, 32, 0.07);
+        /* 与 @media (prefers-color-scheme: light) 内必须逐字一致 */
+        --sp-glow: radial-gradient(
+          circle,
+          rgba(108, 63, 209, 0.12) 0%,
+          rgba(108, 63, 209, 0) 60%
+        );
+        --sp-bar: linear-gradient(90deg, #6c3fd1, #8b5cf6);
+        --sp-tile-shadow:
+          0 28px 60px -20px rgba(20, 20, 32, 0.13),
+          0 0 0 2px #e7e5ef;
+        --sp-name: #16161a;
+        --sp-track: #cdcad8;
+        --sp-status: #6f6f7a;
+        --sp-note: #97979f;
+        --sp-foot: #9a9aa4;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        cursor: default;
+        color: var(--sp-name);
+        font-family: -apple-system, "Segoe UI Variable Display", "Segoe UI", system-ui,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      #splash {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        /* 1120 宽上用 24 才像一扇 Windows 窗口（不跟着图形等比放大） */
+        border-radius: 24px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: var(--sp-bg);
+        border: 1px solid var(--sp-border);
+        opacity: 1;
+        /* finished 之后整页淡出 120ms；Rust 侧等 400ms 才 close */
+        transition: opacity 120ms linear;
+      }
+
+      #splash.out {
+        opacity: 0;
+      }
+
+      /* 图标背后的紫色光晕：这一屏唯一的彩色光源 */
+      #splash::before {
+        content: "";
+        position: absolute;
+        width: 640px;
+        height: 640px;
+        left: 50%;
+        top: 40%;
+        transform: translate(-50%, -50%);
+        background: var(--sp-glow);
+        filter: blur(12px);
+      }
+
+      .tile {
+        position: relative;
+        width: 168px;
+        height: 168px;
+        border-radius: 38px;
+        overflow: hidden;
+        box-shadow: var(--sp-tile-shadow);
+      }
+
+      .tile img {
+        width: 100%;
+        height: 100%;
+        display: block;
+        object-fit: cover;
+      }
+
+      .name {
+        position: relative;
+        margin-top: 44px;
+        font-size: 30px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: var(--sp-name);
+      }
+
+      .bar {
+        position: relative;
+        margin-top: 48px;
+        width: 336px;
+        height: 4px;
+        border-radius: 99px;
+        background: var(--sp-track);
+        overflow: hidden;
+      }
+
+      .bar i {
+        display: block;
+        height: 100%;
+        width: 0;
+        border-radius: 99px;
+        background: var(--sp-bar);
+        /* 两拍之间补齐跳变：后端按目录推进，直接跳宽度会像心电图 */
+        transition: width 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+
+      /* 分母未知（还没拿到本轮的目录清单）：不显示任何百分比 */
+      .bar.indet i {
+        width: 30%;
+        transition: none;
+        animation: slide 2.4s linear infinite;
+      }
+
+      @keyframes slide {
+        from {
+          transform: translateX(-100%);
+        }
+        to {
+          transform: translateX(333%);
+        }
+      }
+
+      /* 「减少动效」：不滑，用一条半透明满幅表示「在动但没刻度」。
+         width 必须 !important —— 进度宽度是 JS 写在内联样式上的。 */
+      @media (prefers-reduced-motion: reduce) {
+        .bar.indet i {
+          animation: none;
+          width: 100% !important;
+          opacity: 0.35;
+        }
+      }
+
+      .status {
+        position: relative;
+        margin-top: 26px;
+        font-size: 21px;
+        letter-spacing: 0.01em;
+        color: var(--sp-status);
+        font-variant-numeric: tabular-nums;
+        min-height: 1.6em;
+      }
+
+      .note {
+        position: relative;
+        margin-top: 14px;
+        font-size: 18px;
+        letter-spacing: 0.015em;
+        color: var(--sp-note);
+        font-variant-numeric: tabular-nums;
+        /* 常驻占位：不确定态没有副状态文案，不给高度会让上面整块上下跳 */
+        min-height: 1.6em;
+      }
+
+      .foot {
+        position: absolute;
+        left: 44px;
+        right: 44px;
+        bottom: 30px;
+        display: flex;
+        justify-content: space-between;
+        font-family: Consolas, monospace;
+        font-size: 18px;
+        letter-spacing: 0.08em;
+        color: var(--sp-foot);
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="splash">
+      <div class="tile"><img id="tile-icon" src="/icon.png" alt="" /></div>
+      <div class="name">AssetManager</div>
+      <div class="bar" id="bar"><i id="fill"></i></div>
+      <!-- 文案由 src/splash.ts 填。这里留空而不是预置中文：语言要等
+           localStorage / 系统语言才能定，预置中文会让英文用户看见一瞬中文。 -->
+      <div class="status" id="status"></div>
+      <div class="note" id="note"></div>
+      <div class="foot">
+        <span id="version"></span>
+        <span>IIEOZO</span>
+      </div>
+    </div>
+    <script type="module" src="/src/splash.ts"></script>
+  </body>
+</html>

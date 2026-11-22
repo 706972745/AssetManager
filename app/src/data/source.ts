@@ -198,6 +198,8 @@ export const tauriSource: Source = {
   peekClose: () => invoke!<void>("am_peek_close"),
   boardOpen: (tag, title) => invoke!<number>("am_board_open", { tag, title: title ?? null }),
   boardClose: () => invoke!<void>("am_board_close"),
+  boardTop: (on) => invoke!<boolean>("am_board_top", { on }),
+  boardIsTop: () => invoke!<boolean>("am_board_is_top"),
   boardPaste: (tag) => invoke!<BoardPastedItem>("am_board_paste", { tag }),
 
   /* ---------------- 分组（0.2.x） ---------------- */
@@ -257,6 +259,7 @@ export const tauriSource: Source = {
       fs: look ? look.fs : null,
       color: look ? look.color : null,
       bold: look ? look.bold : null,
+      vert: look ? look.vert : null,
     }),
   boardNoteDel: (board, nid) => invoke!<number>("am_board_note_del", { board, nid }),
   /** 打组 / 解组：`grp = -1` 新建（后端发号并返回），`0` 解组 */

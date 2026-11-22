@@ -30,6 +30,12 @@ mod file_assoc;
 /// 单实例守卫 + 唤起 + 「双击文件把路径递给已开着的实例」。
 mod single_instance;
 
+/// 路线 C：安装器 / 卸载器的界面由主程序自己画（`--installer-ui` / `--uninstall-ui`）。
+///
+/// 它只在带这两个参数时接管进程；没有参数时 `dispatch()` 扫一遍 argv 就返回 false，
+/// 下面的正常启动路径一个字节都不受影响。
+mod setup_ui;
+
 struct AppState(Mutex<App>);
 
 /// 日志目录（默认数据目录）。setup 里设一次，panic hook 与退出回调都从这儿取。
@@ -183,6 +189,81 @@ fn scan_ctl() -> &'static ScanCtl {
         cancel: Arc::new(AtomicBool::new(false)),
         busy: AtomicBool::new(false),
     })
+}
+
+/* ---------------- 启动页（splash） ----------------
+   照 FontManager 的状态机做：前端每 100ms 轮询 `splash_state`，`finished` 时淡出；
+   Rust 侧按「当前库扫完 + 至少显示 1.5s」的节奏显示主窗，再关掉启动页。
+   所有数字都是计数/快照，没有需要维护的不变量，所以中毒也照用（见 splash_lock）。 */
+struct SplashState {
+    /// 正在扫的库名（`lib_label`）
+    lib: String,
+    /// 本轮已检查的目录数
+    done: i64,
+    /// 本轮待检查的目录数；0 = 分母还没出来（启动页走不确定态）
+    total: i64,
+    /// 本轮重扫到的文件数
+    files: i64,
+    /// 后面还有几个库要在主界面后台继续扫
+    rest: i64,
+    /// 主界面已经接手（启动页看到它就淡出）
+    finished: bool,
+    /// 启动页真正 show 出来的时刻：最短显示 1.5s 从这里算
+    shown_at: Option<std::time::Instant>,
+}
+
+static SPLASH: Mutex<SplashState> = Mutex::new(SplashState {
+    lib: String::new(),
+    done: 0,
+    total: 0,
+    files: 0,
+    rest: 0,
+    finished: false,
+    shown_at: None,
+});
+
+fn splash_lock() -> std::sync::MutexGuard<'static, SplashState> {
+    SPLASH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn splash_update(f: impl FnOnce(&mut SplashState)) {
+    f(&mut splash_lock());
+}
+
+/// 主窗口是否已经被「扫描完成 / 兜底闸门」显示过。
+/// 只用来保证 `show + set_focus` 只做一次（重复 show 会把用户的窗口状态打乱）。
+static MAIN_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// `splash_state` 的返回体（与 `app/src/splash.ts` 的 `SplashProgress` 一一对应）。
+#[derive(Clone, Serialize)]
+struct SplashProgress {
+    lib: String,
+    done: i64,
+    total: i64,
+    files: i64,
+    rest: i64,
+    finished: bool,
+}
+
+/// 启动页前端第一次轮询时打一行证据。没有它，日志里无法区分
+/// 「splash JS 没跑起来」和「跑起来了但扫得快」——两者排查方向完全相反。
+static SPLASH_POLLED: AtomicBool = AtomicBool::new(false);
+
+/// 启动页每 100ms 轮询一次这条。
+#[tauri::command]
+fn splash_state() -> SplashProgress {
+    if !SPLASH_POLLED.swap(true, Ordering::Relaxed) {
+        log_runtime_opt("splash frontend polling");
+    }
+    let st = splash_lock();
+    SplashProgress {
+        lib: st.lib.clone(),
+        done: st.done,
+        total: st.total,
+        files: st.files,
+        rest: st.rest,
+        finished: st.finished,
+    }
 }
 
 /* ---------------- 目录监听（T06） ---------------- */
@@ -3272,6 +3353,9 @@ fn spawn_board(
     .decorations(false)
     .transparent(false)
     .resizable(true)
+    /* 默认置顶：板子是"随手拖到一边对着主窗看参考"的工具，被主窗盖住就失去意义。
+       用户可以在顶栏关掉（只作用于这次窗口会话，不落盘）。 */
+    .always_on_top(true)
     .center()
     .initialization_script(&script);
     /* 见 `cdp_win`：主窗带了调试参数，这块板也必须带同一串，否则窗口建不出来 */
@@ -3287,14 +3371,40 @@ fn spawn_board(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(label.clone(), key.to_string());
+    /* 无边框板窗在 Win11 上会被 DWM 自动补一圈**强调色描边**（owner 看到的紫框）。
+       贴图窗早就在用这招（`peek_square_corners*`），板窗以前漏了 —— 这里补上。
+       属性会被**任何一次几何变化**冲掉，所以下面的事件里还要再刷。 */
+    #[cfg(windows)]
+    let board_hwnd = win.hwnd().ok().map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let board_hwnd: Option<isize> = None;
+    if let Some(h) = board_hwnd {
+        peek_square_corners_hwnd(h);
+    }
     // 窗口没了就把映射清掉，否则下次点同一个键会去聚焦一个不存在的窗口
     let lbl = label.clone();
     win.on_window_event(move |ev| {
         if matches!(ev, tauri::WindowEvent::Destroyed) {
             board_tags().lock().unwrap_or_else(|e| e.into_inner()).remove(&lbl);
         }
+        /* 缩放 / 拖动 / 重新获得焦点都可能让系统把描边加回来：每次几何事件后补一刀。
+           `Moved` 也刷（贴图窗同一条惯例）—— 用户拖动板窗时描边不该冒出来。 */
+        if matches!(
+            ev,
+            tauri::WindowEvent::Resized(_)
+                | tauri::WindowEvent::Moved(_)
+                | tauri::WindowEvent::Focused(true)
+        ) {
+            if let Some(h) = board_hwnd {
+                peek_square_corners_hwnd(h);
+            }
+        }
     });
     let _ = win.set_focus();
+    /* `set_focus` 也会触发一次 DWM 重排：聚焦完再确认一次，避免一开板就带紫边 */
+    if let Some(h) = board_hwnd {
+        peek_square_corners_hwnd(h);
+    }
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("board {label} key={key}"));
     }
@@ -3336,6 +3446,21 @@ async fn am_board_open(
 #[tauri::command]
 async fn am_board_close(win: Window) -> Result<(), String> {
     win.close().map_err(|e| e.to_string())
+}
+
+/// 灵感板顶栏的置顶开关：把**这一块**板子钉在最前面 / 放开。
+/// 只改当前窗口，不写存档；失败时把系统错误原样交给前端（前端据此回滚按钮状态）。
+#[tauri::command]
+fn am_board_top(win: Window, on: bool) -> Result<bool, String> {
+    win.set_always_on_top(on).map_err(|e| e.to_string())?;
+    Ok(on)
+}
+
+/// 与 `am_board_top` 配对：问后端这块板子现在是不是置顶。
+/// 前端不能只信本地默认值：窗口是新建的、用户可能刚点过，系统那边才是事实。
+#[tauri::command]
+fn am_board_is_top(win: Window) -> Result<bool, String> {
+    win.is_always_on_top().map_err(|e| e.to_string())
 }
 
 /// 为**分组**开一块灵感板（结构照快照板：摆位键 `coll:<id>`，粘贴回填到分组）。
@@ -3403,8 +3528,8 @@ fn am_board_notes(
 /// 文字为空也算一次正常写入 —— **清空文字的便签由前端决定删不删**，
 /// 后端不替它判断，否则"先清空再打字"会在中途被删掉。
 ///
-/// `font / fs / color / bold` 传 `null` 表示**保留原样**（只挪位置时用）：
-/// 否则拖动一下就把用户设的字体冲回默认值。
+/// `font / fs / color / bold / vert` 传 `null` 表示**保留原样**（只挪位置时用）：
+/// 否则拖动一下就把用户设的字体（和横竖排）冲回默认值。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn am_board_note_put(
@@ -3420,16 +3545,19 @@ fn am_board_note_put(
     fs: Option<f64>,
     color: Option<String>,
     bold: Option<bool>,
+    vert: Option<bool>,
 ) -> Result<i64, String> {
-    /* 四个外观字段要么一起给、要么一起不给：拆开传会让"改了字号但字体被冲掉"
-       这种半截状态有机会出现。任何一个缺了就当没给。 */
-    let look = match (font, fs, color, bold) {
-        (Some(f), Some(s), Some(c), Some(b)) => Some((f, s, c, b)),
+    /* 外观字段要么一起给、要么一起不给：拆开传会让"改了字号但字体被冲掉"
+       这种半截状态有机会出现。任何一个缺了就当没给。
+       `vert` 也在这组里（0.5.2）：它和字体/字号同属"这张便签长什么样"，
+       只挪位置时前端传 null，库里原来的横竖排保持不动。 */
+    let look = match (font, fs, color, bold, vert) {
+        (Some(f), Some(s), Some(c), Some(b), Some(v)) => Some((f, s, c, b, v)),
         _ => None,
     };
     match look {
-        Some((f, s, c, b)) => {
-            lock(&state).board_note_put(&board, nid, x, y, w, h, &text, Some((&f, s, &c, b)))
+        Some((f, s, c, b, v)) => {
+            lock(&state).board_note_put(&board, nid, x, y, w, h, &text, Some((&f, s, &c, b, v)))
         }
         None => lock(&state).board_note_put(&board, nid, x, y, w, h, &text, None),
     }
@@ -4511,11 +4639,17 @@ fn ui_prefs_path(app: &AppHandle) -> PathBuf {
     data_dir_of(app).join("ui-prefs.json")
 }
 
-fn read_ui_prefs(app: &AppHandle) -> UiPrefs {
-    std::fs::read_to_string(ui_prefs_path(app))
+/// 从已知数据目录直接读（启动页要在 `manage(AppState)` 之前决定建不建，
+/// 那时 `data_dir_of` 还拿不到 AppState，只能按同一个路径自己读）。
+fn read_ui_prefs_at(dir: &Path) -> UiPrefs {
+    std::fs::read_to_string(dir.join("ui-prefs.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+fn read_ui_prefs(app: &AppHandle) -> UiPrefs {
+    read_ui_prefs_at(&data_dir_of(app))
 }
 
 #[tauri::command]
@@ -4558,9 +4692,14 @@ fn am_set_ui_scale(window: tauri::WebviewWindow, scale: Option<f64>) -> Result<f
     let resolved = match scale {
         Some(s) => s.clamp(0.5, 2.0),
         None => {
+            /* 主窗现在可能还是 `visible(false)`（启动编排里等当前库扫完才 show）：
+               隐藏窗口的 `current_monitor` 在个别环境下拿不到，退回主显示器，
+               否则启动时的缩放会静默失效（用户看到 100% 一闪再跳）。 */
             let m = window
                 .current_monitor()
-                .map_err(|e| e.to_string())?
+                .ok()
+                .flatten()
+                .or_else(|| window.primary_monitor().ok().flatten())
                 .ok_or("拿不到显示器信息")?;
             let dpi = m.scale_factor().max(0.1);
             let a = m.work_area();
@@ -4571,7 +4710,7 @@ fn am_set_ui_scale(window: tauri::WebviewWindow, scale: Option<f64>) -> Result<f
     Ok(resolved)
 }
 
-/* ---------------- 托盘（0.3.30） ---------------- */
+/* ---------------- 托盘（0.3.30；自绘菜单 2026-11-22） ---------------- */
 
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -4583,13 +4722,13 @@ fn show_main_window(app: &AppHandle) {
 
 /// 建托盘。失败只记日志、不影响启动 —— 托盘是个便利设施，
 /// 它挂了也不该让软件打不开（「关闭到托盘」那边会检查 `tray_ok`）。
+///
+/// **不挂任何原生 Menu**：Windows 的托盘菜单是 Win32 弹出菜单，圆角 / 配色 /
+/// 字体 / 深浅色全跟系统走，和自绘界面两个风格。右键改为弹一个透明无边框小窗
+/// （tray.html + src/tray.ts，独立 vite 入口；绝不加载 index.html）。见
+/// `open_tray_menu` / `build_tray_menu_window`。
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
-
-    let show = MenuItem::with_id(app, "show", "打开 AssetManager", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
 
     let icon = app
         .default_window_icon()
@@ -4598,11 +4737,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let builder = TrayIconBuilder::with_id("am-tray")
         .icon(icon)
-        .tooltip("AssetManager")
-        .menu(&menu);
+        .tooltip("AssetManager");
 
     /* Windows 上左键直接开主窗口（菜单只走右键），符合资源管理器托盘图标的习惯；
-       其他平台保留左键弹菜单。 */
+       其他平台保留左键开主窗。 */
     let builder = if cfg!(target_os = "windows") {
         builder.show_menu_on_left_click(false)
     } else {
@@ -4610,23 +4748,616 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     };
 
     builder
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
-            "quit" => app.exit(0),
-            _ => {}
-        })
         .on_tray_icon_event(|tray, event| {
             if let tauri::tray::TrayIconEvent::Click {
-                button: tauri::tray::MouseButton::Left,
-                button_state: tauri::tray::MouseButtonState::Up,
+                button,
+                button_state,
+                position,
+                rect,
                 ..
             } = event
             {
-                show_main_window(tray.app_handle());
+                match (button, button_state) {
+                    // 左键弹主界面：行为与改造前完全一致
+                    (
+                        tauri::tray::MouseButton::Left,
+                        tauri::tray::MouseButtonState::Up,
+                    ) => show_main_window(tray.app_handle()),
+                    // 右键弹自绘菜单（position / rect 都是**物理像素**，
+                    // 逻辑坐标的换算在 open_tray_menu 里按显示器 scale_factor 做）
+                    (
+                        tauri::tray::MouseButton::Right,
+                        tauri::tray::MouseButtonState::Up,
+                    ) => open_tray_menu(tray.app_handle(), position, rect),
+                    _ => {}
+                }
             }
         })
         .build(app)?;
     Ok(())
+}
+
+// ───────────────── 托盘自绘菜单（tray-menu） ─────────────────
+
+/// 菜单窗口宽度（逻辑像素）。卡片比窗口窄：窗口内四周留 10px 透明圈（卡片 272）。
+/// 两处各写一份是刻意的（独立页引不了 Rust 常量），**改哪边都要同步另一边**。
+const TRAY_MENU_W: f64 = 292.0;
+/// 托盘图标与菜单之间的间距（**物理像素**，不做 scale 换算）。
+const TRAY_MENU_GAP: f64 = 8.0;
+/// 窗口上下留的透明圈合计（逻辑像素，10px × 2；tray.html `.trm-card { top: 10px }`）。
+const TRAY_MENU_PAD_V: f64 = 20.0;
+/// 菜单行高（主菜单行 / 二级子面板行同高）。
+const TRAY_MENU_ROW: f64 = 40.0;
+/// 分隔线总高（1px 线 + 上下 5px 边距）。
+const TRAY_MENU_SEP: f64 = 11.0;
+
+/// 托盘菜单里的一项素材库（数据给 tray.html 渲染，也参与窗口高度计算）。
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TrayMenuLib {
+    path: String,
+    label: String,
+    current: bool,
+    /// 内置截图库：文案由前端按语言换成「截图 / Screenshots」
+    builtin: bool,
+}
+
+/// 托盘菜单的库列表 = 注册库（用户库 + 内置截图库），与侧栏同一份来源。
+/// `current` 跟 core 的 `cur_lib` 同判据：`current` 没设就退第一个。
+///
+/// 内置截图库**只留当前 exe 那一个**：换构建跑过之后注册表里会攒下好几个
+/// `screenshots`（release / debug / 已安装各一份），全列出来就是四行同名的「截图」。
+fn tray_menu_libs(app: &App) -> Vec<TrayMenuLib> {
+    let rows = match am_core::reg::libs(&app.reg) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let builtins = builtin_roots_of(app).unwrap_or_default();
+    let cur = app.current.or_else(|| rows.first().map(|r| r.id));
+    let now_shot = shot_dir().to_string_lossy().to_string();
+    let mut out = Vec::new();
+    for r in rows {
+        let builtin = builtins.iter().any(|b| same_path(b, &r.root)) || is_builtin_root(&r.root);
+        if builtin && !same_path(&r.root, &now_shot) && Some(r.id) != cur {
+            continue;
+        }
+        let label = Path::new(&r.root)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&r.root)
+            .to_string();
+        out.push(TrayMenuLib {
+            path: r.root,
+            label,
+            current: Some(r.id) == cur,
+            builtin,
+        });
+    }
+    out
+}
+
+/// 菜单窗口高度（逻辑像素）。行数 = 6 + [素材库父项]：
+/// 打开主界面 / 打开设置 / 切换素材库（多库才有）/ 切换主题 / 检查更新 / 退出软件，
+/// 行间唯一一条分隔线（「退出软件」前）。行高常量与 tray.html 的 CSS 一一对应 ——
+/// 窗口高度在显示前就定死，CSS 改了行高这边不改，菜单会被裁掉一截。
+fn tray_menu_height(lib_count: usize) -> f64 {
+    let rows = 6.0 + if lib_count > 1 { 1.0 } else { 0.0 };
+    TRAY_MENU_PAD_V + rows * TRAY_MENU_ROW + TRAY_MENU_SEP
+}
+
+/// 二级子面板高度（逻辑像素）：行数 × 行高 + 上下透明圈。
+fn tray_menu_sub_height(rows: usize) -> f64 {
+    TRAY_MENU_PAD_V + rows as f64 * TRAY_MENU_ROW
+}
+
+/// 二级面板的展开侧：0 无 / 1 左（默认）/ 2 右（主菜单贴屏幕左缘时）。
+/// 开合几何全由 `tray_menu_sub` 驱动，hide / 重新 show 都会归零。
+static TRAY_MENU_SUB_SIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 兜底轮询的代次：每次 show 自增，旧一拍见到代次不符即退。
+static TRAY_MENU_WATCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 右键托盘时弹出菜单窗口。
+///
+/// 定位口径（照 FontManager）：**默认向上** —— 菜单底边贴托盘图标**顶边**再往上
+/// 留 `TRAY_MENU_GAP`（8 物理像素）；只有 `menu_y < work_area.top`（任务栏在屏幕
+/// 顶部）才翻到图标下方，且向下不许出工作区底边。水平：菜单中心对齐图标中心，
+/// clamp 进工作区左右边界。多显示器以 `monitor_from_point` 取图标所在的那个。
+///
+/// **全物理像素直设**（`Position::Physical` / `PhysicalSize`）：set_position 的逻辑
+/// 坐标按窗口**当前所在**显示器的 scale 换算，托盘窗口复用时可能不是图标那块屏，
+/// 换算就会用错 scale（菜单落点下移 / 高度被放大）。物理坐标从事件到落盘一路到底。
+fn open_tray_menu(
+    app: &AppHandle,
+    position: tauri::PhysicalPosition<f64>,
+    rect: tauri::Rect,
+) {
+    let lib_count = app
+        .try_state::<AppState>()
+        .and_then(|st| st.0.try_lock().ok().map(|a| tray_menu_libs(&a).len()))
+        .unwrap_or(0);
+    let w = TRAY_MENU_W;
+    let h = tray_menu_height(lib_count);
+
+    // 每次弹都从干净的主菜单几何出发
+    TRAY_MENU_SUB_SIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // 第一次右键才建窗；之后 show + 重新定位复用（建 WebView 很慢，绝不销毁重建）
+    let window = match app.get_webview_window("tray-menu") {
+        Some(w) => w,
+        None => match build_tray_menu_window(app) {
+            Ok(w) => w,
+            Err(e) => {
+                log_runtime_opt(&format!("[tray-menu] 菜单窗口创建失败：{e}"));
+                return;
+            }
+        },
+    };
+
+    let (cx, cy) = (position.x, position.y);
+    let monitor = match app.monitor_from_point(cx, cy) {
+        Ok(Some(m)) => Some(m),
+        _ => app.primary_monitor().ok().flatten(),
+    };
+    let scale = monitor
+        .as_ref()
+        .map(|m| m.scale_factor())
+        .unwrap_or_else(|| window.scale_factor().unwrap_or(1.0));
+    let work = monitor.as_ref().map(|m| m.work_area());
+
+    let w_phys = w * scale;
+    let h_phys = h * scale;
+    // 图标矩形（物理像素）。tauri 的 Rect 里 position/size 是带单位的枚举：
+    // 托盘事件恒为物理像素，逻辑分支按当前 scale 兜底；全无效退回光标位置。
+    let (rect_x, rect_y, rect_w, rect_h) = match (rect.position, rect.size) {
+        (tauri::Position::Physical(p), tauri::Size::Physical(s)) => {
+            (p.x as f64, p.y as f64, s.width as f64, s.height as f64)
+        }
+        (tauri::Position::Logical(p), tauri::Size::Logical(s)) => {
+            (p.x * scale, p.y * scale, s.width * scale, s.height * scale)
+        }
+        _ => (0.0, 0.0, 0.0, 0.0),
+    };
+    let (icon_x, icon_y, icon_w, icon_h) = if rect_h > 0.0 && rect_w > 0.0 {
+        (rect_x, rect_y, rect_w, rect_h)
+    } else {
+        (cx, cy, 0.0, 0.0)
+    };
+
+    // 默认向上：底边贴图标顶边上方 TRAY_MENU_GAP（物理像素）
+    let gap_phys = TRAY_MENU_GAP;
+    let mut menu_y = icon_y - h_phys - gap_phys;
+    if let Some(area) = &work {
+        let work_top = area.position.y as f64;
+        if menu_y < work_top {
+            // 任务栏在屏幕顶部（或图标贴顶）：翻到图标下方，底部不许出工作区
+            menu_y = icon_y + icon_h + gap_phys;
+            let work_bottom = work_top + area.size.height as f64;
+            if menu_y + h_phys > work_bottom {
+                menu_y = work_bottom - h_phys;
+            }
+        }
+    }
+    // 水平：菜单中心对齐图标中心，clamp 进工作区左右边界
+    let mut menu_x = icon_x + icon_w / 2.0 - w_phys / 2.0;
+    if let Some(area) = &work {
+        let work_left = area.position.x as f64;
+        let work_right = work_left + area.size.width as f64;
+        if menu_x < work_left {
+            menu_x = work_left;
+        }
+        if menu_x + w_phys > work_right {
+            menu_x = work_right - w_phys;
+        }
+    }
+
+    let _ = window.set_size(tauri::PhysicalSize::new(w_phys, h_phys));
+    let _ = window.set_position(tauri::PhysicalPosition::new(menu_x, menu_y));
+    let _ = window.show();
+    let _ = window.set_focus();
+    // 每次显示前让 tray.html 重置 + 重拉数据；页面不接 event 权限，
+    // 显示信号用 eval 直呼页面里的入口（自定义代码不受 ACL 限制）。
+    let _ = window.eval("window.__trayShow && window.__trayShow()");
+    start_tray_menu_focus_watch(app);
+}
+
+/// 菜单窗口只有一份，第一次右键时创建。
+///
+/// `cdp_win` 必须过一道：AM_CDP=1 时 WebView2 的 additional browser args 是
+/// environment 级的，新窗不带就 0x8007139F 建不出来（坑表 #42）。
+fn build_tray_menu_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let builder = tauri::WebviewWindowBuilder::new(
+        app,
+        "tray-menu",
+        tauri::WebviewUrl::App("tray.html".into()),
+    )
+    .title("AssetManager")
+    .inner_size(TRAY_MENU_W, tray_menu_height(0))
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false);
+    let window = cdp_win(builder).build()?;
+    // 失焦即藏（hide 不 close：建 WebView 很慢，窗口留着复用）
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            // 二级面板几何状态一并复位（下次 show 必是干净的主菜单态）
+            TRAY_MENU_SUB_SIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+            TRAY_MENU_WATCH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = handle.hide();
+        }
+    });
+    Ok(window)
+}
+
+/// 藏起菜单窗口（点完动作后由各命令调用；失焦兜底之外的一条确定路径）。
+fn hide_tray_menu(app: &AppHandle) {
+    TRAY_MENU_SUB_SIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    TRAY_MENU_WATCH_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Some(w) = app.get_webview_window("tray-menu") {
+        let _ = w.hide();
+    }
+}
+
+/// 菜单可见期间的轻量轮询（~300ms 一拍）：前台窗口不是 tray-menu（含其子窗口
+/// —— 焦点常落在 WebView2 的子 HWND 上，用 GA_ROOT 归一后再比）→ 立即藏起并停拍。
+///
+/// 两条防误藏（照 FontManager）：
+/// ① 首拍给 500ms 宽限 —— 刚 show 时焦点还没落稳；
+/// ② 记住本拍里菜单**是否拿到过焦点**：拿到过 → 前台一变就藏；一直没拿到
+///    （set_focus 被系统吃掉）→ 只有前台窗口变成跟 show 那一刻不同的别的窗口才藏。
+#[cfg(target_os = "windows")]
+fn start_tray_menu_focus_watch(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    let gen = TRAY_MENU_WATCH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let mut had_focus = false;
+        let initial_fg = tray_fg_hwnd();
+        loop {
+            if TRAY_MENU_WATCH_GEN.load(Ordering::SeqCst) != gen {
+                return; // 下一次 show 把代次顶掉了：本拍退出
+            }
+            let Some(window) = handle.get_webview_window("tray-menu") else {
+                return;
+            };
+            if !window.is_visible().unwrap_or(false) {
+                return; // 已被藏起：停拍
+            }
+            let fg = tray_fg_hwnd();
+            if !had_focus && tray_hwnd_matches(&window, fg) {
+                had_focus = true;
+            }
+            let click_outside = !tray_hwnd_matches(&window, fg)
+                && (had_focus || (initial_fg != 0 && fg != initial_fg));
+            if click_outside {
+                let _ = window.hide();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_tray_menu_focus_watch(_app: &AppHandle) {}
+
+/// 当前前台窗口的 HWND（0 = 取不到）。
+#[cfg(target_os = "windows")]
+fn tray_fg_hwnd() -> isize {
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+    }
+    unsafe { GetForegroundWindow() }
+}
+
+/// 前台窗口是否属于 tray-menu：是它本身，或它的根窗口（焦点在 WebView2 子 HWND 时）。
+/// 拿不到本窗口 hwnd 按「有焦点」处理：宁可晚藏一拍，不误藏。
+#[cfg(target_os = "windows")]
+fn tray_hwnd_matches(window: &tauri::WebviewWindow, fg: isize) -> bool {
+    extern "system" {
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    }
+    let Ok(hwnd) = window.hwnd() else {
+        return true;
+    };
+    let hwnd = hwnd.0 as isize;
+    if fg == 0 {
+        return false;
+    }
+    if fg == hwnd {
+        return true;
+    }
+    const GA_ROOT: u32 = 2;
+    unsafe { GetAncestor(fg, GA_ROOT) == hwnd }
+}
+
+/// 托盘菜单的数据源：库列表（含当前库标记）、主题镜像、版本号。
+#[tauri::command]
+fn tray_menu_data(app: AppHandle, state: State<AppState>) -> serde_json::Value {
+    // try_lock：启动扫描可能正握着 AppState（几万个文件要扫）。菜单不能为此卡住 ——
+    // 拿不到就先给空库列表，下次 show 会再拉一次。
+    let libs = state
+        .0
+        .try_lock()
+        .ok()
+        .map(|a| tray_menu_libs(&a))
+        .unwrap_or_default();
+    serde_json::json!({
+        "libs": libs,
+        "theme": read_tray_theme(&app),
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// 托盘「切换素材库」的数据（单列一条，调试 / 外部调用都方便）。
+///
+/// async + spawn_blocking：启动扫描可能长时间握着 AppState 的锁，同步命令会卡住
+/// 主线程；把这个可能等待的读操作丢到 blocking 线程池。
+#[tauri::command]
+async fn tray_list_libs(app: AppHandle) -> Vec<TrayMenuLib> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let a = lock(&st);
+        tray_menu_libs(&a)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 托盘切库：走与设置页相同的 `am_set_current_lib` 链路。
+/// 目录必须在注册库里 —— 托盘不是设置任意路径的入口。
+#[tauri::command]
+async fn tray_switch_lib(app: AppHandle, path: String) -> Result<(), String> {
+    let handle = app.clone();
+    let target = path.clone();
+    let changed = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let st = handle.state::<AppState>();
+        let mut a = lock(&st);
+        let rows = am_core::reg::libs(&a.reg).map_err(|e| e.to_string())?;
+        if !rows.iter().any(|r| same_path(&r.root, &target)) {
+            return Err("该目录不在素材库清单里".into());
+        }
+        a.set_current_lib(&target)
+    })
+    .await
+    .map_err(|e| format!("切库任务异常：{e}"))??;
+    hide_tray_menu(&app);
+    show_main_window(&app);
+    // 主窗的当前目录是 React state：`lib://switch` 由 App.tsx 里那一小段监听换成
+    // 新库根；`fs://changed` 让侧栏清单跟着刷新。
+    let _ = app.emit_to(
+        "main",
+        "lib://switch",
+        serde_json::json!({ "path": path, "changed": changed }),
+    );
+    let _ = app.emit_to("main", "fs://changed", Vec::<String>::new());
+    Ok(())
+}
+
+/// 打开主界面（托盘菜单第一项）。
+#[tauri::command]
+fn tray_show_main(app: AppHandle) {
+    hide_tray_menu(&app);
+    show_main_window(&app);
+}
+
+/// 打开设置：先把主窗捞回来，再发事件让前端把设置面板打开。
+#[tauri::command]
+fn tray_open_settings(app: AppHandle) {
+    hide_tray_menu(&app);
+    show_main_window(&app);
+    let _ = app.emit_to("main", "open://settings", ());
+}
+
+/// 托盘侧的主题镜像（`tray-prefs.json`）。
+///
+/// **权威来源仍是 localStorage 的 `am.prefs.v1`**（主窗和托盘同源共享）；
+/// 这份文件只给 `tray_get_theme` 一个后端可读的兜底值，避免两个窗口的
+/// 存储读取时序不一致时托盘拿不到任何偏好。
+fn tray_prefs_path(app: &AppHandle) -> PathBuf {
+    // 不走 data_dir_of：那个要拿 AppState 的锁，启动扫描期间会把菜单数据请求卡住。
+    // 数据目录的解析规则在 core 里（默认目录 + data-root.json），这里按同一份规则算。
+    let default_dir = app
+        .path()
+        .app_local_data_dir()
+        .unwrap_or_else(|_| am_core::default_data_dir());
+    am_core::dataroot::resolve(&default_dir).join("tray-prefs.json")
+}
+
+/// 合法的主题偏好只有三种。
+fn valid_theme(mode: &str) -> bool {
+    matches!(mode, "system" | "light" | "dark")
+}
+
+fn read_tray_theme(app: &AppHandle) -> String {
+    std::fs::read_to_string(tray_prefs_path(app))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("theme").and_then(|t| t.as_str()).map(str::to_string))
+        .filter(|t| valid_theme(t))
+        .unwrap_or_else(|| "system".into())
+}
+
+#[tauri::command]
+fn tray_get_theme(app: AppHandle) -> String {
+    read_tray_theme(&app)
+}
+
+/// 托盘切主题：写镜像 + 通知主窗立刻应用（主窗自己负责落 localStorage）。
+#[tauri::command]
+fn tray_set_theme(app: AppHandle, mode: String) -> Result<(), String> {
+    if !valid_theme(&mode) {
+        return Err(format!("未知主题：{mode}"));
+    }
+    let p = tray_prefs_path(&app);
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, serde_json::json!({ "theme": mode }).to_string());
+    hide_tray_menu(&app);
+    let _ = app.emit_to("main", "theme://set", serde_json::json!({ "mode": mode }));
+    Ok(())
+}
+
+/// 检查更新：只读版本号（`update::check` 内部 force=true 会绕过 24h 闸门），
+/// **绝不触发下载 / 安装**。三态文案由 tray.ts 写在这一项的标签上。
+#[tauri::command]
+async fn tray_check_update(force: bool) -> Result<update::UpdateInfo, String> {
+    update::check(force).await
+}
+
+/// 托盘「退出软件」：复用主窗关闭分支的收尾（灵感板 / 贴图窗一起关），再退出。
+#[tauri::command]
+fn tray_quit(app: AppHandle) {
+    hide_tray_menu(&app);
+    close_aux_windows(&app);
+    app.exit(0);
+}
+
+/// Esc 收起菜单（tray.html 的键盘兜底；点别处由失焦 hide 兜）。
+#[tauri::command]
+fn tray_menu_hide(app: AppHandle) {
+    hide_tray_menu(&app);
+}
+
+/// 二级面板（切换素材库 / 切换主题）的开合几何。
+///
+/// 窗口由两个「半区」组成，每半区宽 = `TRAY_MENU_W`（卡片 = 半区 - 10px 透明圈）。
+/// - **open = true**：窗口加宽一个半区；主卡片锚在原地（开左侧 = 窗口 x 左移
+///   一个半区宽）；高度取 max(主菜单, 子面板)。方向判定：主卡片右缘外剩余空间
+///   放不下一个半区、且左侧放得下 → 开左（默认）；反之开右。
+/// - **open = false**：按记住的侧复原 x 与宽高（side=1 时 x 右移一个半区宽）。
+/// - 已开着又调 open=true（悬停换另一组）：宽与 x 不动，只把高度调到新 max。
+///
+/// 全物理像素直设（同 open_tray_menu 的理由）。返回展开侧（"left" / "right"）。
+#[tauri::command]
+fn tray_menu_sub(app: AppHandle, panel: String, open: bool) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    let window = app
+        .get_webview_window("tray-menu")
+        .ok_or_else(|| "tray-menu 窗口不存在".to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let half_w = (TRAY_MENU_W * scale).round();
+    let lib_count = app
+        .try_state::<AppState>()
+        .and_then(|st| st.0.try_lock().ok().map(|a| tray_menu_libs(&a).len()))
+        .unwrap_or(0);
+    let main_w = (TRAY_MENU_W * scale).round();
+    let main_h = (tray_menu_height(lib_count) * scale).round();
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let side = TRAY_MENU_SUB_SIDE.load(Ordering::SeqCst);
+
+    // 收起：按记住的侧把 x 复原（开在左 = 窗口当时左移过），宽高回主菜单
+    if !open {
+        if side == 1 {
+            let _ = window.set_position(tauri::PhysicalPosition::new(
+                pos.x + half_w as i32,
+                pos.y,
+            ));
+        }
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            main_w as u32,
+            main_h as u32,
+        ));
+        TRAY_MENU_SUB_SIDE.store(0, Ordering::SeqCst);
+        return Ok(String::new());
+    }
+
+    let sub_rows = match panel.as_str() {
+        "libs" => lib_count.max(1),
+        "theme" => 3,
+        _ => return Err(format!("未知二级面板：{panel}")),
+    };
+    let sub_h = (tray_menu_sub_height(sub_rows) * scale).round();
+    let new_h = main_h.max(sub_h);
+    // 窗口中心所在的显示器（窗口可能因展开左移过，中心仍落在同屏）
+    let work = {
+        let cx = pos.x as f64 + size.width as f64 / 2.0;
+        let cy = pos.y as f64 + size.height as f64 / 2.0;
+        app.monitor_from_point(cx, cy)
+            .ok()
+            .flatten()
+            .map(|m| m.work_area().clone())
+    };
+    // 纵向 clamp：窗口加高后不许越出工作区上下界
+    let mut new_y = pos.y;
+    if let Some(area) = &work {
+        let wt = area.position.y;
+        let wb = wt + area.size.height as i32;
+        if new_y + new_h as i32 > wb {
+            new_y = wb - new_h as i32;
+        }
+        if new_y < wt {
+            new_y = wt;
+        }
+    }
+    if side == 0 {
+        // 首次展开：默认开左侧（菜单贴屏幕右缘）；左放不下且右放得下才开右
+        let mut chosen = 1u8;
+        if let Some(area) = &work {
+            let wl = area.position.x as f64;
+            let wr = wl + area.size.width as f64;
+            let room_left = pos.x as f64 - wl;
+            let room_right = wr - (pos.x as f64 + size.width as f64);
+            if room_left < half_w && room_right >= half_w {
+                chosen = 2;
+            }
+        }
+        let new_x = if chosen == 1 {
+            pos.x - half_w as i32
+        } else {
+            pos.x
+        };
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            (size.width as f64 + half_w) as u32,
+            new_h as u32,
+        ));
+        let _ = window.set_position(tauri::PhysicalPosition::new(new_x, new_y));
+        TRAY_MENU_SUB_SIDE.store(chosen, Ordering::SeqCst);
+        Ok(if chosen == 1 { "left" } else { "right" }.to_string())
+    } else {
+        // 已开着（悬停换另一组）：宽与 x 不动，只把高度调到新 max
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            size.width,
+            new_h as u32,
+        ));
+        let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, new_y));
+        Ok(if side == 1 { "left" } else { "right" }.to_string())
+    }
+}
+
+/// **调试 / 验收入口**：按逻辑坐标模拟右键托盘（内部走同一个 `open_tray_menu`）。
+///
+/// 坐标按**主显示器**的 scale_factor 换算成物理像素；菜单定位仍走真实的那套
+/// 算法（向上弹、clamp 进工作区）。给 CDP 验收脚本一个不依赖系统托盘点击的
+/// 稳定入口（`AM_CDP=1` 时通过 `window.__TAURI__.core.invoke` 调）。
+#[tauri::command]
+async fn am_tray_menu_show(app: AppHandle, x: f64, y: f64) {
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let px = x * scale;
+    let py = y * scale;
+    let rect = tauri::Rect {
+        position: tauri::Position::Physical(tauri::PhysicalPosition::new(
+            px.round() as i32,
+            py.round() as i32,
+        )),
+        size: tauri::Size::Physical(tauri::PhysicalSize::new(0u32, 0u32)),
+    };
+    open_tray_menu(&app, tauri::PhysicalPosition::new(px, py), rect);
 }
 
 /* ---------------- 开机自动启动（0.3.30，官方插件写 HKCU Run） ---------------- */
@@ -6603,8 +7334,137 @@ fn toggle_peeks(app: &AppHandle) {
     }
 }
 
-/// 新贴一张之前，先解除"整批隐藏"状态。
+/* ---------------- F2：主界面开关 ----------------
+
+   为什么是"开关"而不是"唤出"：主窗经常用完就收起来（托盘 / 最小化 / 被别的窗口
+   压住），最顺手的是一个键把它收发自如 —— 正在前台用着就收，收着就叫回来。 */
+
+/// 主窗是否真的在前台。`is_focused()` 在 Windows 上靠 WM_ACTIVATE 记账，
+/// 被别的程序盖住时可能还没收到失焦消息，所以这里直接比 `GetForegroundWindow`。
+#[cfg(target_os = "windows")]
+fn main_in_foreground(win: &tauri::WebviewWindow) -> bool {
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    }
+    const GA_ROOT: u32 = 2;
+    let Ok(h) = win.hwnd() else {
+        return win.is_focused().unwrap_or(false);
+    };
+    let hwnd = h.0 as isize;
+    if hwnd == 0 {
+        return win.is_focused().unwrap_or(false);
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    if fg == 0 {
+        return false;
+    }
+    /* 焦点可能落在 WebView2 的子 HWND 上，取根窗口再比 */
+    fg == hwnd || unsafe { GetAncestor(fg, GA_ROOT) == hwnd }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main_in_foreground(win: &tauri::WebviewWindow) -> bool {
+    win.is_focused().unwrap_or(false)
+}
+
+/// 把主窗拉到前台并**真的拿到焦点**。
 ///
+/// Windows 的限制：不在前台的进程调 `SetForegroundWindow` 会被拒绝，只闪一下任务栏。
+/// `show_main_window` 里的 `set_focus` 走的也是这条路，所以从隐藏状态叫回来时经常
+/// "窗口上来了，焦点还在别的程序"。这里补两手：
+///   ① `AttachThreadInput` 临时挂到当前前台线程的输入队列上，借它的前台权限；
+///   ② 还不行就短暂置顶再取消 —— 置顶那一瞬不受前台限制，取消时窗口回到最上。
+#[cfg(target_os = "windows")]
+fn bring_to_front(win: &tauri::WebviewWindow) {
+    extern "system" {
+        fn GetForegroundWindow() -> isize;
+        fn SetForegroundWindow(hwnd: isize) -> i32;
+        fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32)
+            -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn GetCurrentThreadId() -> u32;
+        fn AttachThreadInput(attach: u32, to: u32, on: i32) -> i32;
+    }
+    const HWND_TOPMOST: isize = -1;
+    const HWND_NOTOPMOST: isize = -2;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    let Ok(h) = win.hwnd() else { return };
+    let hwnd = h.0 as isize;
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        if GetForegroundWindow() == hwnd {
+            return;
+        }
+        SetForegroundWindow(hwnd);
+        if GetForegroundWindow() == hwnd {
+            return;
+        }
+        let fg = GetForegroundWindow();
+        if fg != 0 {
+            let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+            let me = GetCurrentThreadId();
+            if fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, 1) != 0 {
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(me, fg_thread, 0);
+            }
+        }
+        if GetForegroundWindow() == hwnd {
+            return;
+        }
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        /* 这一发**不带** SWP_NOACTIVATE：取消置顶的同时把窗口激活到最上 */
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bring_to_front(win: &tauri::WebviewWindow) {
+    let _ = win.set_focus();
+}
+
+/// F2：主界面开关。
+/// 正在前台用着 → hide（和「关闭到托盘」同一条路，托盘图标能再点回来）；
+/// 已隐藏 / 最小化 / 被别的窗口压住 → show + unminimize + 真前台。
+fn toggle_main_window(app: &AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let visible = win.is_visible().unwrap_or(false);
+    let minimized = win.is_minimized().unwrap_or(false);
+    let focused = !minimized && main_in_foreground(&win);
+    let hide = visible && focused;
+    if hide {
+        let _ = win.hide();
+    } else {
+        show_main_window(app);
+        bring_to_front(&win);
+    }
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!(
+                "main toggle visible={visible} minimized={minimized} focused={focused} -> {}",
+                if hide { "hide" } else { "show" }
+            ),
+        );
+    }
+}
+
+/// 新贴一张之前，先解除"整批隐藏"状态。
 /// 场景（owner 2026-11-19）：用 Alt+F3 把贴图全收走了，接着按 F3 又贴一张新的。
 /// 新窗照常出现（用户刚要求看到的），但旧的那批还藏着 —— 此时 `PEEK_HIDDEN` 仍是 true，
 /// 下一次 Alt+F3 会走「隐藏」分支，用户按半天也唤不回旧的（看着就是"键坏了"）。
@@ -6659,6 +7519,10 @@ fn dispatch_hotkey(app: &AppHandle, accel: &str) {
                 toggle_peeks(&app);
                 Ok(())
             }
+            "window_toggle" => {
+                toggle_main_window(&app);
+                Ok(())
+            }
             _ => Ok(()),
         };
         if let Err(e) = r {
@@ -6691,11 +7555,17 @@ fn register_hotkeys(app: &AppHandle, list: Vec<(String, String)>) -> Result<Vec<
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     // 幂等：表没变就别折腾。反复 unregister/register 在 Windows 上会偶发
     // "刚注销的键还被认为占用"，直接把 F1 弄成永久失效。
-    let want: Vec<(String, String)> = list
+    let mut want: Vec<(String, String)> = list
         .iter()
         .map(|(a, b)| (a.trim().to_string(), b.clone()))
         .filter(|(a, _)| !a.is_empty())
         .collect();
+    /* F2 = 主界面开关，**固定键**：设置面板只改截图 / 贴图那三个，所以在这里补进表。
+       它和 F1/F3 共用同一套注册 / 分发（`dispatch_hotkey`），注销也一起走。
+       用户如果已经把某个动作手动指到 F2，则以用户的为准，不抢。 */
+    if !want.iter().any(|(a, _)| a.eq_ignore_ascii_case("F2")) {
+        want.push(("F2".to_string(), "window_toggle".to_string()));
+    }
     {
         let cur = hotkey_slot().lock().unwrap_or_else(|e| e.into_inner());
         if !cur.is_empty() && *cur == want {
@@ -6819,7 +7689,288 @@ fn focus_running_window() -> bool {
     false
 }
 
+/* ---------------- 启动编排：启动页 + 两段增量扫描 ----------------
+   用户要求（2026-11-22）：先显示启动页 → **当前库**的启动增量扫描完成 → 开主界面
+   → 启动页关闭 → 其余库继续在后台扫，进度走既有的 `scan://progress`。
+   没有库 / 首次启动不扫，直接进主界面；「启动时最小化」下不建也不显示启动页。 */
+
+/// 启动页最短显示时长（从窗口真正 show 出来算，照 FontManager）
+const SPLASH_MIN_SHOW: Duration = Duration::from_millis(1500);
+/// 前端 `finished` 后淡出 120ms，这里留余量再关窗
+const SPLASH_CLOSE_DELAY: Duration = Duration::from_millis(400);
+/// 每个库每轮增量扫描的目录配额（与原启动增量扫描一致）
+const STARTUP_SCAN_LIMIT: i64 = 4000;
+/// 主界面出来后最多再补扫几个库（用户要求「其余素材库最多 2 个」）：
+/// 启动不该变成一次全库巡检，剩下的库留给后续启动或用户手动扫描。
+const STARTUP_REST_MAX: usize = 2;
+
+/// 建启动页窗口并立刻 show。尺寸/样式照 FontManager 2.1.7（1120×760）。
+///
+/// 建不出来**不能**让启动失败：启动页只是体验增强，主界面由编排线程/兜底闸门亮出来。
+fn build_splash(app: &AppHandle, cdp: bool) -> Result<(), String> {
+    let mut b = tauri::WebviewWindowBuilder::new(
+        app,
+        "splash",
+        tauri::WebviewUrl::App("splash.html".into()),
+    )
+    .title("AssetManager")
+    .inner_size(1120.0, 760.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .center()
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .disable_drag_drop_handler()
+    .visible(false);
+    // 与主窗完全一致：CDP 调试是自动化验收的入口，启动页也必须能被检查
+    if cdp {
+        b = b.additional_browser_args(CDP_ARGS);
+    }
+    let w = b.build().map_err(|e| e.to_string())?;
+    w.show().map_err(|e| e.to_string())?;
+    let _ = w.set_focus();
+    splash_update(|s| s.shown_at = Some(std::time::Instant::now()));
+    Ok(())
+}
+
+/// 显示主窗（只做一次）。`tag` 会原样写进 runtime.log，
+/// 验收脚本靠 `splash main shown` 这个标记判断交接完成。
+fn show_main_once(app: &AppHandle, log_dir: &Path, tag: &str) {
+    let Some(w) = app.get_webview_window("main") else {
+        log_runtime(log_dir, &format!("{tag} (main window missing)"));
+        return;
+    };
+    if MAIN_SHOWN.swap(true, Ordering::SeqCst) {
+        log_runtime(log_dir, &format!("{tag} (already)"));
+        return;
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+    log_runtime(log_dir, tag);
+}
+
+/// 补足启动页最短显示（从窗口 show 那一刻算；窗口没建出来就直接返回）。
+fn wait_splash_min() {
+    let shown = splash_lock().shown_at;
+    if let Some(t) = shown {
+        let elapsed = t.elapsed();
+        if elapsed < SPLASH_MIN_SHOW {
+            std::thread::sleep(SPLASH_MIN_SHOW - elapsed);
+        }
+    }
+}
+
+/// 启动编排线程的主体：见上方块注释。
+fn startup_scan_and_splash(app: AppHandle, data: PathBuf, start_hidden: bool, log_dir: PathBuf) {
+    let t0 = std::time::Instant::now();
+    /* 启动页没建出来（WebView2 失败 / 启动时最小化）时，不能把主界面压到扫描之后：
+       用户要的是「看到进度」，不是「多等一屏」。 */
+    if !start_hidden && app.get_webview_window("splash").is_none() {
+        show_main_once(&app, &log_dir, "startup: no splash, main shown early");
+    }
+
+    let mut a = match open_app(&data) {
+        Ok(a) => a,
+        Err(e) => {
+            log_runtime(&log_dir, &format!("splash done lib=(none) open_app failed: {e}"));
+            splash_update(|s| s.finished = true);
+            if !start_hidden {
+                show_main_once(&app, &log_dir, "splash main shown");
+            }
+            return;
+        }
+    };
+    let cancel = AtomicBool::new(false);
+    let cur = a.current_lib_id();
+    /* 当前库在 splash 阶段已经扫过，这里必须排除，否则同一个库扫两遍。
+       按 **id + 根路径** 双口径排：只比 id 不够 —— 同一个根被登记成两行
+       （移除后又加回来、旧构建同目录另一份注册）时 id 不同但根相同，
+       扫它等于把刚扫完的当前库原样再走一遍。顺带把 rest 之间同根的也去重。 */
+    let cur_root = cur
+        .and_then(|id| a.libs.iter().find(|l| l.id == id))
+        .map(|l| l.root.clone());
+    let mut seen_roots: Vec<String> = cur_root.into_iter().collect();
+    let mut rest_ids: Vec<i64> = Vec::new();
+    for l in &a.libs {
+        if Some(l.id) == cur || seen_roots.iter().any(|r| same_path(r, &l.root)) {
+            continue;
+        }
+        seen_roots.push(l.root.clone());
+        rest_ids.push(l.id);
+    }
+    // 最多补扫 2 个：启动只做「当前库 + 少量其余库」，不是全库巡检
+    rest_ids.truncate(STARTUP_REST_MAX);
+    splash_update(|s| s.rest = rest_ids.len() as i64);
+
+    if let Some(id) = cur {
+        let label = a.lib_label(id).unwrap_or_else(|| format!("#{id}"));
+        let root = a
+            .libs
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| l.root.clone())
+            .unwrap_or_default();
+        log_runtime(&log_dir, &format!("splash scan lib={label} root={root}"));
+        splash_update(|s| {
+            s.lib = label.clone();
+            s.done = 0;
+            s.total = 0;
+            s.files = 0;
+        });
+        let h = app.clone();
+        let lib_for_cb = label.clone();
+        match a.incremental_one(id, &cancel, STARTUP_SCAN_LIMIT, |checked, planned, p| {
+            splash_update(|s| {
+                s.lib = lib_for_cb.clone();
+                s.done = checked;
+                s.total = planned;
+                s.files = p.files;
+            });
+            let _ = h.emit("scan://progress", p);
+        }) {
+            Ok(s) => {
+                log_runtime(
+                    &log_dir,
+                    &format!(
+                        "splash done lib={label} dirs={} files={} removed={} {}ms",
+                        s.dirs, s.files, s.removed_dirs, s.elapsed_ms
+                    ),
+                );
+                if s.dirs + s.removed_dirs > 0 {
+                    let _ = app.emit("fs://changed", Vec::<String>::new());
+                }
+            }
+            Err(e) => log_runtime(&log_dir, &format!("splash done lib={label} error={e}")),
+        }
+    } else {
+        log_runtime(&log_dir, "splash done lib=(none)");
+    }
+
+    /* 交接：当前库扫完 + 启动页显示满 1.5s → 主界面。
+       启动页先置 finished 让前端开始淡出，主窗随后 show（两者重叠 120ms，
+       不会出现「中间一帧两个都黑」）。 */
+    if !start_hidden {
+        wait_splash_min();
+        splash_update(|s| s.finished = true);
+        show_main_once(&app, &log_dir, "splash main shown");
+        std::thread::sleep(SPLASH_CLOSE_DELAY);
+        if let Some(w) = app.get_webview_window("splash") {
+            /* 先 hide 再 close：close 万一被系统拒绝，一个 always_on_top 的启动页
+               会一直盖在主界面上（比"没关掉"严重得多）。 */
+            let _ = w.hide();
+            let _ = w.close();
+        }
+    } else {
+        splash_update(|s| s.finished = true);
+    }
+    log_runtime(
+        &log_dir,
+        &format!("startup: main gate done {}ms", t0.elapsed().as_millis()),
+    );
+
+    /* 其余库照扫：一波 `scan://progress` 驱动主界面底部进度条，
+       全部结束发一次 `scan://done`（前端会清进度条并刷新）。 */
+    if !rest_ids.is_empty() {
+        let t_rest = std::time::Instant::now();
+        let mut total = ScanStats::default();
+        let mut n = 0usize;
+        for rid in rest_ids {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let label = a.lib_label(rid).unwrap_or_else(|| format!("#{rid}"));
+            log_runtime(&log_dir, &format!("startup rest scan lib={label}"));
+            let h = app.clone();
+            let lib_for_cb = label.clone();
+            match a.incremental_one(rid, &cancel, STARTUP_SCAN_LIMIT, |checked, planned, p| {
+                splash_update(|s| {
+                    s.lib = lib_for_cb.clone();
+                    s.done = checked;
+                    s.total = planned;
+                    s.files = p.files;
+                });
+                let _ = h.emit("scan://progress", p);
+            }) {
+                Ok(s) => {
+                    total.dirs += s.dirs;
+                    total.files += s.files;
+                    total.removed_dirs += s.removed_dirs;
+                    total.errors += s.errors;
+                    n += 1;
+                }
+                Err(e) => {
+                    log_runtime(&log_dir, &format!("startup rest scan lib={label} error={e}"));
+                }
+            }
+        }
+        total.elapsed_ms = t_rest.elapsed().as_millis();
+        let changed = total.dirs + total.removed_dirs;
+        log_runtime(&log_dir, &format!("startup rest done libs={n}"));
+        let _ = app.emit(
+            "scan://done",
+            ScanDone {
+                ok: true,
+                message: format!(
+                    "其余库已完成：{} 个库 · {} 个目录有变化 · {} 个文件",
+                    n, changed, total.files
+                ),
+                stats: total,
+            },
+        );
+        if changed > 0 {
+            let _ = app.emit("fs://changed", Vec::<String>::new());
+        }
+    }
+
+    /* 顺手补一批主色板（原启动线程的逻辑，保留）：0.8.0 的色板只写进了预览那条
+       路径，老库里 65k 张图的 palette 全是 NULL。每次启动补 1500 张
+       （读已缓存的 256 档缩略图，1–3ms/张），几十次启动就补齐，也不占用户时间。 */
+    if let Ok((done, _left)) = a.fill_palette(1500) {
+        if done > 0 {
+            let _ = app.emit("fs://changed", Vec::<String>::new());
+        }
+    }
+
+    /* 兜底闸门由 setup 里的 `spawn_splash_watchdog` 单独开线程：
+       它可能比这里先醒（扫描大库），也可能永远不醒（正常路径）。 */
+}
+
+/// 兜底：20 秒后主界面还没亮（前端挂了 / 扫描卡住）就强制显示并关掉启动页。
+fn spawn_splash_watchdog(app: AppHandle, log_dir: PathBuf, start_hidden: bool) {
+    if start_hidden {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        if MAIN_SHOWN.load(Ordering::SeqCst) {
+            return;
+        }
+        splash_update(|s| s.finished = true);
+        show_main_once(&app, &log_dir, "startup watchdog: splash main shown");
+        std::thread::sleep(SPLASH_CLOSE_DELAY);
+        if let Some(w) = app.get_webview_window("splash") {
+            let _ = w.hide();
+            let _ = w.close();
+        }
+    });
+}
+
 fn main() {
+    /* 路线 C（安装器 / 卸载器界面，0.5.4）：**必须在单实例 claim 之前**。
+       setup 模式是 NSIS 拉起的**另一个进程**，它不该抢主程序的互斥体，也不该被
+       "已经有一个实例在跑"挡回去（安装时那个实例恰恰要被关掉）。
+       `generate_context!()` 只在这里取一次：它把所有前端资源 include 进二进制，
+       写两次会让 dist 被 include 两遍。 */
+    let context = tauri::generate_context!();
+    if setup_ui::dispatch() {
+        setup_ui::run_window(context);
+        return;
+    }
+
     /* 单实例：必须在 `tauri::Builder` 之前 —— Builder 一跑就会 open 索引。
        命令行里可能带着要打开的导出文件（双击文件 = Windows 给个 `--open "<路径>"`）。 */
     let initial_file = single_instance::argv_file();
@@ -6882,11 +8033,28 @@ fn main() {
                 });
             }
 
+            /* ---- 启动页（2026-11-22）----
+               必须先于主窗建、并且在主窗可见之前就把首帧推上去：用户先看到的是
+               启动页，不是主界面的空白骨架。窗口尺寸/样式照 FontManager 2.1.7。
+               「启动时最小化」下**不建**（开机自启那一秒不该有窗口闪一下），
+               两段扫描照跑。偏好直接按数据目录读（此时 AppState 还没 manage）。 */
+            let cdp = std::env::var("AM_CDP").as_deref() == Ok("1");
+            let boot_ui = read_ui_prefs_at(&data);
+            if !boot_ui.start_minimized {
+                match build_splash(app.handle(), cdp) {
+                    Ok(()) => log_runtime(&default_dir, "splash show size=1120x760"),
+                    Err(e) => log_runtime(&default_dir, &format!("splash build FAIL: {e}")),
+                }
+            } else {
+                log_runtime(&default_dir, "splash skipped: start_minimized");
+            }
+
             /* ---- 主窗口（0.4.13 起从 tauri.conf.json 搬到 Rust）----
                唯一目的是给 AM_CDP=1 一个开关：设了就给 WebView2 挂
                --remote-debugging-port=9222，供 CDP 真鼠标注入复现拖拽问题。
-               不设则完全等同原来的配置窗口，发布行为不变。 */
-            let cdp = std::env::var("AM_CDP").as_deref() == Ok("1");
+               不设则完全等同原来的配置窗口，发布行为不变。
+               0.5.3 起**不可见**启动：等启动编排线程把当前库扫完再 show
+               （「启动时最小化」则保持隐藏，由托盘唤起）。 */
             let mut main_b = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -6899,7 +8067,8 @@ fn main() {
             .transparent(true)
             .shadow(false)
             .center()
-            .resizable(true);
+            .resizable(true)
+            .visible(false);
             if cdp {
                 main_b = main_b.additional_browser_args(CDP_ARGS);
             }
@@ -6950,6 +8119,9 @@ fn main() {
 
             /* ---- 托盘 / 关闭到托盘 / 启动时最小化 / 界面缩放（0.3.30） ----
                这一块必须紧跟 `manage(AppState)`：`read_ui_prefs` 要靠 AppState 里的 data_dir。 */
+            /* 「启动时最小化到托盘」是否真的成立：托盘没建成就不能把窗口藏起来 ——
+               用户既看不到窗口也找不到托盘图标，只能去任务管理器杀进程。 */
+            let start_hidden;
             {
                 let h = app.handle().clone();
                 let ui = read_ui_prefs(&h);
@@ -6965,8 +8137,10 @@ fn main() {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = am_set_ui_scale(w.clone(), ui.ui_scale);
                 }
-                /* 启动时最小化：直接不显示主窗口（托盘里点一下再出来） */
-                if ui.start_minimized && tray_ok {
+                /* 启动时最小化：直接不显示主窗口（托盘里点一下再出来）。
+                   窗口现在是 `visible(false)` 建的，这里 hide 只是兜底语义。 */
+                start_hidden = ui.start_minimized && tray_ok;
+                if start_hidden {
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.hide();
                     }
@@ -7004,35 +8178,17 @@ fn main() {
                 });
             }
 
-            // 启动增量扫描（T06）：等界面先画出来，再拿索引里记的 mtime 比对磁盘。
-            // 不递归、不全量，所以几万目录也就一两秒；有变化才推 fs://changed。
-            let handle = app.handle().clone();
-            let data2 = data.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(2500));
-                let Ok(mut a) = open_app(&data2) else { return };
-                let cancel = AtomicBool::new(false);
-                if let Ok(s) = a.incremental(&cancel, 4000, |_p| {}) {
-                    if s.dirs + s.removed_dirs > 0 {
-                        eprintln!(
-                            "启动增量扫描：{} 个目录有变化，{} 个文件，{} ms",
-                            s.dirs + s.removed_dirs,
-                            s.files,
-                            s.elapsed_ms
-                        );
-                        let _ = handle.emit("fs://changed", Vec::<String>::new());
-                    }
-                }
-                /* 顺手补一批主色板。为什么放这儿：0.8.0 的色板只写进了预览那条路径，
-                   65k 张图的 palette 全是 NULL（顶栏颜色筛选因此一直是空的）。
-                   现在每次启动补 1500 张（读的是已缓存的 256 档缩略图，1–3ms/张），
-                   几十次启动就补齐了，也不占用户时间。 */
-                if let Ok((done, _left)) = a.fill_palette(1500) {
-                    if done > 0 {
-                        let _ = handle.emit("fs://changed", Vec::<String>::new());
-                    }
-                }
-            });
+            /* 启动编排（2026-11-22）：启动页 → 当前库增量扫描 → 主界面 → 其余库后台扫。
+               替换原来的「sleep 2.5s 后全库增量」：用户明确要求当前库扫完就进主界面，
+               不能等所有库。扫描细节、日志与交接全部在 `startup_scan_and_splash` 里。 */
+            {
+                let h = app.handle().clone();
+                let d = data.clone();
+                let logs = default_dir.clone();
+                let hidden = start_hidden;
+                std::thread::spawn(move || startup_scan_and_splash(h, d, hidden, logs));
+            }
+            spawn_splash_watchdog(app.handle().clone(), default_dir.clone(), start_hidden);
 
             /* 恢复上次没关的贴图（F3 贴的参考图、截图……）。
                等主窗先画出来再开：一上来糊十几扇窗，用户会以为软件出问题了。
@@ -7088,6 +8244,7 @@ fn main() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            splash_state,
             am_roots,
             am_set_rating,
             am_set_note,
@@ -7138,6 +8295,19 @@ fn main() {
             am_set_ui_scale,
             am_set_autostart,
             am_get_autostart,
+            /* 托盘自绘菜单（2026-11-22）：同一批命令也供 tray.html 直接 invoke */
+            tray_menu_data,
+            tray_menu_sub,
+            tray_menu_hide,
+            tray_show_main,
+            tray_open_settings,
+            tray_list_libs,
+            tray_switch_lib,
+            tray_get_theme,
+            tray_set_theme,
+            tray_check_update,
+            tray_quit,
+            am_tray_menu_show,
             am_trash_restore,
             am_trash_purge,
             am_trash_empty,
@@ -7183,6 +8353,8 @@ fn main() {
             am_peek_ready,
             am_board_open,
             am_board_close,
+            am_board_top,
+            am_board_is_top,
             am_board_layout,
             am_board_place,
             am_board_notes,
@@ -7256,7 +8428,7 @@ fn main() {
             am_minimize,
             am_toggle_max
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("AssetManager 启动失败")
         .run(|_app, event| {
             // 退出时记一笔原因：区分「用户关的」「窗口被销毁」「正常退出」

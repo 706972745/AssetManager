@@ -5,7 +5,7 @@
  * 新东西必须落进对应分节，不要在文件末尾追加。
  * 本文件不持全局状态（状态在 `App.tsx`），文件操作一律走 `source.xxx`，不直接 invoke。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { SearchSuggest, useSuggest } from "./SearchSuggest";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
@@ -55,6 +55,7 @@ export function TitleBar({
   /* 标题栏只写应用名。以前这里还跟一段「— 快照：xxx / 标签：xxx」表示"我在看什么"
      （T44 的轻量版），owner 2026-11-18 明确不要：侧栏本来就高亮着当前项，
      标题栏再写一遍只是噪音，而且长名字会把标题挤走。 */
+  const t = useT();
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-brand" data-tauri-drag-region>
@@ -71,33 +72,33 @@ export function TitleBar({
          离右边的窗口按钮一大截 —— owner 截图指的就是这里。 */}
       <div className="titlebar-controls">
         <div className="titlebar-actions">
-          <button className="tb-action" title="撤销上一步（Ctrl+Z）" onClick={onUndo} disabled={busy}>
+          <button className="tb-action" title={t("chrome.undo")} onClick={onUndo} disabled={busy}>
             <Icon name="undo" size={14} stroke={1.5} />
           </button>
-          <button className="tb-action" title="添加素材文件夹" onClick={onAddFolder} disabled={busy}>
+          <button className="tb-action" title={t("chrome.add_folder")} onClick={onAddFolder} disabled={busy}>
             {/* 照 FontManager 的「打开文件夹 + 外挂加号」（owner 2026-11-18 指定），
                 不是 lucide 的 FolderPlus —— 那个是闭合文件夹，认不出来。 */}
             <Icon name="folder-plus" size={14} />
           </button>
-          <button className="tb-action" title="重新扫描" onClick={onRescan} disabled={busy}>
+          <button className="tb-action" title={t("chrome.rescan")} onClick={onRescan} disabled={busy}>
             <Icon name="scan" size={14} stroke={1.5} />
           </button>
-          <button className="tb-action" title="设置" onClick={onSettings}>
+          <button className="tb-action" title={t("chrome.settings")} onClick={onSettings}>
             <Icon name="settings" size={14} stroke={1.5} />
           </button>
         </div>
         <span className="titlebar-sep" aria-hidden />
-        <button className="tc-btn" title="最小化" onClick={win("am_minimize")}>
+        <button className="tc-btn" title={t("chrome.minimize")} onClick={win("am_minimize")}>
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
             <path d="M2.5 6h7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
         </button>
-        <button className="tc-btn" title="最大化" onClick={win("am_toggle_max")}>
+        <button className="tc-btn" title={t("chrome.maximize")} onClick={win("am_toggle_max")}>
           <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
             <rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.1" />
           </svg>
         </button>
-        <button className="tc-close" title="关闭" onClick={win("am_close")}>
+        <button className="tc-close" title={t("chrome.close")} onClick={win("am_close")}>
           <Icon name="close" size={13} />
         </button>
       </div>
@@ -144,7 +145,7 @@ const COLOR_LABEL_KEY: Record<string, TKey> = {
   white: "topbar.color_white",
 };
 
-export function TopBar({
+function TopBarImpl({
   text,
   onText,
   kindKey,
@@ -667,6 +668,7 @@ function SquarePreview({
   onPressStart: (e: React.MouseEvent) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
+  const t = useT();
 
   /* 尺寸全交给 CSS（`width:100%; height:auto` + 方框 `aspect-ratio:1/1` + `overflow-y:auto`）。
      之前用 JS 算像素高度，超长图（例如 1080×6555）会把 flex 行撑坏、预览整块消失 ——
@@ -681,7 +683,7 @@ function SquarePreview({
     <div
       ref={box}
       className="detail-art"
-      title="按住拖动 = 把原文件拖到 PS / 资源管理器；竖着的部分滚轮往下看"
+      title={t("chrome.preview_tip")}
       onMouseDown={onPressStart}
     >
       <img src={src} alt="" draggable={false} />
@@ -711,6 +713,7 @@ function RatingStars({
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(0);
   const [pos, setPos] = useState({ left: -999, top: -999 });
+  const t = useT();
   const btn = useRef<HTMLButtonElement>(null);
   const pop = useRef<HTMLDivElement>(null);
   const openTimer = useRef<number | undefined>(undefined);
@@ -797,12 +800,12 @@ function RatingStars({
         className={`rating-btn ${rating > 0 ? "on" : ""}`}
         title={
           rating === 0
-            ? "点一下打 1 星 · 悬停可选 1–5 星"
+            ? t("chrome.rate_none_tip")
             : rating === 1
-              ? "已评 1 星 · 再点一下取消"
-              : `已评 ${rating} 星 · 点一下设为 1 星，悬停可改`
+              ? t("chrome.rate_one_tip")
+              : t("chrome.rate_many_tip", { n: rating })
         }
-        aria-label="评分"
+        aria-label={t("chrome.rating")}
         aria-expanded={open}
         onMouseEnter={() => show(RATING_OPEN_DELAY)}
         onMouseLeave={hide}
@@ -825,7 +828,7 @@ function RatingStars({
             className="rating-pop"
             style={{ left: pos.left, top: pos.top }}
             role="group"
-            aria-label="打分"
+            aria-label={t("chrome.rating_pop")}
             onMouseEnter={() => show(0)}
             onMouseLeave={hide}
             onMouseDown={(e) => e.stopPropagation()}
@@ -836,8 +839,8 @@ function RatingStars({
                 <button
                   key={n}
                   className={`rating-star ${n <= (hover || rating) ? "on" : ""}`}
-                  title={`${n} 星`}
-                  aria-label={`${n} 星`}
+                  title={t("chrome.star_n", { n })}
+                  aria-label={t("chrome.star_n", { n })}
                   onMouseEnter={() => setHover(n)}
                   onFocus={() => setHover(n)}
                   onClick={() => rate(n)}
@@ -848,12 +851,16 @@ function RatingStars({
             </div>
             <div className="rating-pop-foot">
               <span className="rating-pop-value">
-                {hover > 0 ? `${hover} 星` : rating > 0 ? `${rating} 星` : "未评分"}
+                {hover > 0
+                  ? t("chrome.star_n", { n: hover })
+                  : rating > 0
+                    ? t("chrome.star_n", { n: rating })
+                    : t("chrome.unrated")}
               </span>
               {rating > 0 && (
                 <button className="rating-pop-clear" onClick={() => rate(0)}>
                   <Icon name="close" size={9} stroke={2} />
-                  清除
+                  {t("chrome.clear")}
                 </button>
               )}
             </div>
@@ -878,6 +885,7 @@ function TitleEdit({
   onCancel: () => void;
 }) {
   const box = useRef<HTMLInputElement>(null);
+  const t = useT();
   /* Enter 提交后 input 会被卸掉，blur 还会再追一次 —— 用一次性闸门挡掉重复提交 */
   const done = useRef(false);
   /* 不能用 autoFocus：双击的第二次 mouseup 落在**刚挂上的 input** 上，
@@ -914,7 +922,7 @@ function TitleEdit({
       className="detail-title detail-title-edit"
       defaultValue={name}
       spellCheck={false}
-      aria-label="重命名文件"
+      aria-label={t("chrome.rename_file")}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -1008,6 +1016,7 @@ export function Detail({
   pop?: { x: number; y: number } | null;
   onClosePop?: () => void;
 }) {
+  const t = useT();
   const [width, setWidth] = useState(() => {
     /* 宽度记在本地（照 FontManager：它把 panelWidth 存进 prefs）。
        默认 348、范围 300–560 与 FontManager 完全相同。 */
@@ -1108,7 +1117,7 @@ export function Detail({
     const now = Date.now();
     if (now - titleCopiedAt.current < 350) return;
     titleCopiedAt.current = now;
-    void copy(name, "文件名");
+    void copy(name, t("chrome.what_filename"));
   };
 
   /* 详情里的预览图也能直接拖出去（与网格里的瓦片同一套手势）：
@@ -1165,7 +1174,7 @@ export function Detail({
 
   const copy = async (text: string, what: string) => {
     const ok = await copyText(text);
-    onToast(ok ? `已复制${what}` : `复制失败，可以手动选中`, !ok);
+    onToast(ok ? t("chrome.copied", { what }) : t("chrome.copy_failed"), !ok);
   };
 
   /* 没选中素材时什么都不渲染；右键浮层关闭后也就整块卸掉（不留空壳、不占位）。
@@ -1175,13 +1184,13 @@ export function Detail({
       <aside
         className="detail is-pop"
         style={{ left: popPos.left, top: popPos.top, width: popPos.width, height: popPos.height }}
-        aria-label="详情"
+        aria-label={t("chrome.detail")}
       >
       <div
         className="detail-resize"
         role="separator"
         aria-orientation="vertical"
-        title="拖动调整宽度，双击复位"
+        title={t("chrome.resize_tip")}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
@@ -1206,7 +1215,7 @@ export function Detail({
               ) : (
                 <button
                   className="detail-title"
-                  title="双击改名 · Shift+双击复制文件名"
+                  title={t("chrome.title_tip")}
                   onClick={(e) => {
                     /* 用 click 的 detail 判双击，而不是只靠 onDoubleClick：
                        WebView2 在部分输入路径下不派发 dblclick（自测注入点击就是如此），
@@ -1248,13 +1257,13 @@ export function Detail({
                   }}
                 />
                 {palette.length > 0 && (
-                  <div className="detail-palette" aria-label="主色板">
+                  <div className="detail-palette" aria-label={t("chrome.palette")}>
                     {palette.slice(0, 6).map((hex, i) => (
                       <button
                         key={`${hex}-${i}`}
                         style={{ background: `#${hex}` }}
-                        title={`#${hex.toUpperCase()} · 点击复制`}
-                        onClick={() => void copy(`#${hex.toUpperCase()}`, "色值")}
+                        title={t("chrome.hex_copy_tip", { hex: hex.toUpperCase() })}
+                        onClick={() => void copy(`#${hex.toUpperCase()}`, t("chrome.what_color"))}
                       />
                     ))}
                   </div>
@@ -1264,36 +1273,36 @@ export function Detail({
               <div className="detail-artmeta mono">
                 <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
                 <span>{fmtSize(asset.size)}</span>
-                <span>{KIND_LABEL[asset.kind] ?? "其他"}</span>
+                <span>{KIND_LABEL[asset.kind] ?? t("chrome.kind_other")}</span>
               </div>
 
               <section>
-                <div className="detail-heading">基本信息</div>
+                <div className="detail-heading">{t("chrome.sec_basic")}</div>
                 <dl className="detail-meta">
-                  <dt>格式</dt>
+                  <dt>{t("chrome.fmt")}</dt>
                   <dd>{asset.ext.toUpperCase()}</dd>
-                  <dt>尺寸</dt>
+                  <dt>{t("chrome.dimensions")}</dt>
                   <dd className="mono">
                     {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
                   </dd>
-                  <dt>大小</dt>
+                  <dt>{t("chrome.size")}</dt>
                   <dd className="mono">{fmtSize(asset.size)}</dd>
-                  <dt>修改时间</dt>
+                  <dt>{t("chrome.mtime")}</dt>
                   <dd className="mono">{fmtTime(asset.mtime)}</dd>
-                  <dt>添加日期</dt>
+                  <dt>{t("chrome.added")}</dt>
                   <dd
                     className="mono"
                     /* 0.1.16 及更早的库里没有这个值 —— 如实写「未知」，
                        不拿 mtime 顶上（那是文件的修改时间，不是入库时间） */
                     title={
                       asset.addedAt
-                        ? "第一次被这个软件扫到的时间"
-                        : "这张图入库时还没有记录添加时间（0.1.17 之前的版本）；重新扫描也不会补"
+                        ? t("chrome.added_tip")
+                        : t("chrome.added_tip_unknown")
                     }
                   >
-                    {asset.addedAt ? fmtTime(asset.addedAt) : "未知"}
+                    {asset.addedAt ? fmtTime(asset.addedAt) : t("chrome.unknown")}
                   </dd>
-                  <dt>位置</dt>
+                  <dt>{t("chrome.location")}</dt>
                   <dd>
                     {/* 悬停 1 秒弹完整路径（图上只放得下一行，长路径必被截） */}
                     <button
@@ -1317,7 +1326,7 @@ export function Detail({
                     aria-expanded={exifOpen}
                     onClick={() => setExifOpen((v) => !v)}
                   >
-                    <span className="detail-heading">拍摄信息</span>
+                    <span className="detail-heading">{t("chrome.sec_exif")}</span>
                     {!exifOpen && exifSummary(exif) && (
                       <span className="detail-fold-hint mono">{exifSummary(exif)}</span>
                     )}
@@ -1328,7 +1337,7 @@ export function Detail({
                       <dl className="detail-meta">
                         {exif.model && (
                           <>
-                            <dt>机身</dt>
+                            <dt>{t("chrome.exif_model")}</dt>
                             <dd>
                               {exif.make ? `${exif.make} ` : ""}
                               {exif.model}
@@ -1337,25 +1346,25 @@ export function Detail({
                         )}
                         {exif.lens && (
                           <>
-                            <dt>镜头</dt>
+                            <dt>{t("chrome.exif_lens")}</dt>
                             <dd className="wrap">{exif.lens}</dd>
                           </>
                         )}
                         {exif.focal != null && (
                           <>
-                            <dt>焦距</dt>
+                            <dt>{t("chrome.exif_focal")}</dt>
                             <dd className="mono">{exif.focal}</dd>
                           </>
                         )}
                         {exif.fNumber != null && (
                           <>
-                            <dt>光圈</dt>
+                            <dt>{t("chrome.exif_aperture")}</dt>
                             <dd className="mono">f/{exif.fNumber}</dd>
                           </>
                         )}
                         {exif.exposure && (
                           <>
-                            <dt>快门</dt>
+                            <dt>{t("chrome.exif_shutter")}</dt>
                             <dd className="mono">{exif.exposure}s</dd>
                           </>
                         )}
@@ -1367,13 +1376,13 @@ export function Detail({
                         )}
                         {exif.taken && (
                           <>
-                            <dt>拍摄时间</dt>
+                            <dt>{t("chrome.exif_taken")}</dt>
                             <dd className="mono">{fmtExifTime(exif.taken)}</dd>
                           </>
                         )}
                         {exif.software && (
                           <>
-                            <dt>软件</dt>
+                            <dt>{t("chrome.exif_software")}</dt>
                             <dd className="wrap">{exif.software}</dd>
                           </>
                         )}
@@ -1386,12 +1395,12 @@ export function Detail({
               {/* 来源（人写的）排在「引用」上面：owner 2026-11-19 ——
                   引用是排障信息、默认收起，来源是可编辑的元数据，必须一眼能看到。 */}
               <section>
-                <div className="detail-heading">来源</div>
+                <div className="detail-heading">{t("chrome.sec_source")}</div>
                 <div className="mine-url">
                   <input
                     key={`url-${asset.id}`}
                     className="mine-url-input mono"
-                    placeholder="来源 URL（选填）"
+                    placeholder={t("chrome.source_placeholder")}
                     defaultValue={asset.sourceUrl}
                     onBlur={(e) => {
                       const v = e.target.value.trim();
@@ -1401,7 +1410,7 @@ export function Detail({
                   {asset.sourceUrl && (
                     <button
                       className="mine-url-open"
-                      title="用浏览器打开来源"
+                      title={t("chrome.open_source")}
                       onClick={() => {
                         void source.openUrl(asset.sourceUrl).catch(() => {});
                       }}
@@ -1420,7 +1429,7 @@ export function Detail({
                   aria-expanded={refsOpen}
                   onClick={() => setRefsOpen((v) => !v)}
                 >
-                  <span className="detail-heading">引用</span>
+                  <span className="detail-heading">{t("chrome.sec_refs")}</span>
                   <Icon name="chevron" size={12} stroke={2} className={refsOpen ? "rot90" : ""} />
                 </button>
 
@@ -1428,37 +1437,39 @@ export function Detail({
                   <div className="detail-fold-body">
                     {!PREVIEWABLE_KINDS.has(asset.kind) ? (
                       <dl className="detail-meta">
-                        <dt>缩略图</dt>
-                        <dd className="wrap">没有（这类文件没有预览图）</dd>
-                        <dt>怎么看</dt>
-                        <dd className="wrap">双击、或用下面的「用默认程序打开」</dd>
+                        <dt>{t("chrome.thumb")}</dt>
+                        <dd className="wrap">{t("chrome.thumb_none")}</dd>
+                        <dt>{t("chrome.thumb_how")}</dt>
+                        <dd className="wrap">{t("chrome.thumb_how_val")}</dd>
                       </dl>
                     ) : (
                       <dl className="detail-meta">
-                        <dt>缩略图</dt>
+                        <dt>{t("chrome.thumb")}</dt>
                         <dd className="mono">
-                          WebP · {thumbPx}px 档
+                          {t("chrome.thumb_webp", { px: thumbPx })}
                         </dd>
-                        <dt>来源</dt>
-                        <dd className="wrap">{thumbSourceLabel(asset)}</dd>
+                        <dt>{t("chrome.sec_source")}</dt>
+                        <dd className="wrap">{thumbSourceLabel(asset, t)}</dd>
                         {asset.quality === 2 && (
                           <>
-                            <dt>清晰度</dt>
+                            <dt>{t("chrome.thumb_quality")}</dt>
                             <dd className="wrap">
-                              受限于来源（
-                              {EMBEDDED_EXT.has(asset.ext) ? "文件里的内嵌预览" : "系统的缩略图提供者"}
-                              ），可能不如原图锐利
+                              {t("chrome.thumb_limited", {
+                                from: EMBEDDED_EXT.has(asset.ext)
+                                  ? t("chrome.thumb_from_embedded")
+                                  : t("chrome.thumb_from_system"),
+                              })}
                             </dd>
                           </>
                         )}
-                        <dt>用途</dt>
-                        <dd className="wrap">只为显示快；上面所有操作都不碰它</dd>
+                        <dt>{t("chrome.thumb_use")}</dt>
+                        <dd className="wrap">{t("chrome.thumb_use_val")}</dd>
                       </dl>
                     )}
 
                     {refsIn.length > 0 && (
                       <>
-                        <div className="detail-sub">被这些工程文件用着（{refsIn.length}）</div>
+                        <div className="detail-sub">{t("chrome.refs_in", { n: refsIn.length })}</div>
                         <ul className="ref-list">
                           {refsIn.slice(0, 6).map((r) => (
                             <li key={`in-${r.srcId}`} title={r.srcPath}>
@@ -1471,8 +1482,10 @@ export function Detail({
                     {refsOut.length > 0 && (
                       <>
                         <div className="detail-sub">
-                          这个工程引用的素材（{refsOut.length}，丢失{" "}
-                          {refsOut.filter((r) => r.missing).length}）
+                          {t("chrome.refs_out", {
+                            n: refsOut.length,
+                            m: refsOut.filter((r) => r.missing).length,
+                          })}
                         </div>
                         <ul className="ref-list">
                           {refsOut.slice(0, 8).map((r) => (
@@ -1482,21 +1495,21 @@ export function Detail({
                               title={r.dstPath}
                             >
                               {r.dstName || r.dstPath}
-                              {r.missing && <span className="miss-tag">找不到</span>}
+                              {r.missing && <span className="miss-tag">{t("chrome.ref_missing")}</span>}
                             </li>
                           ))}
                         </ul>
                       </>
                     )}
                     {refsIn.length === 0 && refsOut.length === 0 && PREVIEWABLE_KINDS.has(asset.kind) && (
-                      <p className="detail-note">没有工程文件引用它，它也没有引用别的素材。</p>
+                      <p className="detail-note">{t("chrome.refs_none")}</p>
                     )}
                   </div>
                 )}
               </section>
 
               <section>
-                <div className="detail-heading">标签</div>
+                <div className="detail-heading">{t("chrome.sec_tags")}</div>
                 <TagSection
                   manual={tags}
                   colors={colors}
@@ -1512,13 +1525,13 @@ export function Detail({
               </section>
 
               <section>
-                <div className="detail-heading">备注</div>
+                <div className="detail-heading">{t("chrome.sec_note")}</div>
                 {/* 备注 / 来源 URL 都是**人写的东西**：扫描与重建索引永远不碰它们 */}
                 <textarea
                   key={`note-${asset.id}`}
                   className="mine-note"
                   rows={3}
-                  placeholder="备注——例如：给客户 A 的那一版"
+                  placeholder={t("chrome.note_placeholder")}
                   defaultValue={asset.note}
                   onBlur={(e) => {
                     const v = e.target.value;
@@ -1530,38 +1543,37 @@ export function Detail({
 
               {/* 操作放最后（owner 2026-11-17）：删改这类动作不该挡在查看的路径上 */}
               <section>
-                <div className="detail-heading">操作（都作用在原文件上）</div>
+                <div className="detail-heading">{t("chrome.sec_actions")}</div>
                 <button
                   className="act-primary"
                   onClick={() => onOpenDefault(asset)}
                   disabled={!source.desktop}
                 >
-                  <span>用默认程序打开</span>
+                  <span>{t("chrome.act_open")}</span>
                   <Icon name="image" size={13} stroke={1.5} />
                 </button>
                 <div className="act-row">
                   <button className="btn" onClick={() => onReveal(asset)}>
-                    在资源管理器中显示
+                    {t("chrome.act_reveal")}
                   </button>
                   <button className="btn" onClick={() => onCopyFile(asset)} disabled={!source.desktop}>
-                    复制文件
+                    {t("chrome.act_copy")}
                   </button>
                 </div>
                 <div className="act-row">
                   <button className="btn" onClick={() => onPeek(asset)}>
-                    贴图
+                    {t("chrome.act_peek")}
                   </button>
                   <button
                     className="btn btn-danger"
                     onClick={() => onDelete(asset)}
                     disabled={!source.desktop}
                   >
-                    删除
+                    {t("chrome.act_delete")}
                   </button>
                 </div>
                 <p className="detail-note">
-                  按住上面的预览图往外拖 = 把原文件拖到 Photoshop / 资源管理器；
-                  拖到左侧目录树 = 移动到这个文件夹。出去/移走的都是磁盘上的原文件。
+                  {t("chrome.act_drag_note")}
                 </p>
               </section>
             </div>
@@ -1612,6 +1624,7 @@ function TagSection({
   onDeny: (tag: string) => void;
   onEdit: (tag: string) => void;
 }) {
+  const t = useT();
   const [q, setQ] = useState("");
   const [picker, setPicker] = useState(false);
   const [pq, setPq] = useState("");
@@ -1650,14 +1663,14 @@ function TagSection({
   }, [firstId]);
 
   const commit = (v: string) => {
-    const t = v.trim();
-    if (!t) return;
-    onAdd(t);
+    const tag = v.trim();
+    if (!tag) return;
+    onAdd(tag);
     setQ("");
   };
 
-  const togglePick = (t: string) => {
-    setPicked((cur) => (cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t]));
+  const togglePick = (name: string) => {
+    setPicked((cur) => (cur.includes(name) ? cur.filter((x) => x !== name) : [...cur, name]));
   };
 
   const commitPicked = () => {
@@ -1669,26 +1682,26 @@ function TagSection({
 
   return (
     <div className="tag-editor">
-      {manual.map((t) => (
+      {manual.map((name) => (
         <span
-          key={t}
-          className={`tag-chip tag-chip-iconed ${colorClass(colors[t])}`}
-          title="点名字按它筛选；右键改颜色 / 分组"
+          key={name}
+          className={`tag-chip tag-chip-iconed ${colorClass(colors[name])}`}
+          title={t("chrome.tag_chip_tip")}
           onContextMenu={(e) => {
             e.preventDefault();
-            onEdit(t);
+            onEdit(name);
           }}
         >
           <span className="tag-dot tag-dot-chip" aria-hidden />
           <Icon name="tag" size={10} stroke={1.5} className="tag-manual-icon" />
-          <button className="tag-chip-text" onClick={() => onPick(t)}>
-            {t}
+          <button className="tag-chip-text" onClick={() => onPick(name)}>
+            {name}
           </button>
           <button
             className="tag-chip-x"
-            title="从这张素材上移除此标签"
-            aria-label={`移除标签 ${t}`}
-            onClick={() => onRemove(t)}
+            title={t("chrome.tag_remove")}
+            aria-label={t("chrome.tag_remove_aria", { name })}
+            onClick={() => onRemove(name)}
           >
             <Icon name="close" size={9} stroke={2} />
           </button>
@@ -1701,7 +1714,7 @@ function TagSection({
         <span
           key={a.tag}
           className="tag-chip tag-chip-auto"
-          title={`${a.reason}｜右键可「不再建议」`}
+          title={t("chrome.auto_tag_tip", { reason: a.reason })}
           onContextMenu={(e) => {
             e.preventDefault();
             onDeny(a.tag);
@@ -1721,10 +1734,10 @@ function TagSection({
         <BlinkCaretInput
           value={q}
           onChange={setQ}
-          placeholder="添加标签…"
+          placeholder={t("chrome.tag_add_placeholder")}
           fieldClassName="tag-field"
           inputClassName="tag-input-field"
-          ariaLabel="标签名"
+          ariaLabel={t("chrome.tag_name_aria")}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -1738,8 +1751,8 @@ function TagSection({
         />
         <button
           className="tag-input-ok"
-          title="打上这个标签"
-          aria-label="打上这个标签"
+          title={t("chrome.tag_apply")}
+          aria-label={t("chrome.tag_apply")}
           disabled={!q.trim()}
           onClick={() => commit(q)}
         >
@@ -1756,18 +1769,18 @@ function TagSection({
           onClick={() => setPicker((v) => !v)}
         >
           <Icon name="plus" size={11} stroke={1.6} />
-          从已有标签选
+          {t("chrome.pick_existing")}
           {addable > 0 && <span className="tag-pick-badge tabular">{addable}</span>}
         </button>
 
       {picker && (
-        <div className="tag-picker" role="dialog" aria-label="选标签">
+        <div className="tag-picker" role="dialog" aria-label={t("chrome.pick_aria")}>
           <div className="tag-picker-head">
             <input
               autoFocus
               value={pq}
               onChange={(e) => setPq(e.target.value)}
-              placeholder="搜索标签…"
+              placeholder={t("chrome.pick_search")}
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
                   e.stopPropagation();
@@ -1778,7 +1791,7 @@ function TagSection({
             />
             <button
               className="tag-picker-close"
-              aria-label="关闭选择面板"
+              aria-label={t("chrome.pick_close")}
               onClick={() => {
                 setPicker(false);
                 setPq("");
@@ -1789,30 +1802,30 @@ function TagSection({
           </div>
           <ul className="tag-picker-list">
             {manualRows.length === 0 && autoRows.length === 0 ? (
-              <li className="tag-picker-empty">没有匹配的标签</li>
+              <li className="tag-picker-empty">{t("chrome.pick_empty")}</li>
             ) : (
               <>
-                {manualRows.map((t) => {
-                  const on = manual.includes(t);
-                  const pickedNow = picked.includes(t);
+                {manualRows.map((name) => {
+                  const on = manual.includes(name);
+                  const pickedNow = picked.includes(name);
                   return (
-                    <li key={t}>
+                    <li key={name}>
                       <button
                         className={`tag-picker-item ${pickedNow ? "on" : ""}`}
                         disabled={on}
-                        title={on ? "这张素材已经有这个标签了" : `打上「${t}」`}
-                        onClick={() => togglePick(t)}
+                        title={on ? t("chrome.tag_already") : t("chrome.tag_apply_one", { name })}
+                        onClick={() => togglePick(name)}
                       >
                         <span className="tag-picker-mark">
                           {(pickedNow || on) && <Check size={11} strokeWidth={2} />}
                         </span>
-                        <span className="tag-picker-name">{t}</span>
+                        <span className="tag-picker-name">{name}</span>
                       </button>
                     </li>
                   );
                 })}
                 {autoRows.length > 0 && (
-                  <li className="tag-picker-sec">自动标签 · 点一下固定成你的标签</li>
+                  <li className="tag-picker-sec">{t("chrome.pick_auto_sec")}</li>
                 )}
                 {autoRows.map((a) => {
                   const on = manual.includes(a.label) || onAssetAuto.has(a.label);
@@ -1824,8 +1837,8 @@ function TagSection({
                         disabled={on}
                         title={
                           on
-                            ? "这张素材已经有这条标签了"
-                            : `全库 ${a.count} 项命中｜点一下固定成「${a.label}」`
+                            ? t("chrome.auto_already")
+                            : t("chrome.auto_apply", { n: a.count, label: a.label })
                         }
                         onClick={() => togglePick(a.label)}
                       >
@@ -1844,7 +1857,7 @@ function TagSection({
           </ul>
           <div className="tag-picker-foot">
             <button className="tag-picker-add" disabled={picked.length === 0} onClick={commitPicked}>
-              {picked.length > 0 ? `添加 ${picked.length} 个标签` : "添加标签"}
+              {picked.length > 0 ? t("chrome.add_n_tags", { n: picked.length }) : t("chrome.add_tag")}
             </button>
           </div>
         </div>
@@ -1852,7 +1865,7 @@ function TagSection({
       </div>
 
       {manual.length === 0 && auto.length === 0 && (
-        <p className="detail-note">还没有标签。在上面输入名字回车就能打上，也可以从已有标签里选。</p>
+        <p className="detail-note">{t("chrome.tags_empty")}</p>
       )}
     </div>
   );
@@ -1866,13 +1879,18 @@ const EMBEDDED_EXT = new Set([
 ]);
 
 /** 缩略图到底从哪来（T12）：详情面板必须如实说，不能一律写"本地解码"。 */
-function thumbSourceLabel(a: Asset): string {
+function thumbSourceLabel(a: Asset, tr: (k: TKey) => string): string {
   if (a.quality === 2) {
-    return EMBEDDED_EXT.has(a.ext) ? "文件内嵌预览（未解原图）" : "系统缩略图（Windows 提供者）";
+    return EMBEDDED_EXT.has(a.ext) ? tr("chrome.thumb_src_embedded") : tr("chrome.thumb_src_system");
   }
-  if (a.quality === 1) return "本地解码原图";
-  return "还没生成（滚到它时才出图）";
+  if (a.quality === 1) return tr("chrome.thumb_src_local");
+  return tr("chrome.thumb_src_pending");
 }
 
 /* 数量格式化给标题栏状态用（暂未使用，保留导出避免 tree-shake 报错） */
 export const fmtCount = fmtNum;
+
+/* memo 边界：顶栏只跟着「搜索词 / 排序 / 视图 / 各筛选项 / 库目录」重渲。
+   回调在 App 侧已 `useEvent` 稳定化（含 onColor / onTag / onDir / onRating 那四段
+   带"互斥清筛选"逻辑的），否则这里每次都会判 props 变了。 */
+export const TopBar = memo(TopBarImpl);

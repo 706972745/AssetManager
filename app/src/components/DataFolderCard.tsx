@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { DataRootInfo, Source } from "../types";
 import { Icon } from "./ui";
 import { useDialog } from "./Dialog";
+import { useT } from "../lib/i18n";
 
 /**
  * 设置 → 缓存与索引 →「索引与缓存位置」（原「数据文件夹」）。
@@ -33,6 +34,7 @@ export function DataFolderCard({
   /** 把文件夹加入素材库（用户选错地方时的正确出口） */
   onAddPath: (path: string) => Promise<void>;
 }) {
+  const t = useT();
   const dlg = useDialog();
   const [cfg, setCfg] = useState<DataRootInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -67,7 +69,7 @@ export function DataFolderCard({
         copyIndex: opts?.copy ?? true,
         force: opts?.force ?? false,
       });
-      onToast("索引位置已更新", false, msg);
+      onToast(t("settings.toast.dataRootUpdated"), false, msg);
       setPending(true);
       reload();
     } catch (e) {
@@ -87,27 +89,36 @@ export function DataFolderCard({
   const addFolder = async () => {
     if (!cfg) return;
     if (cfg.dirs.length >= cfg.max) {
-      onToast(`最多 ${cfg.max} 个位置`, true);
+      onToast(t("settings.toast.dataRootLimit", { max: cfg.max }), true);
       return;
     }
     try {
-      const picked = await source.pickFolder("选择索引与缩略图缓存的存放位置（不是素材库）");
+      const picked = await source.pickFolder(t("settings.pickDataRoot"));
       if (!picked) return;
 
       const probe = await source.probeDir(picked).catch(() => null);
       if (probe && (probe.images > 0 || probe.videos > 0)) {
         const choice = await dlg.ask({
-          title: "这个文件夹里都是素材",
+          title: t("settings.probeTitle"),
           body: (
             <div className="grow">
               <p>
-                这里已经有 <b>{probe.images.toLocaleString()}</b> 张图片
-                {probe.videos > 0 ? `、${probe.videos.toLocaleString()} 个视频` : ""}。
+                {t("settings.probeImagesBefore")}
+                <b>{probe.images.toLocaleString()}</b>
+                {t("settings.probeImagesAfter")}
+                {probe.videos > 0
+                  ? t("settings.probeVideos", { count: probe.videos.toLocaleString() })
+                  : ""}
+                {t("settings.probeEnd")}
               </p>
               <p style={{ marginTop: 8 }}>
-                「索引与缓存位置」只放数据库和缩略图，<b>放在这里不会让素材出现在软件里</b>，
-                反而会在你的素材目录里多出 <span className="mono">index.db</span>、
-                <span className="mono">cache</span> 这些东西。
+                {t("settings.probeWarnA")}
+                <b>{t("settings.probeWarnB")}</b>
+                {t("settings.probeWarnC")}
+                <span className="mono">index.db</span>
+                {t("app.common.list_sep")}
+                <span className="mono">cache</span>
+                {t("settings.probeWarnD")}
               </p>
               <p className="mono ellipsis" style={{ marginTop: 8, opacity: 0.7 }}>
                 {picked}
@@ -115,16 +126,16 @@ export function DataFolderCard({
             </div>
           ),
           buttons: [
-            { label: "取消", value: "cancel" },
-            { label: "仍用作索引位置", value: "force" },
-            { label: "加入素材库", value: "lib", tone: "accent" },
+            { label: t("app.common.cancel"), value: "cancel" },
+            { label: t("settings.probeForce"), value: "force" },
+            { label: t("settings.probeAddLib"), value: "lib", tone: "accent" },
           ],
         });
 
         if (choice === "lib") {
           const n = await source.libCount().catch(() => 0);
           if (n >= 3) {
-            onToast("素材库已经有 3 个了，先在「素材库」页移除一个", true);
+            onToast(t("settings.toast.libLimitReached"), true);
             return;
           }
           await onAddPath(picked);
@@ -167,10 +178,10 @@ export function DataFolderCard({
     return (
       <div className="dr-note">
         {err
-          ? `读取索引位置失败：${err}`
+          ? t("settings.dataRootReadFailed", { error: err })
           : source.desktop
-            ? "正在读取索引位置…"
-            : "浏览器预览里没有真实数据目录（桌面端才有）。"}
+            ? t("settings.dataRootLoading")
+            : t("settings.dataRootDesktopOnly")}
       </div>
     );
   }
@@ -178,15 +189,17 @@ export function DataFolderCard({
   return (
     <div className="dr-card">
       <div className="dr-head">
-        <span className="dr-title">索引与缓存位置</span>
+        <span className="dr-title">{t("settings.dataRoot")}</span>
         <span className="dr-sub">
-          只放 index.db 与缩略图；<b>素材库不在这里改</b> —— 去左侧「素材库」页
+          {t("settings.dataRootSubA")}
+          <b>{t("settings.dataRootSubB")}</b>
+          {t("settings.dataRootSubC")}
         </span>
       </div>
 
       {/* 默认位置：只读灰条，和 FontManager 那条「默认 …」完全同构 */}
       <div className="dr-default" title={cfg.defaultDir}>
-        <span className="dr-tag">默认</span>
+        <span className="dr-tag">{t("settings.default")}</span>
         <Icon name="folder" size={13} stroke={1.5} />
         <span className="dr-path mono">{cfg.defaultDir}</span>
       </div>
@@ -196,7 +209,7 @@ export function DataFolderCard({
           className={`switch ${cfg.enabled ? "on" : ""}`}
           role="switch"
           aria-checked={cfg.enabled}
-          aria-label="使用自定义位置"
+          aria-label={t("settings.useCustom")}
           disabled={busy}
           onClick={() => {
             if (cfg.enabled) {
@@ -210,11 +223,11 @@ export function DataFolderCard({
         >
           <span className="switch-knob" />
         </button>
-        <span className="dr-switch-label">使用自定义位置</span>
+        <span className="dr-switch-label">{t("settings.useCustom")}</span>
         <span className="grow" />
         <button className="set-btn" onClick={() => void addFolder()} disabled={busy}>
           <Icon name="plus" size={12} stroke={1.7} />
-          选择文件夹…
+          {t("settings.chooseFolder")}
         </button>
       </div>
 
@@ -232,14 +245,14 @@ export function DataFolderCard({
                     void save({ enabled: true, current: d, dirs: cfg.dirs });
                   }
                 }}
-                title={isCurrent ? "正在使用" : "点一下切到这个文件夹"}
+                title={isCurrent ? t("settings.inUse") : t("settings.switchTo")}
               >
                 <Icon name="folder" size={13} stroke={1.5} className="dr-row-icon" />
                 <span className="dr-path mono">{d}</span>
-                {isEffective && <span className="dr-badge">当前</span>}
+                {isEffective && <span className="dr-badge">{t("settings.current")}</span>}
                 <button
                   className="dr-act dr-act-open"
-                  title="在资源管理器中打开"
+                  title={t("app.menu.reveal_open")}
                   onClick={(e) => {
                     e.stopPropagation();
                     void source.reveal(d).catch((err) => onToast(String(err), true));
@@ -249,7 +262,7 @@ export function DataFolderCard({
                 </button>
                 <button
                   className="dr-act dr-act-remove"
-                  title="从清单移除（不删硬盘上的任何东西）"
+                  title={t("settings.removeFromList")}
                   onClick={(e) => {
                     e.stopPropagation();
                     void remove(d);
@@ -265,15 +278,16 @@ export function DataFolderCard({
 
       <div className="dr-foot">
         <span className="dr-note">
-          当前生效：<span className="mono">{cfg.effectiveDir}</span>
-          {pending ? "　·　已改动，重启后生效" : ""}
+          {t("settings.effectiveDir")}
+          <span className="mono">{cfg.effectiveDir}</span>
+          {pending ? t("settings.pendingRestart") : ""}
         </span>
         <button
           className="set-btn"
           disabled={busy || !pending}
           onClick={() => void source.relaunch().catch((e) => onToast(String(e), true))}
         >
-          立即重启
+          {t("settings.relaunch")}
         </button>
       </div>
       {dlg.node}

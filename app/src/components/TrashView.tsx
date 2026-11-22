@@ -13,6 +13,7 @@ import { source } from "../data/source";
 import type { TrashEntry } from "../types";
 import { fmtSize, fmtTime } from "../types";
 import { Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 /** 扩展名徽标（和网格里的 `.tile-badge` 同一套口径：大写、最长 4 个字） */
 function extOf(name: string): string {
@@ -40,10 +41,11 @@ export function TrashView({
   onEmpty: () => void;
   onClose: () => void;
 }) {
+  const t = useT();
   /** 挑目录再还原：贴图默认进回收站，想留底就挑个自己的素材夹 */
   const restoreTo = (id: string) => {
     void source
-      .pickFolder("还原到哪个文件夹")
+      .pickFolder(t("trash.pickFolder"))
       .then((dir) => {
         if (dir) onRestore([id], dir);
       })
@@ -53,12 +55,12 @@ export function TrashView({
   return (
     <div className="trash-view">
       <div className="trash-bar">
-        <span className="grow">{`回收站里 ${items.length} 项`}</span>
+        <span className="grow">{t("trash.count", { count: items.length })}</span>
         <button className="btn" onClick={onClose}>
-          退出回收站
+          {t("trash.exit")}
         </button>
         <button className="btn" onClick={onEmpty} disabled={items.length === 0}>
-          清空回收站
+          {t("trash.empty")}
         </button>
       </div>
 
@@ -68,61 +70,61 @@ export function TrashView({
             <span className="empty-tile">
               <Icon name="trash" size={26} stroke={1.5} />
             </span>
-            <h2>回收站是空的</h2>
-            <p>移到回收站的文件会先放在这里，可以还原；清空或彻底删除时才进系统回收站。</p>
+            <h2>{t("trash.emptyTitle")}</h2>
+            <p>{t("trash.emptyBody")}</p>
           </div>
         </div>
       ) : (
         <div className="trash-list">
-          {items.map((t) => (
+          {items.map((row) => (
             <div
-              key={t.id}
-              className={`trash-row ${selected === t.id ? "sel" : ""}`}
-              title={t.originalPath}
-              onClick={() => onSelect(selected === t.id ? null : t.id)}
+              key={row.id}
+              className={`trash-row ${selected === row.id ? "sel" : ""}`}
+              title={row.originalPath}
+              onClick={() => onSelect(selected === row.id ? null : row.id)}
             >
               <span className="trash-thumb">
-                {thumbs[t.id] ? (
-                  <img src={thumbs[t.id]} alt="" draggable={false} />
+                {thumbs[row.id] ? (
+                  <img src={thumbs[row.id]} alt="" draggable={false} />
                 ) : (
                   <Icon name="image" size={15} stroke={1.5} />
                 )}
               </span>
               <div className="trash-info">
-                <span className="trash-name">{t.name}</span>
-                <span className="trash-path mono">{t.originalPath}</span>
+                <span className="trash-name">{row.name}</span>
+                <span className="trash-path mono">{row.originalPath}</span>
               </div>
               <span className="trash-meta mono">
-                {fmtSize(t.size)} · {fmtTime(t.deletedAt)}
+                {fmtSize(row.size)} · {fmtTime(row.deletedAt)}
               </span>
               <button
                 className="btn"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onRestore([t.id]);
+                  onRestore([row.id]);
                 }}
-                title="还原到原来的位置"
+                title={t("trash.restoreTitle")}
               >
-                还原
+                {t("trash.restore")}
               </button>
               <button
                 className="btn"
-                title="还原到指定文件夹（截图贴图默认进回收站，想留底就存到自己挑的地方）"
+                title={t("trash.restoreToTitle")}
                 onClick={(e) => {
                   e.stopPropagation();
-                  restoreTo(t.id);
+                  restoreTo(row.id);
                 }}
               >
-                还原到…
+                {t("trash.restoreTo")}
               </button>
               <button
                 className="btn btn-danger"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onPurge([t.id]);
+                  onPurge([row.id]);
                 }}
               >
-                彻底删除
+                {t("trash.purge")}
               </button>
             </div>
           ))}
@@ -155,8 +157,9 @@ export function TrashDetail({
   onRestore: (ids: string[], to?: string) => void;
   onPurge: (ids: string[]) => void;
 }) {
+  const t = useT();
   return (
-    <aside className="detail trash-detail" style={{ width: 348 }} aria-label="回收站详情">
+    <aside className="detail trash-detail" style={{ width: 348 }} aria-label={t("trash.detailAria")}>
       <div className="detail-inner scroll-hot">
         <header className="detail-head">
           <span className="detail-badge mono">{extOf(entry.name)}</span>
@@ -170,26 +173,26 @@ export function TrashDetail({
             {src ? (
               <img src={src} alt="" draggable={false} />
             ) : (
-              <span>这张图已经不在回收站里了</span>
+              <span>{t("trash.gone")}</span>
             )}
           </div>
 
           <div className="detail-artmeta mono">
             <span>{fmtSize(entry.size)}</span>
-            <span>回收站</span>
+            <span>{t("trash.badge")}</span>
             <span>{fmtTime(entry.deletedAt)}</span>
           </div>
 
           <section>
-            <div className="detail-heading">基本信息</div>
+            <div className="detail-heading">{t("trash.basicInfo")}</div>
             <dl className="detail-meta">
-              <dt>文件名</dt>
+              <dt>{t("trash.fileName")}</dt>
               <dd title={entry.name}>{entry.name}</dd>
-              <dt>大小</dt>
+              <dt>{t("trash.size")}</dt>
               <dd>{fmtSize(entry.size)}</dd>
-              <dt>删除时间</dt>
+              <dt>{t("trash.deletedAt")}</dt>
               <dd>{fmtTime(entry.deletedAt)}</dd>
-              <dt>原位置</dt>
+              <dt>{t("trash.originalPath")}</dt>
               <dd className="mono" title={entry.originalPath}>
                 {entry.originalPath}
               </dd>
@@ -198,23 +201,23 @@ export function TrashDetail({
 
           <section className="trash-detail-actions">
             <button className="btn" onClick={() => onRestore([entry.id])}>
-              还原到原位置
+              {t("trash.restoreHere")}
             </button>
             <button
               className="btn"
               onClick={() => {
                 void source
-                  .pickFolder("还原到哪个文件夹")
+                  .pickFolder(t("trash.pickFolder"))
                   .then((dir) => {
                     if (dir) onRestore([entry.id], dir);
                   })
                   .catch(() => {});
               }}
             >
-              还原到…
+              {t("trash.restoreTo")}
             </button>
             <button className="btn btn-danger" onClick={() => onPurge([entry.id])}>
-              彻底删除
+              {t("trash.purge")}
             </button>
           </section>
         </div>

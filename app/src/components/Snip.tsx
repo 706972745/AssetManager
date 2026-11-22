@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { onAppEvent, source } from "../data/source";
 import { loadPrefs } from "../types";
+import { useT, type TKey } from "../lib/i18n";
 
 /**
  * 截图覆盖层（F1）—— 0.5.0 起换成「分组工具条 v2」（同事的方案 + 原型，
@@ -317,14 +318,15 @@ function WidthGlyph({ w }: { w: number }) {
 
 interface ToolDef {
   id: ToolId;
-  name: string;
+  /** 文案 key：这里只有配置，翻译在渲染时取（语言切换才跟得上） */
+  nameKey: TKey;
   key: string;
   icon: string;
   off?: boolean;
 }
 interface GroupDef {
   id: string;
-  name: string;
+  nameKey: TKey;
   face: Tool;
   items: ToolDef[];
 }
@@ -332,53 +334,53 @@ interface GroupDef {
 const GROUPS: GroupDef[] = [
   {
     id: "shape",
-    name: "形状",
+    nameKey: "snip.group_shape",
     face: "rect",
     items: [
-      { id: "rect", name: "矩形", key: "R", icon: "rect" },
-      { id: "ellipse", name: "圆形 / 椭圆", key: "E", icon: "ellipse" },
-      { id: "line", name: "直线", key: "L", icon: "line" },
-      { id: "arrow", name: "箭头", key: "A", icon: "arrow" },
+      { id: "rect", nameKey: "snip.tool_rect", key: "R", icon: "rect" },
+      { id: "ellipse", nameKey: "snip.tool_ellipse", key: "E", icon: "ellipse" },
+      { id: "line", nameKey: "snip.tool_line", key: "L", icon: "line" },
+      { id: "arrow", nameKey: "snip.tool_arrow", key: "A", icon: "arrow" },
     ],
   },
   {
     id: "brush",
-    name: "画笔",
+    nameKey: "snip.group_brush",
     face: "pen",
     items: [
-      { id: "pen", name: "自由画笔", key: "P", icon: "pen" },
-      { id: "marker", name: "荧光笔", key: "H", icon: "marker" },
+      { id: "pen", nameKey: "snip.tool_pen", key: "P", icon: "pen" },
+      { id: "marker", nameKey: "snip.tool_marker", key: "H", icon: "marker" },
     ],
   },
   {
     id: "text",
-    name: "文字标注",
+    nameKey: "snip.group_text",
     face: "text",
     items: [
-      { id: "text", name: "文字", key: "T", icon: "text" },
-      { id: "badge", name: "序号标记", key: "N", icon: "badge" },
-      { id: "callout", name: "引线气泡", key: "K", icon: "callout" },
+      { id: "text", nameKey: "snip.tool_text", key: "T", icon: "text" },
+      { id: "badge", nameKey: "snip.tool_badge", key: "N", icon: "badge" },
+      { id: "callout", nameKey: "snip.tool_callout", key: "K", icon: "callout" },
     ],
   },
   {
     id: "mask",
-    name: "遮挡 / 打码",
+    nameKey: "snip.group_mask",
     face: "mosaic",
     items: [
-      { id: "mosaic", name: "马赛克", key: "M", icon: "mosaic" },
-      { id: "blur", name: "高斯模糊", key: "B", icon: "blur" },
-      { id: "block", name: "色块遮挡", key: "G", icon: "block" },
+      { id: "mosaic", nameKey: "snip.tool_mosaic", key: "M", icon: "mosaic" },
+      { id: "blur", nameKey: "snip.tool_blur", key: "B", icon: "blur" },
+      { id: "block", nameKey: "snip.tool_block", key: "G", icon: "block" },
     ],
   },
   {
     id: "sticker",
-    name: "素材",
+    nameKey: "snip.group_sticker",
     face: "check",
     items: [
-      { id: "sticker", name: "贴纸表情（下一版）", key: "S", icon: "sticker", off: true },
-      { id: "check", name: "勾选图章", key: "X", icon: "check" },
-      { id: "cross", name: "叉号图章", key: "C", icon: "cross" },
-      { id: "image", name: "插入图片（下一版）", key: "I", icon: "image", off: true },
+      { id: "sticker", nameKey: "snip.tool_sticker", key: "S", icon: "sticker", off: true },
+      { id: "check", nameKey: "snip.tool_check", key: "X", icon: "check" },
+      { id: "cross", nameKey: "snip.tool_cross", key: "C", icon: "cross" },
+      { id: "image", nameKey: "snip.tool_image", key: "I", icon: "image", off: true },
     ],
   },
 ];
@@ -407,6 +409,7 @@ function resolveTheme(): "dark" | "light" {
 /* ---------------- 入口 ---------------- */
 
 export function Snip() {
+  const t = useT();
   const boot = bootData();
   const [scale, setScale] = useState(boot?.scale ?? 1);
   const W = boot ? boot.w / scale : window.innerWidth;
@@ -449,8 +452,8 @@ export function Snip() {
   /** 覆盖层底部那句一次性提示 */
   const [hint, setHint] = useState("");
   const hintTimer = useRef(0);
-  const say = useCallback((t: string) => {
-    setHint(t);
+  const say = useCallback((msg: string) => {
+    setHint(msg);
     window.clearTimeout(hintTimer.current);
     hintTimer.current = window.setTimeout(() => setHint(""), 2600);
   }, []);
@@ -840,13 +843,13 @@ export function Snip() {
 
   const isTexty = tool === "text" || tool === "callout";
 
-  const pickTool = (t: ToolId) => {
-    const def = GROUPS.flatMap((g) => g.items).find((i) => i.id === t);
+  const pickTool = (id: ToolId) => {
+    const def = GROUPS.flatMap((g) => g.items).find((i) => i.id === id);
     if (def?.off) {
-      say(`${def.name}：入口已就位，像素级能力下一版接`);
+      say(t("snip.say_off_soon", { name: t(def.nameKey) }));
       return;
     }
-    const tt = t as Tool;
+    const tt = id as Tool;
     /* 点得快的时候，悬停展开的 110ms 定时器还没到点；不清掉它，选完工具托盘还会自己弹出来 */
     window.clearTimeout(hoverT.current.open);
     setTool(tt);
@@ -856,10 +859,10 @@ export function Snip() {
     setPaletteOpen(false);
     setMenuOpen(false);
     setSelOp(null);
-    if (tt === "text") say("文字：在选区内单击输入，Enter 确认");
-    if (tt === "callout") say("引线气泡：单击落点后输入文字，Enter 确认");
-    if (tt === "badge") say(`序号标记：单击落点，下一个编号 ${badgeRef.current}（双击图标归零）`);
-    if (tt === "blur") say("高斯模糊：拖一个框，不透明度/半径跟随线条粗细");
+    if (tt === "text") say(t("snip.say_text"));
+    if (tt === "callout") say(t("snip.say_callout"));
+    if (tt === "badge") say(t("snip.say_badge", { n: badgeRef.current }));
+    if (tt === "blur") say(t("snip.say_blur"));
   };
 
   const pickFace = (g: GroupDef) => pickTool(faces[g.id] ?? g.face);
@@ -868,7 +871,7 @@ export function Snip() {
     setBadge(1);
     setTool("badge");
     setFaces((m) => ({ ...m, text: "badge" }));
-    say("序号已归零，下一个是 1");
+    say(t("snip.say_badge_reset"));
   };
 
   /* 悬停展开：110ms 开 / 190ms 关。计时器都要清，否则快速横穿会残留 */
@@ -1009,9 +1012,9 @@ export function Snip() {
       if (!d) return;
       const hex = `#${[d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
       setColor(hex);
-      say(`已取色 ${hex}`);
+      say(t("snip.say_picked", { hex }));
     } catch {
-      say("这个位置取不到颜色");
+      say(t("snip.say_no_color"));
     }
   };
 
@@ -1295,8 +1298,8 @@ export function Snip() {
 
   const compose = async (): Promise<string> => {
     const r = rectRef.current;
-    if (!r || r.w < 2 || r.h < 2) throw new Error("请先框一个区域");
-    if (!base.current) throw new Error("截图底图还没准备好，请稍等一秒");
+    if (!r || r.w < 2 || r.h < 2) throw new Error(t("snip.err_no_rect"));
+    if (!base.current) throw new Error(t("snip.err_not_ready"));
     const sx = Math.round(r.x * scale);
     const sy = Math.round(r.y * scale);
     const sw = Math.max(1, Math.round(r.w * scale));
@@ -1305,7 +1308,7 @@ export function Snip() {
     c.width = sw;
     c.height = sh;
     const ctx = c.getContext("2d");
-    if (!ctx) throw new Error("画布不可用");
+    if (!ctx) throw new Error(t("snip.err_no_canvas"));
     ctx.drawImage(base.current, sx, sy, sw, sh, 0, 0, sw, sh);
     ctx.save();
     ctx.translate(-sx, -sy);
@@ -1327,7 +1330,7 @@ export function Snip() {
   const finish = async (action: Action, from = "btn") => {
     if (busy) return;
     if (Date.now() - rectBorn.current < 350) {
-      say("选区刚调整过，松手后再按一次");
+      say(t("snip.say_just_resized"));
       return;
     }
     setBusy(true);
@@ -1401,7 +1404,7 @@ export function Snip() {
         /* 有标注时二次确认：第一次只提醒，2.6s 内再按才真退出 */
         if (opsRef.current.length && !escArm) {
           setEscArm(true);
-          say("当前有未保存的标注，再按一次 Esc 放弃并退出");
+          say(t("snip.say_esc_arm"));
           window.setTimeout(() => setEscArm(false), 2600);
           return;
         }
@@ -1444,7 +1447,7 @@ export function Snip() {
         }
         /* **Enter 什么都不做**（0.1.20 定案）：框完下意识按 Enter 就再也进不到标注。
            方案 v2 里 Enter = 复制，本软件**刻意不跟**，理由见文件头。 */
-        say("Enter 不结束截图 · Ctrl+S 存库 / Ctrl+Shift+S 另存 / Ctrl+C 复制，或点右下「复制」");
+        say(t("snip.say_enter_noop"));
         return;
       }
       if (!mod && (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown")) {
@@ -1499,16 +1502,16 @@ export function Snip() {
           c: "cross",
           y: "eraser",
         };
-        const t = map[low];
-        if (t) {
+        const hotkeyTool = map[low];
+        if (hotkeyTool) {
           e.preventDefault();
-          pickTool(t);
+          pickTool(hotkeyTool);
           return;
         }
         if (low === "s" || low === "i") {
           e.preventDefault();
           setOpenGroup("sticker");
-          say("素材组：勾 / 叉可用；贴纸与插图下一版接入");
+          say(t("snip.say_sticker_group"));
           return;
         }
         if (low === "f") {
@@ -1542,15 +1545,15 @@ export function Snip() {
       : `${rgb[0]}, ${rgb[1]}, ${rgb[2]}`;
     try {
       await navigator.clipboard.writeText(txt);
-      setTip(`已复制 ${txt}`);
+      setTip(t("snip.tip_copied", { text: txt }));
       window.setTimeout(() => setTip(""), 1200);
     } catch {
-      setTip("复制失败");
+      setTip(t("snip.tip_copy_failed"));
       window.setTimeout(() => setTip(""), 1200);
     }
   };
 
-  if (!boot) return <div className="snip-miss">截图数据丢失，请重新按一次快捷键</div>;
+  if (!boot) return <div className="snip-miss">{t("snip.miss")}</div>;
 
   /* ---------------- 布局计算 ---------------- */
 
@@ -1728,17 +1731,17 @@ export function Snip() {
             e.stopPropagation();
           }}
           role="toolbar"
-          aria-label="截图标注工具"
+          aria-label={t("snip.aria_toolbar")}
         >
           {/* 1 选择（常驻） */}
           <button
             className={`snip-tbtn ${tool === "select" ? "is-on" : ""}`}
             onClick={() => (tool === "select" ? setTool(null) : pickTool("select"))}
-            aria-label="选择 / 移动标注"
+            aria-label={t("snip.select")}
           >
             {ICONS.select}
             <span className="snip-tip">
-              选择 / 移动标注 <kbd>V</kbd>
+              {t("snip.select")} <kbd>V</kbd>
             </span>
           </button>
           <span className="snip-sep" />
@@ -1761,19 +1764,19 @@ export function Snip() {
                   onClick={() => pickFace(g)}
                   aria-haspopup="menu"
                   aria-expanded={openGroup === g.id}
-                  aria-label={g.name}
+                  aria-label={t(g.nameKey)}
                 >
                   {ICONS[def.icon]}
                   <i className={`snip-caret ${changed ? "is-alt" : ""}`} />
                   <span className="snip-tip">
-                    {g.name} <kbd>{def.key}</kbd>
+                    {t(g.nameKey)} <kbd>{def.key}</kbd>
                   </span>
                 </button>
                 <div
                   className={`snip-tray ${openGroup === g.id ? "is-open" : ""} ${trayDown ? "down" : ""}`}
                   style={{ "--shift": `${trayShift}px` } as React.CSSProperties}
                   role="menu"
-                  aria-label={g.name}
+                  aria-label={t(g.nameKey)}
                   data-tray={g.id}
                 >
                   {g.items.map((it) => (
@@ -1790,7 +1793,7 @@ export function Snip() {
                     >
                       {ICONS[it.icon]}
                       <span className="snip-tip">
-                        {it.name} <kbd>{it.key}</kbd>
+                        {t(it.nameKey)} <kbd>{it.key}</kbd>
                       </span>
                     </button>
                   ))}
@@ -1811,13 +1814,13 @@ export function Snip() {
                   setMenuOpen(false);
                   setOpenGroup(null);
                 }}
-                aria-label="标注颜色"
+                aria-label={t("snip.color")}
                 aria-haspopup="dialog"
                 aria-expanded={paletteOpen}
               >
                 <i className="snip-swatch" style={{ background: color }} />
                 <span className="snip-tip">
-                  标注颜色 <kbd>Alt 吸管</kbd>
+                  {t("snip.color")} <kbd>Alt {t("snip.eyedropper")}</kbd>
                 </span>
               </button>
               {paletteOpen && (
@@ -1825,20 +1828,20 @@ export function Snip() {
                   className={`snip-palette ${trayDown ? "down" : ""}`}
                   onMouseDown={stop}
                   role="dialog"
-                  aria-label="调色板"
+                  aria-label={t("snip.palette")}
                 >
-                  <div className="snip-pal-label">标注颜色</div>
+                  <div className="snip-pal-label">{t("snip.color")}</div>
                   <div className="snip-swatches">
                     {COLORS.map((c) => (
                       <button
                         key={c}
                         className={`snip-sw ${c.toUpperCase() === color.toUpperCase() ? "is-on" : ""}`}
                         style={{ background: c }}
-                        aria-label={`颜色 ${c}`}
+                        aria-label={t("snip.color_named", { color: c })}
                         onClick={() => {
                           setColor(c);
                           setPaletteOpen(false);
-                          say(`已选颜色 ${c}`);
+                          say(t("snip.say_color", { color: c }));
                         }}
                       />
                     ))}
@@ -1849,14 +1852,14 @@ export function Snip() {
                       onClick={() => {
                         setPaletteOpen(false);
                         setDropper(true);
-                        say("吸管：在图上单击取色");
+                        say(t("snip.say_dropper"));
                       }}
                     >
                       {ICONS.pen}
-                      吸管取色
+                      {t("snip.dropper")}
                     </button>
                     <label className="snip-pal-btn snip-pal-custom">
-                      自定义…
+                      {t("snip.custom")}
                       <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
                     </label>
                   </div>
@@ -1874,11 +1877,11 @@ export function Snip() {
                   if (isTexty) setValue(17, true);
                   else setValue(2, true);
                 }}
-                aria-label={isTexty ? "字号：滚轮调节" : "线条粗细：滚轮调节"}
+                aria-label={isTexty ? t("snip.font_size_tip") : t("snip.width_tip")}
               >
                 {isTexty ? ICONS.text : <WidthGlyph w={width} />}
                 <span className="snip-tip">
-                  {isTexty ? "字号" : "线条粗细"} <kbd>滚轮</kbd>
+                  {isTexty ? t("snip.font_size") : t("snip.width")} <kbd>{t("snip.wheel")}</kbd>
                 </span>
               </button>
               {widthHud && (
@@ -1910,11 +1913,11 @@ export function Snip() {
               className={`snip-tbtn ${fill ? "is-on" : ""}`}
               onClick={() => setFill((v) => !v)}
               aria-pressed={fill}
-              aria-label="形状填充"
+              aria-label={t("snip.fill")}
             >
               {ICONS.fill}
               <span className="snip-tip">
-                形状填充 <kbd>F</kbd>
+                {t("snip.fill")} <kbd>F</kbd>
               </span>
             </button>
 
@@ -1923,10 +1926,12 @@ export function Snip() {
                 className={`snip-tbtn ${arrowSolid ? "is-on" : ""}`}
                 onClick={() => setArrowSolid((v) => !v)}
                 aria-pressed={arrowSolid}
-                aria-label="箭头样式"
+                aria-label={t("snip.arrow_style")}
               >
                 {ICONS.arrow}
-                <span className="snip-tip">{arrowSolid ? "实心箭头" : "空心箭头"}</span>
+                <span className="snip-tip">
+                  {arrowSolid ? t("snip.arrow_solid") : t("snip.arrow_hollow")}
+                </span>
               </button>
             )}
           </div>
@@ -1937,32 +1942,32 @@ export function Snip() {
             className="snip-tbtn"
             disabled={!undoStack.current.length}
             onClick={undo}
-            aria-label="撤销"
+            aria-label={t("snip.undo")}
           >
             {ICONS.undo}
             <span className="snip-tip">
-              撤销 <kbd>Ctrl+Z</kbd>
+              {t("snip.undo")} <kbd>Ctrl+Z</kbd>
             </span>
           </button>
           <button
             className="snip-tbtn"
             disabled={!redoStack.current.length}
             onClick={redo}
-            aria-label="重做"
+            aria-label={t("snip.redo")}
           >
             {ICONS.redo}
             <span className="snip-tip">
-              重做 <kbd>Ctrl+Shift+Z</kbd>
+              {t("snip.redo")} <kbd>Ctrl+Shift+Z</kbd>
             </span>
           </button>
           <button
             className={`snip-tbtn ${tool === "eraser" ? "is-on" : ""}`}
             onClick={() => pickTool("eraser")}
-            aria-label="橡皮擦"
+            aria-label={t("snip.eraser")}
           >
             {ICONS.eraser}
             <span className="snip-tip">
-              橡皮擦 <kbd>Y</kbd>
+              {t("snip.eraser")} <kbd>Y</kbd>
             </span>
           </button>
 
@@ -1971,7 +1976,7 @@ export function Snip() {
           <div className={`snip-split ${menuOpen ? "is-open" : ""}`}>
             <button className="snip-split__go" onClick={() => void finish("copy", "btn")}>
               {ICONS.copy}
-              复制
+              {t("snip.copy")}
             </button>
             <button
               className="snip-split__more"
@@ -1982,7 +1987,7 @@ export function Snip() {
               }}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              aria-label="更多输出方式"
+              aria-label={t("snip.more")}
             >
               {ICONS.chevron}
             </button>
@@ -1993,33 +1998,33 @@ export function Snip() {
             >
               <button className="snip-mi" onClick={() => void finish("copy", "menu")}>
                 {ICONS.copy}
-                复制到剪贴板
+                {t("snip.menu_copy")}
                 <kbd>Ctrl+C</kbd>
               </button>
               <button className="snip-mi" onClick={() => void finish("save", "menu")}>
                 {ICONS.save}
-                保存到截图库
+                {t("snip.menu_save")}
                 <kbd>Ctrl+S</kbd>
               </button>
               <button className="snip-mi" onClick={() => void finish("saveas", "menu")}>
                 {ICONS.save}
-                另存为 PNG…
+                {t("snip.menu_saveas")}
                 <kbd>Ctrl+Shift+S</kbd>
               </button>
               <button className="snip-mi" onClick={() => void finish("peek", "menu")}>
                 {ICONS.pin}
-                贴到桌面（贴图）
-                <kbd>中键</kbd>
+                {t("snip.menu_peek")}
+                <kbd>{t("snip.menu_middle")}</kbd>
               </button>
               <div className="snip-mi-sep" />
               <button
                 className="snip-mi is-off"
-                onClick={() => say("OCR 文字识别：下一版接入（P1）")}
+                onClick={() => say(t("snip.say_ocr_soon"))}
                 aria-disabled
               >
                 {ICONS.ocr}
-                识别图中文字
-                <kbd>下一版</kbd>
+                {t("snip.menu_ocr")}
+                <kbd>{t("snip.next_version")}</kbd>
               </button>
             </div>
           </div>
@@ -2030,17 +2035,17 @@ export function Snip() {
             onClick={() => {
               if (opsRef.current.length && !escArm) {
                 setEscArm(true);
-                say("当前有未保存的标注，再点一次 ✕ 放弃并退出");
+                say(t("snip.say_close_arm"));
                 window.setTimeout(() => setEscArm(false), 2600);
                 return;
               }
               void source.snipCancel();
             }}
-            aria-label="退出截图"
+            aria-label={t("snip.aria_quit")}
           >
             {ICONS.close}
             <span className="snip-tip">
-              退出 <kbd>Esc</kbd>
+              {t("snip.quit")} <kbd>Esc</kbd>
             </span>
           </button>
         </div>
@@ -2057,7 +2062,7 @@ export function Snip() {
             {rgb && (
               <div
                 className="snip-rgb"
-                title="点击复制颜色值"
+                title={t("snip.loupe_copy_title")}
                 onMouseDown={stop}
                 onClick={() => void copyColor()}
               >
@@ -2065,8 +2070,8 @@ export function Snip() {
                 <span>{rgbText}</span>
               </div>
             )}
-            <div className="snip-hintline">点色值复制 · Shift 切 RGB / HEX</div>
-            <div className="snip-hintline">Alt 单击直接取色</div>
+            <div className="snip-hintline">{t("snip.loupe_hint1")}</div>
+            <div className="snip-hintline">{t("snip.loupe_hint2")}</div>
           </div>
         </div>
       )}
@@ -2080,22 +2085,22 @@ export function Snip() {
             <K>T</K>
             <K>M</K>
           </span>
-          <span>选择 / 形状 / 文字 / 遮挡</span>
+          <span>{t("snip.keys_tools")}</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
             <K>[</K>
             <K>]</K>
-            <K>滚轮</K>
+            <K>{t("snip.wheel")}</K>
           </span>
-          <span>线条粗细（Shift 2 / Alt 0.1）</span>
+          <span>{t("snip.keys_width")}</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
             <K>Ctrl</K>
             <K>Z</K>
           </span>
-          <span>撤销 / 重做（加 Shift）</span>
+          <span>{t("snip.keys_undo")}</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
@@ -2104,7 +2109,7 @@ export function Snip() {
             <K>Ctrl</K>
             <K>S</K>
           </span>
-          <span>复制 / 存到截图库</span>
+          <span>{t("snip.keys_copy")}</span>
         </div>
         <div className="snip-keyrow">
           <span className="keys">
@@ -2113,7 +2118,7 @@ export function Snip() {
             <K>←</K>
             <K>→</K>
           </span>
-          <span>微调选区（Shift 改大小）</span>
+          <span>{t("snip.keys_nudge")}</span>
         </div>
       </div>
 
@@ -2146,7 +2151,7 @@ export function Snip() {
       {tip && <div className="snip-toast">{tip}</div>}
       {hint && <div className="snip-hint">{hint}</div>}
       {err && <div className="snip-err">{err}</div>}
-      {busy && <div className="snip-toast">处理中…</div>}
+      {busy && <div className="snip-toast">{t("snip.processing")}</div>}
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import type { SnapshotRow } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
 import { scrimFade, springSnappy } from "../design/springs";
+import { useT } from "../lib/i18n";
 
 /**
  * 「把图片加入快照」这张小卡片（照 TagPrompt 的形态：遮罩 + 小卡片 + 一个输入框）。
@@ -18,9 +19,9 @@ import { scrimFade, springSnappy } from "../design/springs";
  */
 export function SnapshotPrompt({
   snapshots,
-  title = "把图片加入快照",
+  title,
   lead,
-  picksHint = "已有的快照（点一下直接加进去）",
+  picksHint,
   excludeIds,
   canCreate = true,
   onPick,
@@ -40,6 +41,9 @@ export function SnapshotPrompt({
   onName: (name: string) => void;
   onClose: () => void;
 }) {
+  const t = useT();
+  const titleText = title ?? t("snapPrompt.title");
+  const hintText = picksHint ?? t("snapPrompt.picksHint");
   const [name, setName] = useState("");
   const inputRef = useRef<HTMLDivElement>(null);
 
@@ -83,7 +87,7 @@ export function SnapshotPrompt({
         className="dlg tag-prompt"
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={titleText}
         onMouseDown={(e) => e.stopPropagation()}
         initial={{ opacity: 0, scale: 0.96, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -91,7 +95,7 @@ export function SnapshotPrompt({
       >
         <div className="dlg-title tag-prompt-title">
           <Icon name="expand" size={14} stroke={1.5} />
-          {title}
+          {titleText}
         </div>
 
         {lead && <p className="dlg-hint snap-prompt-lead">{lead}</p>}
@@ -102,9 +106,9 @@ export function SnapshotPrompt({
               autoFocus
               value={name}
               onChange={setName}
-              placeholder="输入新快照名，回车「建好并加入」"
+              placeholder={t("snapPrompt.namePlaceholder")}
               inputClassName="tag-prompt-input"
-              ariaLabel="快照名"
+              ariaLabel={t("snapPrompt.nameAria")}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -118,7 +122,7 @@ export function SnapshotPrompt({
 
         {picks.length > 0 && (
           <div className="tag-prompt-picks">
-            <div className="tag-prompt-hint">{picksHint}</div>
+            <div className="tag-prompt-hint">{hintText}</div>
             {picks.slice(0, 8).map((s) => (
               <button key={s.id} className="tag-chip pick" onClick={() => onPick?.(s.id)}>
                 {s.name}
@@ -130,7 +134,7 @@ export function SnapshotPrompt({
 
         <div className="dlg-actions">
           <button className="btn" onClick={onClose}>
-            取消
+            {t("app.common.cancel")}
           </button>
           {canCreate && (
             <button
@@ -138,7 +142,7 @@ export function SnapshotPrompt({
               disabled={!name.trim()}
               onClick={() => onName(name.trim())}
             >
-              {`新建「${name.trim() || "…"}」并加入`}
+              {t("snapPrompt.createAndAdd", { name: name.trim() || "…" })}
             </button>
           )}
         </div>

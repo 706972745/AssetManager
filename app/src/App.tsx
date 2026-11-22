@@ -13,6 +13,7 @@ import { setActiveDock, useDockHover } from "./lib/dockHover";
 import { setOwnDrag } from "./lib/ownDrag";
 import { loadHotkeys } from "./lib/hotkeys";
 import { clearProgress, setProgress, useProgress } from "./lib/progressStore";
+import { useEvent } from "./lib/useEvent";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
   fmtNum,
@@ -56,6 +57,7 @@ import { SnapshotDock } from "./components/SnapshotDock";
 import { SnapshotPrompt } from "./components/SnapshotPrompt";
 import { TagEdit } from "./components/TagEdit";
 import { COLOR_LABEL, autoTagLabel, isAutoTag, loadDenied, saveDenied } from "./lib/tags";
+import { activeLocale, t, useT } from "./lib/i18n";
 import { useDialog } from "./components/Dialog";
 
 const KINDS_OF: Record<string, number[] | null> = {
@@ -109,63 +111,78 @@ type SnapPromptState =
  * 而自己起名这件事在这两个动作里没有语义。
  */
 function snapPromptProps(p: SnapPromptState, snaps: SnapshotRow[]) {
-  const nameOf = (id: number) => snaps.find((s) => s.id === id)?.name ?? "这份快照";
+  const nameOf = (id: number) =>
+    snaps.find((s) => s.id === id)?.name ?? t("app.common.this_snapshot");
   if (p.mode === "ids") {
     return {
-      title: "把选中的图片加入快照",
+      title: t("app.dialog.snap_add_selected"),
       lead: (
         <>
-          选中的 <b>{p.ids.length}</b> 张会记进快照：不移动、不复制任何文件，
-          只是记下「这些图是哪几张」。
+          {t("app.dialog.snap_add_selected_a")} <b>{p.ids.length}</b>{" "}
+          {t("app.dialog.snap_add_selected_b")}
         </>
       ),
-      picksHint: "已有的快照（点一下直接加进去）",
+      picksHint: t("app.dialog.snap_pick_existing"),
       excludeIds: undefined as number[] | undefined,
       canCreate: true,
     };
   }
   if (p.mode === "merge") {
     return {
-      title: "与另一份快照合并",
+      title: t("app.dialog.snap_merge_title"),
       lead: (
         <>
-          把「{nameOf(p.srcId)}」和<b>点的那一份</b>合成一份<b>新快照</b>（同一张图只算一次）。
-          两份原件都不动。
+          {t("app.dialog.snap_merge_a", { name: nameOf(p.srcId) })}
+          <b>{t("app.dialog.snap_merge_pick")}</b>
+          {t("app.dialog.snap_merge_b")}
+          <b>{t("app.dialog.snap_merge_new")}</b>
+          {t("app.dialog.snap_merge_c")}
         </>
       ),
-      picksHint: "选另一份（会新建一份并集）",
+      picksHint: t("app.dialog.snap_merge_hint"),
       excludeIds: [p.srcId],
       canCreate: false,
     };
   }
   if (p.mode === "diff") {
     return {
-      title: "与另一份快照做差集",
+      title: t("app.dialog.snap_diff_title"),
       lead: (
         <>
-          新建一份 =「{nameOf(p.srcId)}」里<b>去掉</b>另一份也有的图。两份原件都不动。
+          {t("app.dialog.snap_diff_a", { name: nameOf(p.srcId) })}
+          <b>{t("app.dialog.snap_diff_remove")}</b>
+          {t("app.dialog.snap_diff_b")}
         </>
       ),
-      picksHint: "选要减掉的那一份",
+      picksHint: t("app.dialog.snap_diff_hint"),
       excludeIds: [p.srcId],
       canCreate: false,
     };
   }
   return {
-    title: "把图片加入快照",
+    title: t("app.dialog.snap_add_images"),
     lead: (
       <>
-        标签「{p.tag}」下{typeof p.count === "number" ? ` ${p.count} 张图` : "的图"}
-        会记进快照：不移动、不复制任何文件，只是记下「这些图是哪几张」。
+        {t("app.dialog.snap_tag_a", { tag: p.tag })}
+        {typeof p.count === "number"
+          ? t("app.dialog.snap_tag_count", { count: p.count })
+          : t("app.dialog.snap_tag_some")}
+        {t("app.dialog.snap_tag_b")}
       </>
     ),
-    picksHint: "已有的快照（点一下直接加进去）",
+    picksHint: t("app.dialog.snap_pick_existing"),
     excludeIds: undefined as number[] | undefined,
     canCreate: true,
   };
 }
 
 export default function App() {
+  const t = useT();
+  /* 当前解析出来的语言：`cmds` 是 useMemo 里**渲染期**算出来的文案，
+     只靠 useT() 触发重渲染不会让它失效（依赖没变就返回缓存）——换语言后
+     命令面板会一直显示旧语言。把它列进依赖，语言一变就重算。 */
+  const locale = activeLocale();
+
   /* 偏好先读出来：默认档位/视图在首屏就要用上，不能等设置面板打开过一次 */
   const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs());
   /* prefs 的最新值镜像：启动检查更新的 effect 只挂载一次，闭包里拿到的 prefs
@@ -461,6 +478,33 @@ export default function App() {
     void source.setUiTheme(resolved).catch(() => {});
   }, [prefs.theme, prefs.motion, sysDark]);
 
+  /* 托盘自绘菜单的三个入口（2026-11-22，最小监听）：
+     · open://settings —— 托盘「打开设置」；
+     · theme://set —— 托盘切主题，落到 prefs（savePrefs 持久化）+ 上面的主题 effect；
+     · lib://switch —— 托盘切素材库。主窗的当前目录是 React state，没有既有事件
+       通道，只补这一条把目录换成新库根（库清单/标签由后端 am_set_current_lib 同步）。 */
+  useEffect(() => {
+    const offOpen = onAppEvent<null>("open://settings", () => setSettingsOpen(true));
+    const offTheme = onAppEvent<{ mode?: string }>("theme://set", (p) => {
+      const mode = p?.mode;
+      if (mode === "light" || mode === "dark" || mode === "system") {
+        patchPrefs({ theme: mode });
+      }
+    });
+    const offLib = onAppEvent<{ path?: string }>("lib://switch", (p) => {
+      if (!p?.path) return;
+      void source.roots().then((rs) => {
+        const hit = rs.find((r) => r.path === p.path);
+        if (hit) setDir(hit);
+      });
+    });
+    return () => {
+      offOpen();
+      offTheme();
+      offLib();
+    };
+  }, [patchPrefs]);
+
   /* 后台预热全库缩略图：启动 6 秒后开始（避开首屏那一波请求）。
      为什么要它：预取只做「下一屏」，第一次打开很久没看的目录仍然要现做图；
      全库跑一遍之后，滑到任何位置都只是读文件。开关在「设置 → 缓存与索引」。 */
@@ -497,7 +541,11 @@ export default function App() {
           patchPrefs({ updateLastCheck: Date.now() });
           if (info.hasUpdate && info.latest !== p.updateSkipped) {
             setUpdateAvailable(info.latest);
-            toast(`发现新版本 ${info.latest}`, false, "设置 → 更新 里可以下载安装");
+            toast(
+              t("app.toast.update_available", { version: info.latest }),
+              false,
+              t("app.toast.update_available_detail"),
+            );
           }
         })
         .catch(() => {
@@ -570,9 +618,9 @@ export default function App() {
           rows = await source.list({ ...buildQuery(null), dirId: null });
           if (rows.length) {
             toast(
-              "当前库里没有这些素材",
+              t("app.toast.cross_lib_empty"),
               false,
-              "已改为在所有素材库里看；点侧栏里的库就回到单库",
+              t("app.toast.cross_lib_empty_detail"),
             );
           }
         }
@@ -701,11 +749,11 @@ export default function App() {
 
   /* ---------------- 扫描（T03）：后台跑 + 进度 + 取消 ---------------- */
   const startScan = useCallback(
-    async (path: string, label = "开始扫描") => {
+    async (path: string, label = t("app.toast.scan_started")) => {
       try {
         await source.scanStart(path);
         setProgress("scan", { active: true, dirs: 0, files: 0, current: path });
-        toast(label, false, "正在后台建立索引，可以继续浏览；随时能取消");
+        toast(label, false, t("app.toast.scan_started_detail"));
       } catch (e) {
         toast(String(e), true);
       }
@@ -715,7 +763,7 @@ export default function App() {
 
   const cancelScan = useCallback(async () => {
     await source.scanCancel().catch(() => false);
-    toast("已请求取消", false, "已经扫进来的部分会保留");
+    toast(t("app.toast.scan_cancel_requested"), false, t("app.toast.scan_cancel_requested_detail"));
   }, [toast]);
 
   /* ---------------- 双击导入（0.4.2） ----------------
@@ -731,14 +779,14 @@ export default function App() {
       const name = path.split(/[\\/]/).pop() ?? path;
       const lower = name.toLowerCase();
       const hint = lower.endsWith(".l-assetmanager")
-        ? "用户数据：只合并不删除，已有素材不会被覆盖。"
+        ? t("app.dialog.import_hint_userdata")
         : lower.endsWith(".s-assetmanager")
-          ? "快照清单：只含图片编号，不含原图。"
+          ? t("app.dialog.import_hint_snapshot")
           : lower.endsWith(".p-assetmanager")
-            ? "资产包：会解压到你选的文件夹，并按包里的清单还原评分/备注/标签。"
-            : "类型按文件内容自动判断：用户数据只合并不删除、快照新增一份清单、资产包会解压到你选的文件夹。";
+            ? t("app.dialog.import_hint_pack")
+            : t("app.dialog.import_hint_unknown");
       const ok = await askRef.current({
-        title: "要导入这个文件吗？",
+        title: t("app.dialog.import_file_title"),
         body: (
           <>
             <div style={{ wordBreak: "break-all" }}>{name}</div>
@@ -747,8 +795,8 @@ export default function App() {
           </>
         ),
         buttons: [
-          { label: "取消", value: "cancel" },
-          { label: "导入", value: "ok", tone: "accent" },
+          { label: t("app.common.cancel"), value: "cancel" },
+          { label: t("app.common.import"), value: "ok", tone: "accent" },
         ],
       });
       if (ok !== "ok") return;
@@ -756,7 +804,7 @@ export default function App() {
         const r = await source.openImportFile(path);
         if (!r) {
           /* 只有 `.P` 包"选解压目录"这一步会走到这里 */
-          toast("已取消导入", false, "没有动任何文件");
+          toast(t("app.toast.import_canceled"), false, t("app.toast.import_canceled_detail"));
           return;
         }
         setRefreshKey((k) => k + 1);
@@ -764,9 +812,9 @@ export default function App() {
           r.message,
           r.assetsUnknown > 0 || r.skipped > 0,
           r.assetsUnknown > 0
-            ? `${r.assetsUnknown} 条在索引里找不到（图可能被移动、改名或删掉了）`
+            ? t("app.toast.import_unknown", { count: r.assetsUnknown })
             : r.skipped > 0
-              ? `${r.skipped} 条坏数据已跳过`
+              ? t("app.toast.import_skipped", { count: r.skipped })
               : undefined
         );
       } catch (e) {
@@ -785,7 +833,7 @@ export default function App() {
     async (target: string | null) => {
       const dest = target ?? dir?.path ?? null;
       if (!dest) {
-        toast("先在左侧选中一个文件夹，再导入", true);
+        toast(t("app.toast.import_need_folder"), true);
         return;
       }
       try {
@@ -793,12 +841,18 @@ export default function App() {
         /* null = 用户在文件对话框里点了取消，不是错误 */
         if (!r) return;
         setRefreshKey((k) => k + 1);
-        const head = `已导入 ${r.copied} 个${r.skipped ? `（跳过 ${r.skipped}）` : ""}`;
+        const head =
+          t("app.toast.import_imported", { count: r.copied }) +
+          (r.skipped ? t("app.toast.import_skipped_count", { skipped: r.skipped }) : "");
         if (r.failed.length) {
-          toast(head, true, `${r.failed.length} 个失败：${r.failed[0][1]}`);
+          toast(
+            head,
+            true,
+            t("app.toast.import_failed", { count: r.failed.length, error: r.failed[0][1] })
+          );
         } else {
           /* 自动标签不落库，文件一进索引就有了 —— 这句提示说明"你不用再去打标签" */
-          toast(head, false, `新入库 ${r.added} 张 · 已自动带上格式/类型/尺寸等自动标签`);
+          toast(head, false, t("app.toast.import_added", { count: r.added }));
         }
       } catch (e) {
         toast(String(e), true);
@@ -840,7 +894,7 @@ export default function App() {
     });
     const offD = onAppEvent<ScanResult>("scan://done", (r) => {
       clearProgress("scan");
-      toast(r.ok ? "扫描完成" : "扫描没跑完", !r.ok, r.message);
+      toast(r.ok ? t("app.toast.scan_done") : t("app.toast.scan_incomplete"), !r.ok, r.message);
       setRefreshKey((k) => k + 1);
     });
     return () => {
@@ -859,11 +913,16 @@ export default function App() {
   useEffect(() => {
     const offSaved = onAppEvent<string | null>("shot://saved", (p) => {
       setRefreshKey((k) => k + 1);
-      if (p) toast(`截图已保存：${p.split(/[\\/]/).pop() ?? p}`, false, "Ctrl+S 可以另选位置");
+      if (p)
+        toast(
+          t("app.toast.shot_saved", { name: p.split(/[\\/]/).pop() ?? p }),
+          false,
+          t("app.toast.shot_saved_detail")
+        );
     });
     /* 复制这条要说一句：截图窗一关，用户看不到剪贴板里有没有东西 */
     const offCopied = onAppEvent<null>("shot://copied", () => {
-      toast("截图已复制到剪贴板", false, "直接 Ctrl+V 就能贴");
+      toast(t("app.toast.shot_copied"), false, t("app.toast.shot_copied_detail"));
     });
     return () => {
       offSaved();
@@ -884,7 +943,11 @@ export default function App() {
     void source
       .hotkeysSet(list)
       .then((failed) => {
-        if (failed.length) toast(`这些快捷键被别的软件占了：${failed.join("、")}`, true);
+        if (failed.length)
+          toast(
+            t("app.toast.hotkeys_taken", { keys: failed.join(t("app.common.list_sep")) }),
+            true
+          );
       })
       .catch(() => {});
   }, []); // 只注册一次；改动走设置面板
@@ -907,11 +970,19 @@ export default function App() {
      进度写进 store（进度条自己订阅），toast 与刷新键留在 App。 */
   useEffect(() => {
     const offP = onAppEvent<MoveProgress>("move://progress", (p) => {
-      setProgress("batch", { done: p.done, total: p.total, label: `正在移动 · ${p.current}` });
+      setProgress("batch", {
+        done: p.done,
+        total: p.total,
+        label: t("app.toast.moving", { name: p.current }),
+      });
     });
     const offD = onAppEvent<MoveResult>("move://done", (r) => {
       clearProgress("batch");
-      toast(r.ok ? "已移动到目标文件夹" : "没有移动任何文件", !r.ok, r.message);
+      toast(
+        r.ok ? t("app.toast.moved") : t("app.toast.moved_none"),
+        !r.ok,
+        r.message
+      );
       setRefreshKey((k) => k + 1);
     });
     return () => {
@@ -1008,9 +1079,11 @@ export default function App() {
       try {
         const added = await source.tagAssets(ids, tag);
         toast(
-          `已给 ${ids.length} 项打上「${tag}」`,
+          t("app.toast.tag_applied", { count: ids.length, tag }),
           false,
-          added < ids.length ? `${ids.length - added} 项之前就有这个标签` : undefined
+          added < ids.length
+            ? t("app.toast.tag_already", { count: ids.length - added })
+            : undefined
         );
         setRefreshKey((k) => k + 1);
       } catch (e) {
@@ -1036,18 +1109,22 @@ export default function App() {
   const deleteTagEverywhere = useCallback(
     async (tag: string) => {
       const v = await askRef.current({
-        title: `从所有素材上移除「${tag}」？`,
-        body: <p className="dlg-hint">只是不再有这个标签，素材本身和磁盘上的文件都不动。</p>,
+        title: t("app.dialog.delete_tag_title", { tag }),
+        body: <p className="dlg-hint">{t("app.dialog.delete_tag_body")}</p>,
         buttons: [
-          { label: "移除标签", value: "go", tone: "danger" },
-          { label: "取消", value: "no" },
+          { label: t("app.common.remove_tag"), value: "go", tone: "danger" },
+          { label: t("app.common.cancel"), value: "no" },
         ],
       });
       if (v !== "go") return;
       try {
         const n = await source.deleteTag(tag);
         if (tagFilter === tag) setTagFilter(null);
-        toast(`已移除「${tag}」`, false, `涉及 ${n} 项素材`);
+        toast(
+          t("app.toast.tag_removed", { tag }),
+          false,
+          t("app.toast.tag_removed_detail", { count: n })
+        );
         setRefreshKey((k) => k + 1);
       } catch (e) {
         toast(String(e), true);
@@ -1062,7 +1139,11 @@ export default function App() {
       next.add(tag);
       setDenied(next);
       saveDenied(next);
-      toast(`不再建议「${isAutoTag(tag) ? autoTagLabel(tag) : tag}」`, false, "改回来：设置 → 常用 → 恢复自动标签建议");
+      toast(
+        t("app.toast.auto_tag_denied", { tag: isAutoTag(tag) ? autoTagLabel(tag) : tag }),
+        false,
+        t("app.toast.auto_tag_denied_detail")
+      );
     },
     [denied, toast]
   );
@@ -1095,12 +1176,14 @@ export default function App() {
     async (collId: number, tag: string) => {
       try {
         const n = await source.collAddTag(collId, tag);
-        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        const name = colls.find((c) => c.id === collId)?.name ?? t("app.common.group");
         setColls(await source.collList());
         toast(
-          n > 0 ? `已把「${tag}」下的 ${n} 项加进「${name}」` : `「${name}」里已经有这些了`,
+          n > 0
+            ? t("app.toast.tag_added_to_coll", { tag, count: n, name })
+            : t("app.toast.tag_coll_already", { name }),
           false,
-          "只建关联，原文件不动"
+          t("app.toast.only_links")
         );
       } catch (e) {
         toast(String(e), true);
@@ -1118,8 +1201,12 @@ export default function App() {
           x,
           y,
           items: [
-            { kind: "heading", label: "还没有分组" },
-            { label: "在侧栏「分组」里点 + 新建", icon: "plus", action: () => setCtx(null) },
+            { kind: "heading", label: t("app.empty.no_collections") },
+            {
+              label: t("app.empty.no_collections_hint"),
+              icon: "plus",
+              action: () => setCtx(null),
+            },
           ],
         });
         return;
@@ -1128,7 +1215,7 @@ export default function App() {
         x,
         y,
         items: [
-          { kind: "heading", label: `把「${label}」下的图加入分组` },
+          { kind: "heading", label: t("app.menu.tag_coll_title", { tag: label }) },
           ...colls.map((c) => ({
             label: c.name,
             icon: "folder-open",
@@ -1153,7 +1240,7 @@ export default function App() {
         items: [
           {
             /* 快照：把这一整个标签下的图都记进快照（文件一个都不动） */
-            label: "把标签下的图片加入快照…",
+            label: t("app.menu.tag_add_snapshot"),
             icon: "copy",
             action: () =>
               setSnapPrompt({
@@ -1167,13 +1254,13 @@ export default function App() {
           {
             /* 分组：同样只建关联。以前只有"素材右键 → 加入分组"，
                用户按标签筛完想整批收起来时没有入口（owner 2026-11-19）。 */
-            label: "把标签下的图片加入分组…",
+            label: t("app.menu.tag_add_coll"),
             icon: "folder-open",
             action: () => tagCollMenu(tag, x, y),
           },
           { kind: "separator" },
           {
-            label: on ? "取消这个筛选" : `只看「${label}」`,
+            label: on ? t("app.menu.clear_filter") : t("app.menu.only_tag", { tag: label }),
             icon: "funnel",
             action: () => {
               setTagFilter(on ? null : tag);
@@ -1188,13 +1275,15 @@ export default function App() {
           },
           { kind: "separator" },
           {
-            label: isAutoTag(tag) ? "这个标签是自动生成的（只读）" : "编辑标签（颜色 / 分组 / 改名）",
+            label: isAutoTag(tag)
+              ? t("app.menu.auto_tag_readonly")
+              : t("app.menu.edit_tag"),
             icon: "tag",
             disabled: isAutoTag(tag),
             action: () => openTagEdit("tag", tag, x, y),
           },
           {
-            label: "从所有素材上移除",
+            label: t("app.menu.remove_from_all"),
             icon: "trash",
             danger: true,
             disabled: isAutoTag(tag),
@@ -1223,15 +1312,19 @@ export default function App() {
         const r = await source.snapshotResolve(row.id);
         if (r.missing === 0) {
           toast(
-            `「${row.name}」对上了：${r.found} 张全在`,
+            t("app.toast.snap_resolved_all", { name: row.name, count: r.found }),
             false,
-            "按图片内容匹配 —— 改过名字、换过库的也算同一张"
+            t("app.toast.snap_resolved_detail")
           );
         } else {
           toast(
-            `「${row.name}」对上 ${r.found} 张，${r.missing} 张这次没找到`,
+            t("app.toast.snap_resolved_partial", {
+              name: row.name,
+              found: r.found,
+              missing: r.missing,
+            }),
             true,
-            "条目不会被删，硬盘插回来再点一次对账就行"
+            t("app.toast.snap_resolved_partial_detail")
           );
         }
       } catch (e) {
@@ -1245,7 +1338,7 @@ export default function App() {
     async (row: SnapshotRow) => {
       try {
         const p = await source.snapshotExport(row.id);
-        if (p) toast("快照已导出", false, p);
+        if (p) toast(t("app.toast.snap_exported"), false, p);
       } catch (e) {
         toast(String(e), true);
       }
@@ -1256,14 +1349,22 @@ export default function App() {
   const exportSnapshotZip = useCallback(
     async (row: SnapshotRow) => {
       try {
-        toast(`正在打包「${row.name}」的原图…`, false, "图多、图大的话要等一会儿");
+        toast(
+          t("app.toast.snap_zip_packing", { name: row.name }),
+          false,
+          t("app.toast.snap_zip_packing_detail")
+        );
         const r = await source.snapshotExportZip(row.id);
         if (!r) return;
         const notes: string[] = [];
-        if (r.bad.length) notes.push(`${r.bad.length} 个失败`);
-        if (r.missing) notes.push(`${r.missing} 张这次没找到，没进包`);
+        if (r.bad.length) notes.push(t("app.toast.snap_zip_failed", { count: r.bad.length }));
+        if (r.missing) notes.push(t("app.toast.snap_zip_missing", { count: r.missing }));
         const file = r.path.split(/[\\/]/).pop() ?? r.path;
-        toast(`已导出 ${r.ok} 张 → ${file}`, notes.length > 0, notes.join(" · ") || undefined);
+        toast(
+          t("app.toast.snap_zip_exported", { count: r.ok, file }),
+          notes.length > 0,
+          notes.join(" · ") || undefined
+        );
       } catch (e) {
         toast(String(e), true);
       }
@@ -1278,9 +1379,9 @@ export default function App() {
       const [, name, added, skipped] = r;
       setRefreshKey((k) => k + 1);
       toast(
-        `已导入快照「${name}」：${added} 张`,
+        t("app.toast.snap_imported", { name, count: added }),
         skipped > 0,
-        skipped ? `${skipped} 条坏数据已跳过` : undefined
+        skipped ? t("app.toast.import_skipped", { count: skipped }) : undefined
       );
     } catch (e) {
       toast(String(e), true);
@@ -1290,15 +1391,13 @@ export default function App() {
   const deleteSnapshot = useCallback(
     async (row: SnapshotRow) => {
       const v = await dlg.ask({
-        title: `删除快照「${row.name}」？`,
+        title: t("app.dialog.delete_snapshot_title", { name: row.name }),
         body: (
-          <p className="dlg-hint">
-            只删这份清单（{row.count} 条）。磁盘上的图片、素材库里的素材、标签都不动。
-          </p>
+          <p className="dlg-hint">{t("app.dialog.delete_snapshot_body", { count: row.count })}</p>
         ),
         buttons: [
-          { label: "删除快照", value: "go", tone: "danger" },
-          { label: "取消", value: "no" },
+          { label: t("app.common.delete_snapshot"), value: "go", tone: "danger" },
+          { label: t("app.common.cancel"), value: "no" },
         ],
       });
       if (v !== "go") return;
@@ -1306,7 +1405,7 @@ export default function App() {
         await source.snapshotDelete(row.id);
         if (snapFilter === row.id) setSnapFilter(null);
         setRefreshKey((k) => k + 1);
-        toast(`已删除快照「${row.name}」`);
+        toast(t("app.toast.snap_deleted", { name: row.name }));
       } catch (e) {
         toast(String(e), true);
       }
@@ -1322,9 +1421,13 @@ export default function App() {
         setSnapPrompt(null);
         setRefreshKey((k) => k + 1);
         const notes: string[] = [];
-        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
-        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
-        toast(`已加入 ${r.added} 张`, r.failed.length > 0, notes.join(" · ") || undefined);
+        if (r.already) notes.push(t("app.toast.snap_already", { count: r.already }));
+        if (r.failed.length) notes.push(t("app.toast.snap_failed", { count: r.failed.length }));
+        toast(
+          t("app.toast.snap_added", { count: r.added }),
+          r.failed.length > 0,
+          notes.join(" · ") || undefined
+        );
       } catch (e) {
         toast(String(e), true);
       }
@@ -1343,9 +1446,13 @@ export default function App() {
         setSnapPrompt(null);
         setRefreshKey((k) => k + 1);
         const notes: string[] = [];
-        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
-        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
-        toast(`已加入 ${r.added} 张`, r.failed.length > 0, notes.join(" · ") || undefined);
+        if (r.already) notes.push(t("app.toast.snap_already", { count: r.already }));
+        if (r.failed.length) notes.push(t("app.toast.snap_failed", { count: r.failed.length }));
+        toast(
+          t("app.toast.snap_added", { count: r.added }),
+          r.failed.length > 0,
+          notes.join(" · ") || undefined
+        );
       } catch (e) {
         toast(String(e), true);
       }
@@ -1366,10 +1473,10 @@ export default function App() {
         setRefreshKey((k) => k + 1);
         toast(
           mode === "diff"
-            ? `已新建「${name}」：${total} 张`
-            : `已新建「${name}」：${total} 张（其中 ${added} 条新记）`,
+            ? t("app.toast.snap_combined_diff", { name, count: total })
+            : t("app.toast.snap_combined_union", { name, count: total, added }),
           false,
-          "原快照都没动 —— 只是照着算了一份新的"
+          t("app.toast.snap_combined_detail")
         );
       } catch (e) {
         toast(String(e), true);
@@ -1390,9 +1497,9 @@ export default function App() {
         await source.snapshotCreate(n);
         setRefreshKey((k) => k + 1);
         toast(
-          `快照「${n}」已建立`,
+          t("app.toast.snap_created", { name: n }),
           false,
-          "右键任意标签 →「把标签下的图片加入快照」就能往里放图"
+          t("app.toast.snap_created_detail")
         );
       } catch (e) {
         toast(String(e), true);
@@ -1410,7 +1517,7 @@ export default function App() {
       try {
         await source.snapshotRename(id, n);
         setRefreshKey((k) => k + 1);
-        toast(`已改名为「${n}」`);
+        toast(t("app.toast.renamed", { name: n }));
       } catch (e) {
         toast(String(e), true);
       }
@@ -1433,7 +1540,11 @@ export default function App() {
         setTagFilter(null);
         /* 新建分组不搬走当前库：分组是"收纳"，在哪个库里建的就在哪个库里看 */
         setPage("assets");
-        toast(`分组「${n}」已建立`, false, "选中素材右键 →「加入分组」就能往里放");
+        toast(
+          t("app.toast.coll_created", { name: n }),
+          false,
+          t("app.toast.coll_created_detail")
+        );
       } catch (e) {
         toast(String(e), true);
       }
@@ -1448,7 +1559,7 @@ export default function App() {
       try {
         await source.collRename(id, n);
         setColls(await source.collList());
-        toast(`已改名为「${n}」`);
+        toast(t("app.toast.renamed", { name: n }));
       } catch (e) {
         toast(String(e), true);
       }
@@ -1459,15 +1570,13 @@ export default function App() {
   const deleteColl = useCallback(
     async (row: CollRow) => {
       const v = await askRef.current({
-        title: `删除分组「${row.name}」？`,
+        title: t("app.dialog.delete_coll_title", { name: row.name }),
         body: (
-          <p className="dlg-hint">
-            只删这份名单（{row.count} 项）。素材本身和磁盘上的文件一个都不动。
-          </p>
+          <p className="dlg-hint">{t("app.dialog.delete_coll_body", { count: row.count })}</p>
         ),
         buttons: [
-          { label: "删除分组", value: "go", tone: "danger" },
-          { label: "取消", value: "no" },
+          { label: t("app.common.delete_coll"), value: "go", tone: "danger" },
+          { label: t("app.common.cancel"), value: "no" },
         ],
       });
       if (v !== "go") return;
@@ -1475,7 +1584,7 @@ export default function App() {
         await source.collDelete(row.id);
         if (collFilter === row.id) setCollFilter(null);
         setColls(await source.collList());
-        toast(`已删除分组「${row.name}」`);
+        toast(t("app.toast.coll_deleted", { name: row.name }));
       } catch (e) {
         toast(String(e), true);
       }
@@ -1489,13 +1598,13 @@ export default function App() {
       try {
         const ids = await source.collOf(row.id);
         if (!ids.length) {
-          toast(`「${row.name}」还是空的，先往里加素材`, true);
+          toast(t("app.toast.coll_empty", { name: row.name }), true);
           return;
         }
         const sid = await source.snapshotCreate(row.name);
         const r = await source.snapshotAdd(sid, ids);
         setSnaps(await source.snapshotList());
-        toast(`已从「${row.name}」创建快照（新增 ${r.added} 张）`);
+        toast(t("app.toast.snap_from_coll", { name: row.name, count: r.added }));
       } catch (e) {
         toast(String(e), true);
       }
@@ -1513,21 +1622,23 @@ export default function App() {
         items: [
           /* 顺序照 FontManager `collectionMenu`：改名 → 从分组建快照 → 筛选 → 删除。
              2026-11-19 owner：分组也要能开灵感板（快照能开，分组没理由不能）。 */
-          { label: "重命名…", action: () => setCollRenameId(row.id) },
+          { label: t("app.menu.rename"), action: () => setCollRenameId(row.id) },
           { kind: "separator" },
           {
-            label: "打开灵感板（无限画布）",
+            label: t("app.menu.open_board"),
             icon: "expand",
             action: () => void source.collOpen(row.id).catch((e) => toast(String(e), true)),
           },
           {
-            label: `从「${row.name}」创建快照`,
+            label: t("app.menu.coll_create_snapshot", { name: row.name }),
             icon: "camera",
             action: () => void snapshotFromColl(row),
           },
           {
             label:
-              collFilter === row.id ? `取消只看「${row.name}」` : `只看「${row.name}」`,
+              collFilter === row.id
+                ? t("app.menu.coll_unfilter", { name: row.name })
+                : t("app.menu.only_tag", { tag: row.name }),
             icon: "funnel",
             action: () => {
               setCollFilter(collFilter === row.id ? null : row.id);
@@ -1538,7 +1649,12 @@ export default function App() {
             },
           },
           { kind: "separator" },
-          { label: "删除分组（不删素材）", icon: "trash", danger: true, action: () => void deleteColl(row) },
+          {
+            label: t("app.menu.coll_delete"),
+            icon: "trash",
+            danger: true,
+            action: () => void deleteColl(row),
+          },
         ],
       });
     },
@@ -1550,12 +1666,14 @@ export default function App() {
     async (collId: number, ids: number[]) => {
       try {
         const n = await source.collAdd(collId, ids);
-        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        const name = colls.find((c) => c.id === collId)?.name ?? t("app.common.group");
         setColls(await source.collList());
         toast(
-          n > 0 ? `已加入「${name}」${n} 项` : `这些已经在「${name}」里了`,
+          n > 0
+            ? t("app.toast.coll_added", { name, count: n })
+            : t("app.toast.coll_already_has", { name }),
           false,
-          n > 0 ? undefined : "重复加入不会产生两份"
+          n > 0 ? undefined : t("app.toast.coll_already_has_detail")
         );
       } catch (e) {
         toast(String(e), true);
@@ -1571,13 +1689,15 @@ export default function App() {
     async (collId: number, ids: number[]) => {
       try {
         const n = await source.collRemove(collId, ids);
-        const name = colls.find((c) => c.id === collId)?.name ?? "分组";
+        const name = colls.find((c) => c.id === collId)?.name ?? t("app.common.group");
         setColls(await source.collList());
         setRefreshKey((k) => k + 1);
         toast(
-          n > 0 ? `已从「${name}」移除 ${n} 项` : `这些本来就不在「${name}」里`,
+          n > 0
+            ? t("app.toast.coll_removed", { name, count: n })
+            : t("app.toast.coll_not_in", { name }),
           false,
-          "只断开关联，原文件不动"
+          t("app.toast.only_links_detail")
         );
       } catch (e) {
         toast(String(e), true);
@@ -1594,9 +1714,9 @@ export default function App() {
           x,
           y,
           items: [
-            { kind: "heading", label: "还没有分组" },
+            { kind: "heading", label: t("app.empty.no_collections") },
             {
-              label: "在侧栏「分组」里点 + 新建",
+              label: t("app.empty.no_collections_hint"),
               icon: "plus",
               action: () => setCtx(null),
             },
@@ -1608,7 +1728,7 @@ export default function App() {
         x,
         y,
         items: [
-          { kind: "heading", label: `加入分组（${ids.length} 项）` },
+          { kind: "heading", label: t("app.menu.coll_pick_title", { count: ids.length }) },
           ...colls.map((c) => ({
             label: c.name,
             icon: "folder-open",
@@ -1655,7 +1775,9 @@ export default function App() {
         y,
         items: [
           {
-            label: on ? "取消「只看这份快照」" : `只看「${row.name}」（在主列表里筛）`,
+            label: on
+              ? t("app.menu.snap_unfilter")
+              : t("app.menu.snap_filter", { name: row.name }),
             icon: "funnel",
             action: () => {
               setSnapFilter(on ? null : id);
@@ -1670,53 +1792,53 @@ export default function App() {
             },
           },
           {
-            label: `把选中的 ${selCount} 张加进来`,
+            label: t("app.menu.snap_add_selected", { count: selCount }),
             icon: "plus",
             disabled: selCount === 0,
             action: () => void addIdsToSnapshot(id, [...selectedIds]),
           },
           { kind: "separator" },
-          { label: "打开灵感板（无限画布）", icon: "expand", action: () => openSnapshot(row) },
+          { label: t("app.menu.open_board"), icon: "expand", action: () => openSnapshot(row) },
           {
-            label: "重新对账（按内容找回来）",
+            label: t("app.menu.snap_reconcile"),
             icon: "search",
             action: () => void resolveSnapshot(row),
           },
           { kind: "separator" },
-          { kind: "heading", label: "和另一份快照…" },
+          { kind: "heading", label: t("app.menu.snap_with_other") },
           ...(others.length
             ? [
                 {
-                  label: "合并（并集，新建一份）…",
+                  label: t("app.menu.snap_merge"),
                   icon: "copy",
                   action: () => setSnapPrompt({ mode: "merge", srcId: id }),
                 },
                 {
-                  label: "做差集（这份减另一份，新建）…",
+                  label: t("app.menu.snap_diff"),
                   icon: "funnel",
                   action: () => setSnapPrompt({ mode: "diff", srcId: id }),
                 },
               ]
-            : [{ kind: "heading" as const, label: "只有一份快照，凑不齐" }]),
+            : [{ kind: "heading" as const, label: t("app.menu.snap_need_two") }]),
           { kind: "separator" },
           {
-            label: "导出快照（.S-AssetManager，只含编号）",
+            label: t("app.menu.snap_export_manifest"),
             icon: "file",
             action: () => void exportSnapshot(row),
           },
           {
-            label: "导出原始图片（.zip，散图可直接解压）",
+            label: t("app.menu.snap_export_zip"),
             icon: "file",
             action: () => void exportSnapshotZip(row),
           },
           { kind: "separator" },
           {
-            label: "改名",
+            label: t("app.menu.rename_short"),
             icon: "tag",
             action: () => setSnapRenaming({ id, name: row.name }),
           },
           {
-            label: "删除快照（不删文件）",
+            label: t("app.menu.snap_delete"),
             icon: "trash",
             danger: true,
             action: () => void deleteSnapshot(row),
@@ -1743,7 +1865,11 @@ export default function App() {
       x,
       y,
       items: [
-        { label: "编辑分组（颜色 / 改名 / 解散）", icon: "tag", action: () => openTagEdit("group", name, x, y) },
+        {
+          label: t("app.menu.group_edit"),
+          icon: "tag",
+          action: () => openTagEdit("group", name, x, y),
+        },
       ],
     });
   }, []);
@@ -1782,14 +1908,16 @@ export default function App() {
           const merged = await source.renameTag(e.name, next);
           if (tagFilter === e.name) setTagFilter(next);
           toast(
-            merged > 0 ? `已并入「${next}」` : `已改名为「${next}」`,
+            merged > 0
+              ? t("app.toast.tag_merged", { name: next })
+              : t("app.toast.renamed", { name: next }),
             false,
-            merged > 0 ? `${merged} 项素材的标签合并了过去` : undefined
+            merged > 0 ? t("app.toast.tag_merged_detail", { count: merged }) : undefined
           );
           setTagEdit((e) => ({ kind: "tag", name: next, x: e?.x ?? lastMouse.current.x, y: e?.y ?? lastMouse.current.y }));
         } else {
           await source.renameGroup(e.name, next);
-          toast(`分组已改名为「${next}」`);
+          toast(t("app.toast.group_renamed", { name: next }));
           setTagEdit((e) => ({ kind: "group", name: next, x: e?.x ?? lastMouse.current.x, y: e?.y ?? lastMouse.current.y }));
         }
         setRefreshKey((k) => k + 1);
@@ -1806,7 +1934,11 @@ export default function App() {
       if (!e || e.kind !== "tag") return;
       try {
         await source.setTagGroup(e.name, group);
-        toast(group ? `「${e.name}」已放进「${group}」` : `「${e.name}」已移出分组`);
+        toast(
+          group
+            ? t("app.toast.tag_moved_to_group", { tag: e.name, group })
+            : t("app.toast.tag_removed_from_group", { tag: e.name })
+        );
         setRefreshKey((k) => k + 1);
       } catch (err) {
         toast(String(err), true);
@@ -1824,21 +1956,27 @@ export default function App() {
       return;
     }
     const v = await askRef.current({
-      title: `解散分组「${e.name}」？`,
+      title: t("app.dialog.disband_group_title", { name: e.name }),
       body: (
         <p className="dlg-hint">
-          只解散分组，<b>不会删标签</b>：组里的标签回到「未分组」，素材上的标签一条都不会少。
+          {t("app.dialog.disband_group_body_a")}
+          <b>{t("app.dialog.disband_group_body_b")}</b>
+          {t("app.dialog.disband_group_body_c")}
         </p>
       ),
       buttons: [
-        { label: "解散分组", value: "go", tone: "danger" },
-        { label: "取消", value: "no" },
+        { label: t("app.common.disband_group"), value: "go", tone: "danger" },
+        { label: t("app.common.cancel"), value: "no" },
       ],
     });
     if (v !== "go") return;
     try {
       const n = await source.deleteGroup(e.name);
-      toast(`已解散「${e.name}」`, false, `${n} 个标签回到未分组`);
+      toast(
+        t("app.toast.group_disbanded", { name: e.name }),
+        false,
+        t("app.toast.group_disbanded_detail", { count: n })
+      );
       setRefreshKey((k) => k + 1);
     } catch (err) {
       toast(String(err), true);
@@ -1850,7 +1988,11 @@ export default function App() {
     async (name: string) => {
       try {
         await source.tagCreate(name);
-        toast(`已新建标签「${name}」`, false, "选中素材后在右侧「标签」里就能挂上它");
+        toast(
+          t("app.toast.tag_created", { name }),
+          false,
+          t("app.toast.tag_created_detail")
+        );
         setRefreshKey((k) => k + 1);
       } catch (err) {
         toast(String(err), true);
@@ -1863,7 +2005,11 @@ export default function App() {
     async (name: string) => {
       try {
         await source.newGroup(name);
-        toast(`已建分组「${name}」`, false, "右键任意标签 → 分组，就能把它放进来");
+        toast(
+          t("app.toast.group_created", { name }),
+          false,
+          t("app.toast.group_created_detail")
+        );
         setRefreshKey((k) => k + 1);
       } catch (err) {
         toast(String(err), true);
@@ -1882,22 +2028,26 @@ export default function App() {
         let policy: MovePolicy = "skip";
         if (plan.conflicts.length) {
           const v = await askRef.current({
-            title: `目标文件夹里已经有 ${plan.conflicts.length} 个同名文件`,
+            title: t("app.dialog.move_conflict_title", { count: plan.conflicts.length }),
             body: (
               <>
                 <div className="dlg-list mono">
                   {plan.conflicts.slice(0, 6).map((n) => (
                     <div key={n}>{n}</div>
                   ))}
-                  {plan.conflicts.length > 6 && <div>…还有 {plan.conflicts.length - 6} 个</div>}
+                  {plan.conflicts.length > 6 && (
+                    <div>
+                      {t("app.dialog.move_conflict_more", { count: plan.conflicts.length - 6 })}
+                    </div>
+                  )}
                 </div>
-                <p className="dlg-hint">「替换」会把目标位置原有的那个先放进回收站，可以还原。</p>
+                <p className="dlg-hint">{t("app.dialog.move_conflict_hint")}</p>
               </>
             ),
             buttons: [
-              { label: "保留两者（自动改名）", value: "keep_both", tone: "accent" },
-              { label: "替换旧的", value: "replace", tone: "danger" },
-              { label: "跳过同名的", value: "skip" },
+              { label: t("app.dialog.keep_both"), value: "keep_both", tone: "accent" },
+              { label: t("app.dialog.replace_old"), value: "replace", tone: "danger" },
+              { label: t("app.dialog.skip_same"), value: "skip" },
             ],
           });
           if (!v) return;
@@ -1906,33 +2056,37 @@ export default function App() {
 
         if (plan.files > CONFIRM_MOVE_COUNT || plan.bytes > CONFIRM_MOVE_BYTES) {
           const v = await askRef.current({
-            title: `要移动 ${fmtNum(plan.files)} 个文件（${fmtSize(plan.bytes)}）`,
+            title: t("app.dialog.move_confirm_title", {
+              files: fmtNum(plan.files),
+              size: fmtSize(plan.bytes),
+            }),
             body: (
               <p className="dlg-hint">
-                目标：<span className="mono">{target}</span>
+                {t("app.dialog.target_label")}
+                <span className="mono">{target}</span>
                 {plan.crossVolume && (
                   <>
                     <br />
-                    跨盘移动会「先复制、再删源」，大文件会比较久，中途别关软件。
+                    {t("app.dialog.cross_volume_hint")}
                   </>
                 )}
               </p>
             ),
             buttons: [
-              { label: "开始移动", value: "go", tone: "accent" },
-              { label: "取消", value: "no" },
+              { label: t("app.common.move_start"), value: "go", tone: "accent" },
+              { label: t("app.common.cancel"), value: "no" },
             ],
           });
           if (v !== "go") return;
         } else if (plan.crossVolume) {
-          toast("跨盘移动", false, "会先复制再删源，稍慢一点");
+          toast(t("app.toast.cross_volume"), false, t("app.toast.cross_volume_detail"));
         }
 
         /* 交给后台线程执行（缺陷 #7）：这里只等「已经起跑」，
            逐项进度与收尾走 move://progress / move://done 两个事件。
            跨盘复制几百 MB 时界面仍然能滚动、能看缩略图。 */
         await source.moveStart(paths, target, policy);
-        setProgress("batch", { done: 0, total: paths.length, label: "正在移动" });
+        setProgress("batch", { done: 0, total: paths.length, label: t("app.toast.moving_now") });
       } catch (e) {
         toast(String(e), true);
       } finally {
@@ -1951,19 +2105,27 @@ export default function App() {
         const st = await source.statPaths(paths);
         const many = st.files > CONFIRM_DELETE_COUNT || paths.length > CONFIRM_DELETE_COUNT;
         const v = await askRef.current({
-          title: `把${label}移到回收站？`,
+          title: t("app.dialog.delete_title", { label }),
           body: (
             <p className="dlg-hint">
-              {paths.length > 1 ? `${paths.length} 项，` : ""}共 {fmtNum(st.files)} 个文件（
-              {fmtSize(st.bytes)}）。
+              {paths.length > 1 ? t("app.dialog.delete_count", { count: paths.length }) : ""}
+              {t("app.dialog.delete_files", {
+                files: fmtNum(st.files),
+                size: fmtSize(st.bytes),
+              })}
               <br />
-              删除＝移进左侧「回收站」，随时可以还原；清空时才彻底删掉。
-              {many && <><br />数量较多，会分批执行，中途可以看进度。</>}
+              {t("app.dialog.delete_hint")}
+              {many && (
+                <>
+                  <br />
+                  {t("app.dialog.delete_many_hint")}
+                </>
+              )}
             </p>
           ),
           buttons: [
-            { label: "移到回收站", value: "go", tone: "danger" },
-            { label: "取消", value: "no" },
+            { label: t("app.common.move_to_trash"), value: "go", tone: "danger" },
+            { label: t("app.common.cancel"), value: "no" },
           ],
         });
         if (v !== "go") return;
@@ -1978,13 +2140,24 @@ export default function App() {
             try {
               removed += await source.remove(part);
             } catch (e) {
-              toast(`第 ${i + 1}~${i + part.length} 个没删成`, true, String(e));
+              toast(
+                t("app.toast.delete_chunk_failed", {
+                  from: i + 1,
+                  to: i + part.length,
+                }),
+                true,
+                String(e)
+              );
             }
             setProgress("batch", { done: Math.min(paths.length, i + part.length), total: paths.length });
           }
           clearProgress("batch");
         }
-        toast(`已移到回收站 ${removed} 项`, false, "在左侧「回收站」里可以还原");
+        toast(
+          t("app.toast.deleted", { count: removed }),
+          false,
+          t("app.toast.deleted_detail")
+        );
         setSelected(null);
         setSelectedIds(new Set());
         setRefreshKey((k) => k + 1);
@@ -2007,15 +2180,15 @@ export default function App() {
     async (id: number, ids: number[]) => {
       try {
         const r = await source.snapshotAdd(id, ids);
-        const name = snaps.find((s) => s.id === id)?.name ?? "快照";
+        const name = snaps.find((s) => s.id === id)?.name ?? t("app.common.snapshot");
         setRefreshKey((k) => k + 1);
         const notes: string[] = [];
-        if (r.already) notes.push(`另外 ${r.already} 张本来就在`);
-        if (r.failed.length) notes.push(`${r.failed.length} 张失败`);
+        if (r.already) notes.push(t("app.toast.snap_already", { count: r.already }));
+        if (r.failed.length) notes.push(t("app.toast.snap_failed", { count: r.failed.length }));
         toast(
-          `已记进「${name}」：${r.added} 张`,
+          t("app.toast.snap_recorded", { name, count: r.added }),
           r.failed.length > 0,
-          notes.join(" · ") || "只记内容指纹，原文件不动"
+          notes.join(" · ") || t("app.toast.snap_recorded_detail")
         );
       } catch (e) {
         toast(String(e), true);
@@ -2037,7 +2210,7 @@ export default function App() {
       if (which === "tags") {
         const name = tagFilter ?? tags[0]?.name;
         if (!name) {
-          toast("这个库还没有标签：先在标签面板里点「+ 标签」建一个", true);
+          toast(t("app.empty.no_tags_lib"), true);
           return;
         }
         await applyTag(name, ids);
@@ -2046,7 +2219,7 @@ export default function App() {
       if (which === "collections") {
         const id = collFilter ?? colls[0]?.id;
         if (id == null) {
-          toast("这个库还没有分组：先在分组面板里点「+ 分组」建一个", true);
+          toast(t("app.empty.no_colls_lib"), true);
           return;
         }
         await addToColl(id, ids);
@@ -2055,7 +2228,7 @@ export default function App() {
       if (which === "snapshots") {
         const id = snapFilter ?? snaps[0]?.id;
         if (id == null) {
-          toast("这个库还没有快照：先展开快照段，点 + 建一个", true);
+          toast(t("app.empty.no_snaps_lib"), true);
           return;
         }
         await dropToSnapshot(id, ids);
@@ -2314,9 +2487,9 @@ export default function App() {
         /* 拖的是文件夹：这些集合只装"素材条目"，装不了一个目录。
            不说清楚的话，用户只会看到"松手什么都没发生"。 */
         toast(
-          "文件夹只能拖到左边的目录上（那是移动），标签 / 分组 / 快照只收素材",
+          t("app.toast.drop_folder_on_shelf"),
           true,
-          "要整批收起来：先选中里面的图片，再拖到分组或快照"
+          t("app.toast.drop_folder_on_shelf_detail")
         );
         return;
       }
@@ -2376,7 +2549,7 @@ export default function App() {
           ids: null,
           previewId: null,
           src: null,
-          name: path.split(/[\\/]/).filter(Boolean).pop() ?? "文件夹",
+          name: path.split(/[\\/]/).filter(Boolean).pop() ?? t("app.common.folder"),
           n: 0,
         },
         x,
@@ -2679,7 +2852,7 @@ export default function App() {
   }, [showGhost, hideGhost, moveGhost, markDropAt]);
 
   /* ---------------- 加库：原生文件夹选择器（T15） ---------------- */
-  const onAddPath = async (path: string, label = "已加入库") => {
+  const onAddPath = async (path: string, label = t("app.toast.lib_added")) => {
     if (!path) return;
     await startScan(path, label);
   };
@@ -2699,30 +2872,31 @@ export default function App() {
         const norm2 = (s: string) => s.replace(/[\\/]+$/, "").toLowerCase();
         const userRoots = roots.filter((r) => !bi.some((b) => norm2(b) === norm2(r.path)));
         await dlg.ask({
-          title: `已经有 ${MAX_LIBS} 个素材库了`,
+          title: t("app.dialog.lib_limit_title", { max: MAX_LIBS }),
           body: (
             <div className="grow">
-              <p>最多同时挂 {MAX_LIBS} 个。想加新的，先从下面某一个移除：</p>
+              <p>{t("app.dialog.lib_limit_body", { max: MAX_LIBS })}</p>
               <p className="mono" style={{ marginTop: 6, opacity: 0.75, whiteSpace: "pre-line" }}>
                 {userRoots.map((r) => r.path).join("\n")}
               </p>
               <p style={{ marginTop: 8 }}>
-                移除方法：在左侧列表里<b>右键那个库</b> → 「从素材库移除（不删文件）」。
-                只是不再索引它，磁盘上的文件一个都不会动，以后还能再加回来。
+                {t("app.dialog.lib_limit_how_a")}
+                <b>{t("app.dialog.lib_limit_how_b")}</b>
+                {t("app.dialog.lib_limit_how_c")}
               </p>
             </div>
           ),
-          buttons: [{ label: "知道了", value: "ok", tone: "accent" }],
+          buttons: [{ label: t("app.common.got_it"), value: "ok", tone: "accent" }],
         });
         return;
       }
-      const p = await source.pickFolder("选择要加入素材库的文件夹（只建索引，不移动文件）");
+      const p = await source.pickFolder(t("app.dialog.pick_lib_folder"));
       if (!p) return;
       /* 已经在库里就别再扫一遍（用户的库可能只有两三个，但重复点 + 很常见） */
       const existing = await source.roots().catch(() => []);
       const norm = (s: string) => s.replace(/[\\/]+$/, "").toLowerCase();
       if (existing.some((r) => norm(r.path) === norm(p))) {
-        toast("这个文件夹已经在素材库里了", true);
+        toast(t("app.toast.lib_exists"), true);
         return;
       }
       await onAddPath(p);
@@ -2734,16 +2908,17 @@ export default function App() {
   /** 从素材库移除一个库根：只清索引。磁盘文件一个都不动（要删文件走回收站操作） */
   const onRemoveLib = async (path: string) => {
     const ok = await dlg.ask({
-      title: "从素材库移除？",
+      title: t("app.dialog.remove_lib_title"),
       body: (
         <p>
-          只会把这个文件夹从索引里去掉，<b>磁盘上的文件一个都不会动</b>。
-          以后还可以再把它加回来，缩略图缓存会在淘汰时回收。
+          {t("app.dialog.remove_lib_body_a")}
+          <b>{t("app.dialog.remove_lib_body_b")}</b>
+          {t("app.dialog.remove_lib_body_c")}
         </p>
       ),
       buttons: [
-        { label: "取消", value: null as unknown as string },
-        { label: "移除", value: "ok", tone: "danger" },
+        { label: t("app.common.cancel"), value: null as unknown as string },
+        { label: t("app.common.remove"), value: "ok", tone: "danger" },
       ],
     });
     if (ok !== "ok") return;
@@ -2751,7 +2926,11 @@ export default function App() {
       const n = await source.removeLib(path);
       /* 用户最容易误解的一步：以为"移除素材库"会删文件。提示里必须写清磁盘没动
          （0.1.35 起把这句话从确认框挪到结果提示里，两种时刻都看得见）。 */
-      toast("已从素材库移除", false, `磁盘文件没动 · 清掉 ${fmtNum(n)} 个目录索引`);
+      toast(
+        t("app.toast.lib_removed"),
+        false,
+        t("app.toast.lib_removed_detail", { count: fmtNum(n) })
+      );
       setDir(null);
       setSelected(null);
       setSelectedIds(new Set());
@@ -2807,11 +2986,11 @@ export default function App() {
   );
 
   const onNewSubfolder = async (parent: string) => {
-    const name = window.prompt("新文件夹名称（会真的在磁盘上创建）", "");
+    const name = window.prompt(t("app.dialog.new_folder_prompt"), "");
     if (!name) return;
     try {
       await source.mkdir(parent, name);
-      toast("已创建文件夹");
+      toast(t("tree.folder_created"));
       setRefreshKey((k) => k + 1);
     } catch (e) {
       toast(String(e), true);
@@ -2820,10 +2999,10 @@ export default function App() {
 
   const onRescan = async () => {
     if (!dir) {
-      toast("先选一个库目录", true);
+      toast(t("app.toast.pick_lib_first"), true);
       return;
     }
-    await startScan(dir.path, "重新扫描");
+    await startScan(dir.path, t("app.common.rescan"));
   };
 
   const onReveal = async (a: Asset) => {
@@ -2846,7 +3025,7 @@ export default function App() {
   const onSaveAs = async (a: Asset) => {
     try {
       const dst = await source.saveAs(a.path, a.name);
-      if (dst) toast("已另存为", false, dst);
+      if (dst) toast(t("app.toast.saved_as"), false, dst);
     } catch (e) {
       toast(String(e), true);
     }
@@ -2856,18 +3035,21 @@ export default function App() {
      原图一个字节都不动（这是"另存一份"，不是编辑器）。 */
   const onResize = async (a: Asset) => {
     const pick = await dlg.ask({
-      title: "调整尺寸另存为",
+      title: t("app.dialog.resize_title"),
       body: (
         <div className="dlg-note">
-          当前 {a.width || "?"} × {a.height || "?"}，选一个长边上限。
+          {t("app.dialog.resize_body_a", {
+            width: a.width || "?",
+            height: a.height || "?",
+          })}
           <br />
-          只缩不放；原图不会被改动，输出到你在下一步选的位置。
+          {t("app.dialog.resize_body_b")}
         </div>
       ),
       buttons: [
-        { label: "长边 512", value: "512" },
-        { label: "长边 1024", value: "1024" },
-        { label: "长边 2048", value: "2048", tone: "accent" },
+        { label: t("app.dialog.resize_512"), value: "512" },
+        { label: t("app.dialog.resize_1024"), value: "1024" },
+        { label: t("app.dialog.resize_2048"), value: "2048", tone: "accent" },
       ],
     });
     if (!pick) return;
@@ -2875,7 +3057,7 @@ export default function App() {
       const out = await source.resizeSave(a.path, Number(pick), "png");
       if (out) {
         toast(
-          `已另存 ${out.width} × ${out.height}`,
+          t("app.toast.saved_size", { width: out.width, height: out.height }),
           false,
           `${(out.bytes / 1024).toFixed(0)} KB · ${out.path}`
         );
@@ -2888,7 +3070,13 @@ export default function App() {
   const onCopyFile = async (paths: string[]) => {
     try {
       await source.copyFile(paths);
-      toast(paths.length > 1 ? `已复制 ${paths.length} 个原文件` : "已复制原文件", false, "现在可以直接粘到 PS / 资源管理器");
+      toast(
+        paths.length > 1
+          ? t("app.toast.copied_files", { count: paths.length })
+          : t("app.toast.copied_file"),
+        false,
+        t("app.toast.copied_file_detail")
+      );
     } catch (e) {
       toast(String(e), true);
     }
@@ -2909,7 +3097,7 @@ export default function App() {
     if (!name || name === a.name) return;
     try {
       await source.rename(a.path, name);
-      toast("已重命名原文件");
+      toast(t("app.toast.renamed_file"));
       setRefreshKey((k) => k + 1);
     } catch (e) {
       toast(String(e), true);
@@ -2942,7 +3130,11 @@ export default function App() {
   const restoreTrash = async (ids: string[], to?: string) => {
     try {
       const n = await source.trashRestore(ids, to);
-      toast(to ? `已还原 ${n} 项到 ${to}` : `已还原 ${n} 项`);
+      toast(
+        to
+          ? t("app.toast.restored_to", { count: n, path: to })
+          : t("app.toast.restored", { count: n })
+      );
       if (trashSel && ids.includes(trashSel)) setTrashSel(null);
       await loadTrash();
       setRefreshKey((k) => k + 1);
@@ -2954,7 +3146,7 @@ export default function App() {
   const purgeTrash = async (ids: string[]) => {
     try {
       const n = await source.trashPurge(ids);
-      toast(`已彻底删除 ${n} 项`);
+      toast(t("app.toast.purged", { count: n }));
       if (trashSel && ids.includes(trashSel)) setTrashSel(null);
       await loadTrash();
     } catch (e) {
@@ -2964,17 +3156,17 @@ export default function App() {
 
   const emptyTrash = async () => {
     const ok = await dlg.ask({
-      title: `清空回收站（${trash.length} 项）？`,
-      body: <p>回收站里的文件会被彻底删除（先进系统回收站，还能再捞一次）。</p>,
+      title: t("app.dialog.empty_trash_title", { count: trash.length }),
+      body: <p>{t("app.dialog.empty_trash_body")}</p>,
       buttons: [
-        { label: "取消", value: null as unknown as string },
-        { label: "清空", value: "ok", tone: "danger" },
+        { label: t("app.common.cancel"), value: null as unknown as string },
+        { label: t("app.common.empty"), value: "ok", tone: "danger" },
       ],
     });
     if (ok !== "ok") return;
     try {
       const n = await source.trashEmpty();
-      toast(`回收站已清空（${n} 项）`);
+      toast(t("app.toast.trash_emptied", { count: n }));
       await loadTrash();
     } catch (e) {
       toast(String(e), true);
@@ -3025,8 +3217,15 @@ export default function App() {
     setTrashSel(trashShown[0]?.id ?? null);
   }, [page, trashShown, trashSel]);
 
-  /* 开大图：网格双击、详情里的「看图」都走这一处 */
-  const openLightbox = (a: Asset) => {    const i = items.findIndex((x) => x.id === a.id);
+  /* 开大图：网格双击、详情里的「看图」都走这一处。
+     双击和空格是**同一个开关**（owner 2026-11-22）：已经在看这张 → 关掉；
+     灯箱开着但操作的是另一张 → 换过去。 */
+  const openLightbox = (a: Asset) => {
+    if (lightbox !== null && items[lightbox]?.id === a.id) {
+      setLightbox(null);
+      return;
+    }
+    const i = items.findIndex((x) => x.id === a.id);
     setLightbox(i >= 0 ? i : 0);
   };
 
@@ -3044,7 +3243,7 @@ export default function App() {
     const rs = await source.roots();
     const p = dir?.path ?? rs[0]?.path;
     if (!p) {
-      toast("还没有库，先添加一个文件夹", true);
+      toast(t("app.toast.no_library"), true);
       return;
     }
     try {
@@ -3099,21 +3298,21 @@ export default function App() {
      多选时菜单作用于**整个选中集合**（T11）。 */
   useEffect(() => {
     const onCtx = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t) return;
+      const hitEl = e.target as HTMLElement | null;
+      if (!hitEl) return;
       // 弹层上不许冒出浏览器菜单，也不额外叠一层菜单
-      if (t.closest(".set-scrim") || t.closest(".lightbox") || t.closest(".ctx-menu") || t.closest(".dlg-scrim")) {
+      if (hitEl.closest(".set-scrim") || hitEl.closest(".lightbox") || hitEl.closest(".ctx-menu") || hitEl.closest(".dlg-scrim")) {
         e.preventDefault();
         return;
       }
-      if (t.closest('input, textarea, [contenteditable="true"]')) return;
+      if (hitEl.closest('input, textarea, [contenteditable="true"]')) return;
 
       e.preventDefault();
       const x = e.clientX;
       const y = e.clientY;
       const show = (menu: CtxItem[]) => setCtx({ x, y, items: menu });
 
-      const tile = t.closest<HTMLElement>("[data-asset-id]");
+      const tile = hitEl.closest<HTMLElement>("[data-asset-id]");
       /* 主界面素材瓦片：**不按 Shift 的右键 = 就地看详情**（0.4.24）。
          原来这里直接弹 20 多项的菜单，遮挡大、还得先选再找；owner 要的是
          「右键哪张看哪张」，菜单退到 Shift+右键。左栏树/标签等其它区域不受影响。 */
@@ -3143,17 +3342,24 @@ export default function App() {
         const paths = inSel ? selPaths : [a.path];
         const n = paths.length;
         show([
-          { label: n > 1 ? `用默认程序打开（${n} 个）` : "用默认程序打开", icon: "image", action: () => void onOpenDefault(a) },
           {
-            label: "贴图（可以拖到任意位置）",
+            label:
+              n > 1
+                ? t("app.menu.open_default_n", { count: n })
+                : t("app.menu.open_default"),
+            icon: "image",
+            action: () => void onOpenDefault(a),
+          },
+          {
+            label: t("app.menu.peek"),
             icon: "expand",
             shortcut: "B",
             action: () => openPeek(a),
           },
           {
-            label: "预览大图",
+            label: t("app.menu.lightbox"),
             icon: "play",
-            shortcut: "空格",
+            shortcut: t("app.menu.shortcut_space"),
             action: () => {
               const i = items.findIndex((v) => v.id === a.id);
               setLightbox(i >= 0 ? i : 0);
@@ -3161,7 +3367,8 @@ export default function App() {
           },
           { kind: "separator" },
           {
-            label: n > 1 ? `加入分组…（${n} 项）` : "加入分组…",
+            label:
+              n > 1 ? t("app.menu.add_to_coll_n", { count: n }) : t("app.menu.add_to_coll"),
             icon: "folder-open",
             /* 第二级菜单：菜单自己点完会关掉，所以延一帧再开新的，
                否则刚设进去的 ctx 立刻被 onClose 清掉（表现为"点了没反应"） */
@@ -3176,8 +3383,10 @@ export default function App() {
             ? [
                 {
                   label: (() => {
-                    const nm = colls.find((c) => c.id === collFilter)?.name ?? "分组";
-                    return n > 1 ? `从「${nm}」移除（${n} 项）` : `从「${nm}」移除`;
+                    const nm = colls.find((c) => c.id === collFilter)?.name ?? t("app.common.group");
+                    return n > 1
+                      ? t("app.menu.remove_from_coll_n", { name: nm, count: n })
+                      : t("app.menu.remove_from_coll", { name: nm });
                   })(),
                   icon: "close",
                   action: () => {
@@ -3189,71 +3398,93 @@ export default function App() {
             : []),
           {
             /* 快照（0.1.18）：只记清单、不搬文件，所以放在「加入分组」旁边 */
-            label: n > 1 ? `加入快照…（${n} 项）` : "加入快照…",
+            label:
+              n > 1 ? t("app.menu.add_to_snap_n", { count: n }) : t("app.menu.add_to_snap"),
             icon: "camera",
             action: () => {
               const ids2 = inSel ? [...selectedIds] : [a.id];
               window.setTimeout(() => setSnapPrompt({ mode: "ids", ids: ids2 }), 0);
             },
           },
-          { label: "在资源管理器中显示", icon: "reveal", action: () => void onReveal(a) },
+          {
+            label: t("app.menu.reveal"),
+            icon: "reveal",
+            action: () => void onReveal(a),
+          },
           /* T38：单张才有"另存为 / 调整尺寸"（多选时"存到哪"没有意义） */
           {
-            label: "另存为…",
+            label: t("app.menu.save_as"),
             icon: "import",
             disabled: n > 1 || busy,
             action: () => void onSaveAs(a),
           },
           {
-            label: "调整尺寸另存为…",
+            label: t("app.menu.resize_save_as"),
             icon: "expand",
             disabled: n > 1 || busy || !a.width || !a.height,
             action: () => void onResize(a),
           },
           {
-            label: n > 1 ? `复制 ${n} 个原文件` : "复制原文件",
+            label:
+              n > 1 ? t("app.menu.copy_files_n", { count: n }) : t("app.menu.copy_file"),
             icon: "copy",
             disabled: busy,
             action: () => void onCopyFile(paths),
           },
           {
-            label: "复制完整路径",
+            label: t("app.menu.copy_path"),
             icon: "copy",
             action: () => {
               void navigator.clipboard
                 .writeText(paths.join("\r\n"))
-                .then(() => toast(n > 1 ? `已复制 ${n} 条路径` : "已复制完整路径"))
-                .catch(() => toast("复制失败，可在详情面板里选中", true));
+                .then(() =>
+                  toast(
+                    n > 1
+                      ? t("app.toast.copied_paths", { count: n })
+                      : t("app.toast.copied_path")
+                  )
+                )
+                .catch(() => toast(t("app.toast.copy_failed_select"), true));
             },
           },
           /* 「复制更多」里的那几样（照果核看图）：文件名 / 分辨率。
              单张时才有分辨率可言，多选就只给文件名 */
           {
-            label: n > 1 ? `复制 ${n} 个文件名` : "复制文件名",
+            label: n > 1 ? t("app.menu.copy_names_n", { count: n }) : t("app.menu.copy_name"),
             icon: "copy",
             action: () => {
               void navigator.clipboard
                 .writeText(paths.map((pp) => pp.split(/[\\/]/).pop() ?? pp).join("\r\n"))
-                .then(() => toast(n > 1 ? `已复制 ${n} 个文件名` : "已复制文件名"))
-                .catch(() => toast("复制失败", true));
+                .then(() =>
+                  toast(
+                    n > 1
+                      ? t("app.toast.copied_names", { count: n })
+                      : t("app.toast.copied_name")
+                  )
+                )
+                .catch(() => toast(t("app.toast.copy_failed"), true));
             },
           },
           {
-            label: "复制分辨率",
+            label: t("app.menu.copy_resolution"),
             icon: "copy",
             disabled: n > 1 || !a.width || !a.height,
             action: () => {
               void navigator.clipboard
                 .writeText(`${a.width}×${a.height}`)
-                .then(() => toast(`已复制 ${a.width}×${a.height}`))
-                .catch(() => toast("复制失败", true));
+                .then(() =>
+                  toast(
+                    t("app.toast.copied_resolution", { width: a.width ?? 0, height: a.height ?? 0 })
+                  )
+                )
+                .catch(() => toast(t("app.toast.copy_failed"), true));
             },
           },
           { kind: "separator" },
           /* 详情现在是右键浮层：重命名的就地输入框在详情顶栏，得先把浮层叫出来再进编辑态
              （0.4.24，否则点了菜单只会看到"什么都没有发生"）。 */
           {
-            label: "重命名",
+            label: t("app.common.rename"),
             icon: "more",
             disabled: n > 1,
             action: () => {
@@ -3262,16 +3493,24 @@ export default function App() {
             },
           },
           {
-            label: n > 1 ? `把 ${n} 项移到当前目录` : "移到当前目录…",
+            label:
+              n > 1
+                ? t("app.menu.move_here_n", { count: n })
+                : t("app.menu.move_here"),
             icon: "folder",
             disabled: !dir || busy,
             action: () => dir && void doMove(paths, dir.path),
           },
           {
-            label: n > 1 ? `把 ${n} 项移到回收站` : "移到回收站",
+            label:
+              n > 1 ? t("app.menu.trash_n", { count: n }) : t("app.common.move_to_trash"),
             icon: "trash",
             danger: true,
-            action: () => void doDelete(paths, n > 1 ? `这 ${n} 项` : `「${a.name}」`),
+            action: () =>
+              void doDelete(
+                paths,
+                n > 1 ? t("app.common.this_n_items", { count: n }) : t("app.common.quoted_name", { name: a.name })
+              ),
           },
         ]);
         return;
@@ -3279,39 +3518,42 @@ export default function App() {
 
       /* 标签面板与弹层有自己的右键菜单，别再弹「重新扫描 / 全选 / 瀑布流」那一套 ——
          那是"库级"操作，落在一条标签上完全不对题（实测：右键标签会同时弹编辑卡和这个菜单）。 */
-      if (t.closest(".tag-dock") || t.closest(".dlg-scrim") || t.closest(".dlg")) return;
+      if (hitEl.closest(".tag-dock") || hitEl.closest(".dlg-scrim") || hitEl.closest(".dlg")) return;
 
-      const dirRow = t.closest<HTMLElement>("[data-dir-path]");
+      const dirRow = hitEl.closest<HTMLElement>("[data-dir-path]");
       if (dirRow) {
         const p = dirRow.dataset.dirPath ?? "";
         const name = dirRow.dataset.dirName ?? "";
         show([
           {
-            label: "在资源管理器中打开",
+            label: t("app.menu.reveal_open"),
             icon: "reveal",
             action: () => void source.reveal(p).catch((err) => toast(String(err), true)),
           },
           {
-            label: "重新扫描这个目录",
+            label: t("app.menu.rescan_dir"),
             icon: "scan",
-            action: () => void startScan(p, `重新扫描 ${name}`),
+            action: () => void startScan(p, t("app.toast.rescanning", { name })),
           },
           /* 导入到**这个节点**（不是"当前目录"）：右键哪一行就导进哪一行，
              用户点的是"这里"，就别把它导到别处去（0.4.2） */
           {
-            label: "导入文件到此处…",
+            label: t("app.menu.import_here"),
             icon: "plus",
             action: () => void importInto(p),
           },
           {
-            label: selPaths.length > 1 ? `把 ${selPaths.length} 项移到这里` : "把选中的素材移到这里",
+            label:
+              selPaths.length > 1
+                ? t("app.menu.move_selected_here_n", { count: selPaths.length })
+                : t("app.menu.move_selected_here"),
             icon: "folder",
             disabled: !selected || busy,
             action: () => selected && void doMove(selPaths.length ? selPaths : [selected.path], p),
           },
           { kind: "separator" },
           {
-            label: "在这里新建子文件夹",
+            label: t("app.menu.new_subfolder"),
             icon: "plus",
             action: () => void onNewSubfolder(p),
           },
@@ -3323,7 +3565,7 @@ export default function App() {
               ? [
                   { kind: "separator" as const },
                   {
-                    label: "软件截图目录（内置库，不能移除）",
+                    label: t("app.menu.builtin_lib"),
                     icon: "database",
                     disabled: true,
                     action: () => {},
@@ -3332,7 +3574,7 @@ export default function App() {
               : [
                   { kind: "separator" as const },
                   {
-                    label: "从素材库移除（不删文件）",
+                    label: t("app.menu.remove_lib"),
                     icon: "database",
                     danger: true,
                     action: () => void onRemoveLib(p),
@@ -3344,39 +3586,39 @@ export default function App() {
       }
 
       show([
-        { label: "重新扫描当前库", icon: "scan", action: () => void onRescan() },
-        { label: "添加文件夹到库", icon: "plus", action: () => void onAddFolder() },
-        { label: "全选", icon: "image", shortcut: "Ctrl+A", action: () => pickMany(items.map((v) => v.id), false) },
-        { label: "撤销上一步", icon: "undo", shortcut: "Ctrl+Z", action: () => void onUndo() },
+        { label: t("app.menu.rescan_lib"), icon: "scan", action: () => void onRescan() },
+        { label: t("app.menu.add_folder"), icon: "plus", action: () => void onAddFolder() },
+        { label: t("app.menu.select_all"), icon: "image", shortcut: "Ctrl+A", action: () => pickMany(items.map((v) => v.id), false) },
+        { label: t("app.menu.undo"), icon: "undo", shortcut: "Ctrl+Z", action: () => void onUndo() },
         { kind: "separator" },
         /* 截图 / 剪贴板看图是系统级功能（默认 F1 / F3），这里再给一份鼠标入口：
            快捷键被别的软件占住时（本机 Snipaste 就占着 F1/F3），用户总得有地方点。 */
         {
-          label: "截图（选完区存到截图目录）",
+          label: t("app.menu.snip"),
           icon: "image",
           shortcut: "F1",
           action: () => void source.snipStart().catch((e) => toast(String(e), true)),
         },
         {
-          label: "把剪贴板里的图用贴图打开",
+          label: t("app.menu.clip_peek"),
           icon: "copy",
           shortcut: "F3",
           action: () => void source.clipPeek().catch((e) => toast(String(e), true)),
         },
         { kind: "separator" },
-        { label: "常规网格", icon: "grid", disabled: view === "grid", action: () => setView("grid") },
+        { label: t("topbar.view_grid"), icon: "grid", disabled: view === "grid", action: () => setView("grid") },
         {
-          label: "瀑布流",
+          label: t("topbar.view_waterfall"),
           icon: "waterfall",
           disabled: view === "waterfall",
           action: () => setView("waterfall"),
         },
         { kind: "separator" },
-        { label: "偏好设置", icon: "settings", shortcut: "Ctrl+,", action: () => setSettingsOpen(true) },
-        { label: "快捷键一览", icon: "keyboard", action: () => setShortcutsOpen(true) },
-        { label: "查找重复素材", icon: "copy", action: () => setTools({ tab: "dupes" }) },
-        { label: "检查丢失的引用", icon: "funnel", action: () => setTools({ tab: "refs" }) },
-        { label: "批量重命名", icon: "tag", action: () => setTools({ tab: "rename" }) },
+        { label: t("app.menu.settings"), icon: "settings", shortcut: "Ctrl+,", action: () => setSettingsOpen(true) },
+        { label: t("app.menu.shortcuts_list"), icon: "keyboard", action: () => setShortcutsOpen(true) },
+        { label: t("app.menu.dupes"), icon: "copy", action: () => setTools({ tab: "dupes" }) },
+        { label: t("app.menu.refs"), icon: "funnel", action: () => setTools({ tab: "refs" }) },
+        { label: t("app.menu.batch_rename"), icon: "tag", action: () => setTools({ tab: "rename" }) },
       ]);
     };
     document.addEventListener("contextmenu", onCtx, true);
@@ -3406,6 +3648,8 @@ export default function App() {
     const h = (e: KeyboardEvent) => {
       // 设置面板 / 右键菜单开着时，全局快捷键让位给浮层
       if (settingsOpen || shortcutsOpen || tools || ctx) return;
+      /* 输入法组合态的按键是「在选词」，不是快捷键（229 是老 WebView2 的同义信号） */
+      if (e.isComposing || e.keyCode === 229) return;
       // 命令面板：连输入框里也响应（它就是"全局"入口，别让焦点位置决定能不能用）
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -3413,7 +3657,7 @@ export default function App() {
         return;
       }
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") {
+      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) {
         if (e.key === "Escape") (e.target as HTMLElement).blur();
         return;
       }
@@ -3427,10 +3671,17 @@ export default function App() {
         pickMany(items.map((v) => v.id), false);
         return;
       }
-      if (e.key === " " && selected) {
+      if (e.key === " " && (lightbox !== null || selected)) {
+        /* 空格 = 大图开关（owner 2026-11-22）：已经开着就关，不再「重新打开 / 翻页」。
+           长按的自动重复会变成疯狂开合，直接丢掉 repeat。 */
+        if (e.repeat) return;
         e.preventDefault();
-        const i = items.findIndex((x) => x.id === selected.id);
-        setLightbox(i >= 0 ? i : 0);
+        if (lightbox !== null) {
+          setLightbox(null);
+        } else if (selected) {
+          const i = items.findIndex((x) => x.id === selected.id);
+          setLightbox(i >= 0 ? i : 0);
+        }
       } else if (e.key === "Escape") {
         /* 0.4.24：Esc 先关右键浮层（它是"临时看一眼"的东西），再关大图，最后才取消多选。
            抽屉形态不归 Esc 管 —— 鼠标离开右边缘自己会收。 */
@@ -3556,31 +3807,31 @@ export default function App() {
     const out: Command[] = [
       {
         id: "settings",
-        label: "打开偏好设置",
+        label: t("app.cmd.settings"),
         hint: "Ctrl+,",
         icon: "settings",
-        keywords: "设置 偏好 preference",
+        keywords: t("app.cmd.kw_settings"),
         run: () => setSettingsOpen(true),
       },
       {
         id: "add-lib",
-        label: "添加素材库…",
+        label: t("app.cmd.add_lib"),
         icon: "plus",
-        keywords: "库 文件夹 添加 library folder",
+        keywords: t("app.cmd.kw_add_lib"),
         run: () => void onAddFolder(),
       },
       {
         id: "snap-new",
-        label: "新建快照",
+        label: t("app.cmd.snap_new"),
         icon: "expand",
-        keywords: "快照 snapshot 收藏 书签",
+        keywords: t("app.cmd.kw_snap_new"),
         run: () => setSnapCreating(true),
       },
       {
         id: "snap-import",
-        label: "导入快照（.S-AssetManager）",
+        label: t("app.cmd.snap_import"),
         icon: "file",
-        keywords: "快照 snapshot 导入 import",
+        keywords: t("app.cmd.kw_snap_import"),
         run: () => void importSnapshot(),
       },
     ];
@@ -3589,16 +3840,16 @@ export default function App() {
       out.push(
         {
           id: "reveal-dir",
-          label: "在资源管理器中打开当前目录",
+          label: t("app.cmd.reveal_dir"),
           icon: "reveal",
-          keywords: "定位 打开 文件夹 explorer",
+          keywords: t("app.cmd.kw_reveal_dir"),
           run: () => void source.reveal(dir.path).catch((e) => toast(String(e), true)),
         },
         {
           id: "new-sub",
-          label: "在这里新建子文件夹…",
+          label: t("app.cmd.new_sub"),
           icon: "folder",
-          keywords: "新建 文件夹 mkdir 创建",
+          keywords: t("app.cmd.kw_new_sub"),
           run: () => void onNewSubfolder(dir.path),
         }
       );
@@ -3607,79 +3858,79 @@ export default function App() {
     out.push(
       {
         id: "view-grid",
-        label: "视图：网格",
+        label: t("app.cmd.view_grid"),
         icon: "grid",
-        keywords: "视图 网格 grid",
+        keywords: t("app.cmd.kw_view_grid"),
         run: () => setView("grid"),
       },
       {
         id: "view-waterfall",
-        label: "视图：瀑布流",
+        label: t("app.cmd.view_waterfall"),
         icon: "waterfall",
-        keywords: "视图 瀑布流 waterfall 列",
+        keywords: t("app.cmd.kw_view_waterfall"),
         run: () => setView("waterfall"),
       },
       {
         id: "size-s",
-        label: "缩略图：小",
+        label: t("app.cmd.size_s"),
         icon: "image",
-        keywords: "缩略图 尺寸 size 小",
+        keywords: t("app.cmd.kw_size_s"),
         run: () => setSizeIndex(0),
       },
       {
         id: "size-m",
-        label: "缩略图：中",
+        label: t("app.cmd.size_m"),
         icon: "image",
-        keywords: "缩略图 尺寸 size 中",
+        keywords: t("app.cmd.kw_size_m"),
         run: () => setSizeIndex(1),
       },
       {
         id: "size-l",
-        label: "缩略图：大",
+        label: t("app.cmd.size_l"),
         icon: "image",
-        keywords: "缩略图 尺寸 size 大",
+        keywords: t("app.cmd.kw_size_l"),
         run: () => setSizeIndex(2),
       },
       {
         id: "sort-mtime",
-        label: "排序：最近修改",
+        label: t("app.cmd.sort_mtime"),
         icon: "sort",
-        keywords: "排序 时间 最新 sort",
+        keywords: t("app.cmd.kw_sort_mtime"),
         run: () => setSort("mtime_desc"),
       },
       {
         id: "sort-name",
-        label: "排序：名称",
+        label: t("app.cmd.sort_name"),
         icon: "sort",
-        keywords: "排序 名称 字母 sort",
+        keywords: t("app.cmd.kw_sort_name"),
         run: () => setSort("name_asc"),
       },
       {
         id: "sort-size",
-        label: "排序：大小",
+        label: t("app.cmd.sort_size"),
         icon: "sort",
-        keywords: "排序 大小 体积 sort",
+        keywords: t("app.cmd.kw_sort_size"),
         run: () => setSort("size_desc"),
       },
       {
         id: "sort-rating",
-        label: "排序：评分",
+        label: t("app.cmd.sort_rating"),
         icon: "star",
-        keywords: "排序 评分 星级 sort rating",
+        keywords: t("app.cmd.kw_sort_rating"),
         run: () => setSort("rating_desc"),
       },
       {
         id: "kind-all",
-        label: "类型：全部",
+        label: t("app.cmd.kind_all"),
         icon: "funnel",
-        keywords: "类型 筛选 全部",
+        keywords: t("app.cmd.kw_kind_all"),
         run: () => setKindKey("all"),
       },
       {
         id: "kind-image",
-        label: "类型：只看图片",
+        label: t("app.cmd.kind_image"),
         icon: "funnel",
-        keywords: "类型 筛选 图片 only image",
+        keywords: t("app.cmd.kw_kind_image"),
         run: () => setKindKey("image"),
       }
     );
@@ -3688,39 +3939,39 @@ export default function App() {
       out.push(
         {
           id: "rate-1",
-          label: `给选中项打 1 星（${sel.length} 项）`,
+          label: t("app.cmd.rate_1", { count: sel.length }),
           icon: "star",
-          keywords: "评分 星级 rate",
+          keywords: t("app.cmd.kw_rate"),
           run: () => void onSetRating(sel, 1),
         },
         {
           id: "rate-5",
-          label: `给选中项打 5 星（${sel.length} 项）`,
+          label: t("app.cmd.rate_5", { count: sel.length }),
           icon: "star",
-          keywords: "评分 星级 rate 收藏",
+          keywords: t("app.cmd.kw_rate_fav"),
           run: () => void onSetRating(sel, 5),
         },
         {
           id: "rate-0",
-          label: `清除评分（${sel.length} 项）`,
+          label: t("app.cmd.rate_clear", { count: sel.length }),
           icon: "star",
-          keywords: "评分 清除 取消 rate",
+          keywords: t("app.cmd.kw_rate_clear"),
           run: () => void onSetRating(sel, 0),
         },
         {
           id: "tag",
-          label: `打标签（${sel.length} 项）`,
+          label: t("app.cmd.tag", { count: sel.length }),
           hint: "T",
           icon: "tag",
-          keywords: "标签 tag 标记",
+          keywords: t("app.cmd.kw_tag"),
           run: () => setTagPrompt({ ids: sel }),
         },
         {
           id: "delete",
-          label: `删除选中项（${sel.length} 项 → 回收站）`,
+          label: t("app.cmd.delete", { count: sel.length }),
           icon: "trash",
-          keywords: "删除 回收站 delete trash",
-          run: () => void doDelete(selPaths, `${sel.length} 个素材`),
+          keywords: t("app.cmd.kw_delete"),
+          run: () => void doDelete(selPaths, t("app.common.n_assets", { count: sel.length })),
         }
       );
     }
@@ -3728,18 +3979,18 @@ export default function App() {
     if (selected) {
       out.push({
         id: "peek",
-        label: "贴图（可拖到任意位置）",
+        label: t("app.cmd.peek"),
         hint: "B",
         icon: "expand",
-        keywords: "无边框 看图 截图 borderless peek 参考图",
+        keywords: t("app.cmd.kw_peek"),
         run: () => openPeek(selected),
       });
       out.push({
         id: "preview",
-        label: "全屏预览选中的素材",
+        label: t("app.cmd.preview"),
         hint: "Space",
         icon: "play",
-        keywords: "预览 全屏 灯箱 preview",
+        keywords: t("app.cmd.kw_preview"),
         run: () => {
           const i = items.findIndex((x) => x.id === selected.id);
           setLightbox(i >= 0 ? i : 0);
@@ -3750,30 +4001,34 @@ export default function App() {
     out.push(
       {
         id: "undo",
-        label: "撤销上一步文件操作",
+        label: t("app.cmd.undo"),
         hint: "Ctrl+Z",
         icon: "undo",
-        keywords: "撤销 回退 undo",
+        keywords: t("app.cmd.kw_undo"),
         run: () => void onUndo(),
       },
       {
         id: "reindex",
-        label: "重建索引（会清空后重扫）",
+        label: t("app.cmd.reindex"),
         icon: "scan",
-        keywords: "重建 索引 重扫 rebuild",
+        keywords: t("app.cmd.kw_reindex"),
         run: async () => {
           const ok = await dlg.ask({
-            title: "重建索引？",
-            body: <p>会清空索引并全量重扫所有库根。原文件不动，评分/注释/标签都保留。</p>,
+            title: t("app.dialog.reindex_title"),
+            body: <p>{t("app.dialog.reindex_body")}</p>,
             buttons: [
-              { label: "取消", value: null as unknown as string },
-              { label: "重建", value: "ok", tone: "danger" },
+              { label: t("app.common.cancel"), value: null as unknown as string },
+              { label: t("app.common.rebuild"), value: "ok", tone: "danger" },
             ],
           });
           if (ok !== "ok") return;
           try {
             await source.rebuildIndex();
-            toast("已开始重建", false, "后台在跑，扫完自动刷新");
+            toast(
+              t("app.toast.reindex_started"),
+              false,
+              t("app.toast.reindex_started_detail")
+            );
           } catch (e) {
             toast(String(e), true);
           }
@@ -3781,16 +4036,21 @@ export default function App() {
       },
       {
         id: "gc",
-        label: "清理缩略图缓存",
+        label: t("app.cmd.gc"),
         icon: "database",
-        keywords: "缓存 清理 释放 cache gc",
+        keywords: t("app.cmd.kw_gc"),
         run: async () => {
           try {
             const [before, freed] = await source.cacheGc(0, 0);
             toast(
-              freed > 0 ? "缓存已清理" : "缓存已经是空的",
+              freed > 0 ? t("app.toast.cache_cleared") : t("app.toast.cache_empty"),
               false,
-              freed > 0 ? `释放 ${fmtSize(freed)}（清理前 ${fmtSize(before)}）` : undefined
+              freed > 0
+                ? t("app.toast.cache_freed", {
+                    freed: fmtSize(freed),
+                    before: fmtSize(before),
+                  })
+                : undefined
             );
           } catch (e) {
             toast(String(e), true);
@@ -3799,28 +4059,28 @@ export default function App() {
       },
       {
         id: "warm",
-        label: "后台预生成全部缩略图",
+        label: t("app.cmd.warm"),
         icon: "image",
-        keywords: "预热 预生成 warm 缩略图",
+        keywords: t("app.cmd.kw_warm"),
         run: () => void source.warmThumbs(THUMB_PX[prefs.size] ?? 384).catch((e) => toast(String(e), true)),
       },
       {
         id: "import-files",
-        label: "导入文件到当前文件夹",
+        label: t("app.cmd.import_files"),
         icon: "plus",
-        keywords: "导入 import 添加 拖入 复制 素材",
+        keywords: t("app.cmd.kw_import"),
         run: () => void importInto(dir?.path ?? null),
       },
       {
         id: "export",
-        label: "导出用户数据（.D-AssetManager，按库）",
+        label: t("app.cmd.export"),
         icon: "copy",
-        keywords: "导出 备份 export 用户数据 data 按库",
+        keywords: t("app.cmd.kw_export"),
         run: async () => {
           try {
             /* 只导当前库：命令面板没有选库这一步，交给设置页做多库选择 */
             const p = await source.exportUserdata(dir?.path ?? null);
-            toast("已导出当前库的用户数据", false, p);
+            toast(t("app.toast.exported_userdata"), false, p);
           } catch (e) {
             toast(String(e), true);
           }
@@ -3828,19 +4088,23 @@ export default function App() {
       },
       {
         id: "export-zip",
-        label: "导出整个库为 ZIP（带年月日）",
+        label: t("app.cmd.export_zip"),
         icon: "download",
-        keywords: "导出 zip 压缩 备份 打包 整库 library export",
+        keywords: t("app.cmd.kw_export_zip"),
         run: async () => {
           try {
             const r = await source.exportLibraryZip(dir?.path ?? null);
             if (!r) return; // 用户取消了选文件夹
-            const names = r.parts.map((p) => p.name).join("、");
+            const names = r.parts.map((p) => p.name).join(t("app.common.list_sep"));
             const notes: string[] = [];
-            if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
-            if (r.skipped > 0) notes.push(`${r.skipped} 张不在原位，没进包`);
-            if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
-            toast(`已导出 ${r.files} 张 → ${names}`, notes.length > 0, notes.join(" · ") || undefined);
+            if (r.parts.length > 1) notes.push(t("app.toast.zip_parts", { count: r.parts.length }));
+            if (r.skipped > 0) notes.push(t("app.toast.zip_skipped", { count: r.skipped }));
+            if (r.oversized > 0) notes.push(t("app.toast.zip_oversized", { count: r.oversized }));
+            toast(
+              t("app.toast.zip_exported", { count: r.files, names }),
+              notes.length > 0,
+              notes.join(" · ") || undefined
+            );
           } catch (e) {
             toast(String(e), true);
           }
@@ -3848,15 +4112,239 @@ export default function App() {
       },
       {
         id: "recycle",
-        label: "打开系统回收站",
+        label: t("app.cmd.recycle"),
         icon: "trash",
-        keywords: "回收站 recycle 删除",
+        keywords: t("app.cmd.kw_recycle"),
         run: () => void source.openRecycle().catch((e) => toast(String(e), true)),
       }
     );
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dir?.id, selected?.id, selectedIds, items, selPaths, view, sort, kindKey, prefs.size]);
+  }, [dir?.id, selected?.id, selectedIds, items, selPaths, view, sort, kindKey, prefs.size, locale]);
+
+  /* ---- 五个「重」子组件的回调：全部经 `useEvent` 固定引用 ----
+     这五个（Tree / TagDock / CollDock / SnapshotDock / TopBar）都挂了 `memo`，
+     而 `memo` 的浅对比只看引用。这些回调里有一半依赖当前筛选 / 选中 / 列表 ——
+     写成内联箭头 = 每次渲染都是新函数 = memo 直接失效；写成 `useCallback` 就得逐条
+     列依赖，**漏一项不会报错**，只会让处理器永远拿着旧闭包（点了没反应 / 用上一批数据）。
+     `useEvent` 两头都占：引用不变，调用时才读最新实现（见 `lib/useEvent.ts`）。
+     所以下面都写成组件级常量，JSX 里只传名字，不再出现 `onXxx={() => …}`。 */
+  const pickDir = useEvent((n: DirNode) => {
+    /* 点目录 = 切换视图：离开标签 / 分组 / 快照，否则两个筛选叠在一起会莫名其妙 0 结果 */
+    setDir(n);
+    setTagFilter(null);
+    setCollFilter(null);
+    /* 0.2.2 补：**快照也要清**。之前只清了标签与分组，
+       于是「点了截图表这一段没反应、列表还是空的」——快照筛选还挂着。 */
+    setSnapFilter(null);
+    setPage("assets");
+  });
+
+  const dropToDir = useEvent((n: DirNode) => {
+    if (selPaths.length) void doMove(selPaths, n.path);
+  });
+
+  const gotoTrash = useEvent(() => {
+    setSelectedIds(new Set());
+    setPage("trash");
+  });
+
+  const gotoAbout = useEvent(() => {
+    setSelectedIds(new Set());
+    setPage("about");
+  });
+
+  const openShortcuts = useEvent(() => setShortcutsOpen(true));
+
+  /* `onOpenLibrary` 仍是普通 async 函数（要读一串 state 才决定开哪个库），
+     直接传会让 Tree 的 memo 每次渲染都判"props 变了"。包一层即可。 */
+  const openLibraryStable = useEvent(onOpenLibrary);
+
+  const snapPick = useEvent((row: SnapshotRow) => {
+    /* 单击 = 和点分组一样：只看这一批（再点一次取消）。
+       打开灵感板挪到双击 —— 单击就跳走太容易误触（owner 2026-11-18）。 */
+    const on = snapFilter === row.id;
+    setSnapFilter(on ? null : row.id);
+    if (!on) {
+      setDir(null);
+      setTagFilter(null);
+      setCollFilter(null);
+      setPage("assets");
+    }
+  });
+
+  const snapStartCreate = useEvent(() => {
+    if (!snapCreating) setSnapCreating(true);
+  });
+  const snapCreate = useEvent((name: string) => void createSnapshotInline(name));
+  const snapCancelCreate = useEvent(() => setSnapCreating(false));
+  const snapRename = useEvent((id: number, name: string) => void renameSnapshotInline(id, name));
+  const snapCancelRename = useEvent(() => setSnapRenaming(null));
+  const snapImport = useEvent(() => void importSnapshot());
+
+  const collPick = useEvent((id: number | null) => {
+    /* 点分组 = 在当前库里看这一撮素材；再点一次取消（0.4.24）。
+       以前这里 `setDir(null)` 把当前库一起清掉 —— 画面立刻变成"所有库"，
+       看着就像"点一下分组，文件库被切走了"（owner 2026-11-21 报的）。
+       只有「当前库内 0 条」时 `loadPage` 才放宽到全部库并给一句提示。 */
+    setCollFilter(id);
+    if (id !== null) {
+      setTagFilter(null);
+      setColorFilter(null);
+      setRatingFilter(null);
+    }
+  });
+  const collCreate = useEvent((name: string) => void createCollInline(name));
+  const collRename = useEvent((id: number, name: string) => {
+    setCollRenameId(null);
+    void renameCollInline(id, name);
+  });
+
+  const tagPick = useEvent((t: string | null) => {
+    /* 点标签 = **在当前库里**看这个标签；再点一次取消（0.4.24）。
+       以前清目录 → 结果跨全库，侧栏还停在原库，看着像库被切走。 */
+    setTagFilter(t);
+    if (t) {
+      setCollFilter(null);
+    }
+  });
+  const tagEditTag = useEvent((name: string) => openTagEdit("tag", name));
+  const tagEditGroup = useEvent((name: string) => openTagEdit("group", name));
+  const tagNewGroup = useEvent((name: string) => void createGroup(name));
+  const tagNewTag = useEvent((name: string) => void createTag(name));
+  const openTagMenu = useEvent((tag: string, x: number, y: number) =>
+    openTagEdit("tag", tag, x, y)
+  );
+  const tagGroupMenu = useEvent((name: string, x: number, y: number) =>
+    openTagEdit("group", name, x, y)
+  );
+
+  const pickColor = useEvent((c: string | null) => {
+    setColorFilter(c);
+    if (c) {
+      setTagFilter(null);
+      setCollFilter(null);
+    }
+  });
+  const pickTagTop = useEvent((n: string | null) => {
+    setTagFilter(n);
+    /* 颜色和标签都作用于同一批素材：选标签就把颜色放开，
+       否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表 */
+    if (n) {
+      setColorFilter(null);
+      setRatingFilter(null);
+      setCollFilter(null);
+      /* 0.4.24：目录**保留**，和侧栏点标签同一个语义（当前库 AND 标签）。 */
+      setPage("assets");
+    }
+  });
+  const pickDirTop = useEvent((n: DirNode | null) => {
+    setDir(n);
+    setTagFilter(null);
+    setCollFilter(null);
+    setPage("assets");
+  });
+  const pickRating = useEvent((n: number | null) => {
+    setRatingFilter(n);
+    if (n !== null) {
+      setColorFilter(null);
+      setTagFilter(null);
+      setCollFilter(null);
+    }
+  });
+
+  /* 三块侧栏面板是**作为 ReactNode 传进 Tree 的**：不包 `useMemo` 的话，
+     每次渲染都是新元素，Tree 的 memo 一样会被击穿（props 里那个 slot 引用变了）。 */
+  const snapshotDockNode = useMemo(
+    () => (
+      <SnapshotDock
+        items={snaps}
+        creating={snapCreating}
+        renamingId={snapRenaming?.id ?? null}
+        activeId={snapFilter}
+        onOpen={openSnapshot}
+        onPick={snapPick}
+        onMenu={snapshotMenu}
+        onStartCreate={snapStartCreate}
+        onCreate={snapCreate}
+        onCancelCreate={snapCancelCreate}
+        onRename={snapRename}
+        onCancelRename={snapCancelRename}
+        onImport={snapImport}
+      />
+    ),
+    [
+      snaps,
+      snapCreating,
+      snapRenaming,
+      snapFilter,
+      openSnapshot,
+      snapPick,
+      snapshotMenu,
+      snapStartCreate,
+      snapCreate,
+      snapCancelCreate,
+      snapRename,
+      snapCancelRename,
+      snapImport,
+    ]
+  );
+
+  const collDockNode = useMemo(
+    () => (
+      <CollDock
+        items={colls}
+        activeId={collFilter}
+        onPick={collPick}
+        renameId={collRenameId}
+        onCreate={collCreate}
+        onRename={collRename}
+        onMenu={collMenu}
+        /* 只有**分组自己的**右键菜单才保持展开。以前是 `!!ctx`，
+           右键素材/空白也会把分组面板顶开（owner 报的 bug）。 */
+        hold={ctx?.source === "coll"}
+        half={false}
+      />
+    ),
+    [colls, collFilter, collPick, collRenameId, collCreate, collRename, collMenu, ctx?.source]
+  );
+
+  const tagDockNode = useMemo(
+    () => (
+      <TagDock
+        tags={tags}
+        groups={tagGroups}
+        autoTags={autoTagCounts}
+        activeTag={tagFilter}
+        onPickTag={tagPick}
+        onEditTag={tagEditTag}
+        onEditGroup={tagEditGroup}
+        onNewGroup={tagNewGroup}
+        onNewTag={tagNewTag}
+        onTagMenu={openTagMenu}
+        onGroupMenu={tagGroupMenu}
+        /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了。
+           快照的新建/改名**不能**算进来 —— 就地输入行在侧栏上半部分，
+           把它算进来会让"点新建快照 → 下面的标签面板自己弹开"（owner 2026-11-17 报的 bug）。 */
+        hold={!!tagEdit || !!tagPrompt}
+      />
+    ),
+    [
+      tags,
+      tagGroups,
+      autoTagCounts,
+      tagFilter,
+      tagPick,
+      tagEditTag,
+      tagEditGroup,
+      tagNewGroup,
+      tagNewTag,
+      openTagMenu,
+      tagGroupMenu,
+      tagEdit,
+      tagPrompt,
+    ]
+  );
 
   const current = lightbox !== null ? items[lightbox] ?? null : null;
 
@@ -3878,124 +4366,23 @@ export default function App() {
         <Tree
           source={source}
           selected={dir?.id ?? null}
-          onSelect={(n) => {
-            // 点目录 = 切换视图：离开标签 / 分组 / 快照，否则两个筛选叠在一起会莫名其妙 0 结果
-            setDir(n);
-            setTagFilter(null);
-            setCollFilter(null);
-            /* 0.2.2 补：**快照也要清**。之前只清了标签与分组，
-               于是「点了截图表这一段没反应、列表还是空的」——快照筛选还挂着。 */
-            setSnapFilter(null);
-            setPage("assets");
-          }}
-          onDropTo={(n) => {
-            if (selPaths.length) void doMove(selPaths, n.path);
-          }}
+          onSelect={pickDir}
+          onDropTo={dropToDir}
           onDragDir={onDragDir}
           onToast={toast}
-          onOpenLibrary={onOpenLibrary}
-          onTrash={() => {
-            setSelectedIds(new Set());
-            setPage("trash");
-          }}
-          onAbout={() => {
-            setSelectedIds(new Set());
-            setPage("about");
-          }}
-          onShortcuts={() => setShortcutsOpen(true)}
+          onOpenLibrary={openLibraryStable}
+          onTrash={gotoTrash}
+          onAbout={gotoAbout}
+          onShortcuts={openShortcuts}
           refreshKey={refreshKey}
           /* 侧栏里弹出的东西都 portal 到 body：指针一进菜单就不在 `.tree` 里，
              抽屉会在 240ms 后自动收起，菜单还悬着 —— 必须在这段时间里按住不放。
              `ctx` 涵盖分组 / 目录 / 素材等右键菜单，`tagEdit` 是标签编辑卡。 */
           holdOpen={!!ctx || !!tagEdit || !!tagPrompt}
-          snapshotDock={
-            <SnapshotDock
-              items={snaps}
-              creating={snapCreating}
-              renamingId={snapRenaming?.id ?? null}
-              activeId={snapFilter}
-              onOpen={openSnapshot}
-              onPick={(row) => {
-                /* 单击 = 和点分组一样：只看这一批（再点一次取消）。
-                   打开灵感板挪到双击 —— 单击就跳走太容易误触（owner 2026-11-18）。 */
-                const on = snapFilter === row.id;
-                setSnapFilter(on ? null : row.id);
-                if (!on) {
-                  setDir(null);
-                  setTagFilter(null);
-                  setCollFilter(null);
-                  setPage("assets");
-                }
-              }}
-              onMenu={snapshotMenu}
-              onStartCreate={() => {
-                if (!snapCreating) setSnapCreating(true);
-              }}
-              onCreate={(name) => void createSnapshotInline(name)}
-              onCancelCreate={() => setSnapCreating(false)}
-              onRename={(id, name) => void renameSnapshotInline(id, name)}
-              onCancelRename={() => setSnapRenaming(null)}
-              onImport={() => void importSnapshot()}
-            />
-          }
+          snapshotDock={snapshotDockNode}
           /* 分组面板：位置照 FontManager —— 底栏上方、**标签面板之上** */
-          collDock={
-            <CollDock
-              items={colls}
-              activeId={collFilter}
-              onPick={(id) => {
-                /* 点分组 = 在当前库里看这一撮素材；再点一次取消（0.4.24）。
-                   以前这里 `setDir(null)` 把当前库一起清掉 —— 画面立刻变成"所有库"，
-                   看着就像"点一下分组，文件库被切走了"（owner 2026-11-21 报的）。
-                   只有「当前库内 0 条」时 `loadPage` 才放宽到全部库并给一句提示。 */
-                setCollFilter(id);
-                if (id !== null) {
-                  setTagFilter(null);
-                  setColorFilter(null);
-                  setRatingFilter(null);
-                }
-              }}
-              renameId={collRenameId}
-              onCreate={(name) => void createCollInline(name)}
-              onRename={(id, name) => {
-                setCollRenameId(null);
-                void renameCollInline(id, name);
-              }}
-              onMenu={(row, x, y) => collMenu(row, x, y)}
-              /* 只有**分组自己的**右键菜单才保持展开。以前是 `!!ctx`，
-                 右键素材/空白也会把分组面板顶开（owner 报的 bug）。 */
-              hold={ctx?.source === "coll"}
-              half={false}
-            />
-          }
-          tagDock={
-            <TagDock
-              tags={tags}
-              groups={tagGroups}
-              autoTags={autoTagCounts}
-              activeTag={tagFilter}
-              onPickTag={(t) => {
-                /* 点标签 = **在当前库里**看这个标签；再点一次取消（0.4.24）。
-                   以前清目录 → 结果跨全库，侧栏还停在原库，看着像库被切走。 */
-                setTagFilter(t);
-                if (t) {
-                  setCollFilter(null);
-                }
-              }}
-              onEditTag={(name) => openTagEdit("tag", name)}
-              onEditGroup={(name) => openTagEdit("group", name)}
-              onNewGroup={(name) => void createGroup(name)}
-              onNewTag={(name) => void createTag(name)}
-              onTagMenu={(tag, x, y) => openTagEdit("tag", tag, x, y)}
-              onGroupMenu={(name, x, y) => openTagEdit("group", name, x, y)}
-              /* 弹层开着时不收起：右键标签弹出编辑卡的瞬间，指针已经不在面板上了 */
-              /* hold 是「标签面板保持展开」的开关（TagDock: open = pinned || hold）。
-                 快照的新建/改名**不能**算进来 —— 就地输入行在侧栏上半部分，
-                 把它算进来会让"点新建快照 → 下面的标签面板自己弹开"（owner 2026-11-17 报的 bug）。 */
-              /* 标签面板同理：编辑卡 / 打标签弹窗会用到面板里的行，其它菜单不该顶开它 */
-              hold={!!tagEdit || !!tagPrompt}
-            />
-          }
+          collDock={collDockNode}
+          tagDock={tagDockNode}
         />
 
         <div className="workspace">
@@ -4011,48 +4398,17 @@ export default function App() {
             view={view}
             onView={setView}
             color={colorFilter}
-            onColor={(c) => {
-              setColorFilter(c);
-              if (c) {
-                setTagFilter(null);
-                setCollFilter(null);
-              }
-            }}
+            onColor={pickColor}
             colorCounts={colorCounts}
             tags={tags}
             activeTag={tagFilter}
-            onTag={(n) => {
-              setTagFilter(n);
-              /* 颜色和标签都作用于同一批素材：选标签就把颜色放开，
-                 否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表 */
-              if (n) {
-                setColorFilter(null);
-                setRatingFilter(null);
-                setCollFilter(null);
-                /* 0.4.24：目录**保留**，和侧栏点标签同一个语义（当前库 AND 标签）。
-                   以前这里清目录、侧栏也清目录，两处都把"库"一起丢了；
-                   当前库内确实没有时才由 `loadPage` 放宽到全部库并提示。 */
-                setPage("assets");
-              }
-            }}
+            onTag={pickTagTop}
             source={source}
             dirNode={dir}
-            onDir={(n) => {
-              setDir(n);
-              setTagFilter(null);
-              setCollFilter(null);
-              setPage("assets");
-            }}
+            onDir={pickDirTop}
             autoTags={autoTagCounts}
             rating={ratingFilter}
-            onRating={(n) => {
-              setRatingFilter(n);
-              if (n !== null) {
-                setColorFilter(null);
-                setTagFilter(null);
-                setCollFilter(null);
-              }
-            }}
+            onRating={pickRating}
             trashMode={page === "trash"}
             trashFormats={trashFormats}
             trashFormat={trashFormat}
@@ -4062,9 +4418,13 @@ export default function App() {
           {colorFilter && (
             <div className="filter-strip">
               <span className="ctl-color-dot" style={{ background: `var(--c-${colorFilter}, #8b8b86)` }} />
-              <span className="filter-strip-label">主色：{COLOR_LABEL[colorFilter] ?? colorFilter}</span>
+              <span className="filter-strip-label">
+                {t("app.filter.dominant_color", {
+                  color: COLOR_LABEL[colorFilter] ?? colorFilter,
+                })}
+              </span>
               <button className="btn btn-tiny" onClick={() => setColorFilter(null)}>
-                清除筛选
+                {t("app.filter.clear")}
               </button>
             </div>
           )}
@@ -4077,9 +4437,11 @@ export default function App() {
           {ratingFilter !== null && (
             <div className="filter-strip">
               <Icon name="star" size={12} stroke={1.5} />
-              <span className="filter-strip-label">评分：{ratingFilter} 星及以上</span>
+              <span className="filter-strip-label">
+                {t("app.filter.rating", { n: ratingFilter })}
+              </span>
               <button className="btn btn-tiny" onClick={() => setRatingFilter(null)}>
-                清除筛选
+                {t("app.filter.clear")}
               </button>
             </div>
           )}
@@ -4130,15 +4492,17 @@ export default function App() {
 
             {/* 批量操作条（T11）：只在多选时出现，压在内容区底部中间 */}
             {selectedIds.size > 1 && (
-              <div className="batch-bar" role="toolbar" aria-label="批量操作">
-                <span className="batch-count mono">已选 {selectedIds.size} 项</span>
+              <div className="batch-bar" role="toolbar" aria-label={t("app.batch.title")}>
+                <span className="batch-count mono">
+                  {t("app.batch.selected", { count: selectedIds.size })}
+                </span>
                 <button
                   className="btn btn-tiny"
                   disabled={busy}
                   onClick={() => setTagPrompt({ ids: [...selectedIds] })}
-                  title="给选中的素材打标签（T）"
+                  title={t("app.batch.tag_tip")}
                 >
-                  打标签
+                  {t("app.batch.tag")}
                 </button>
                 <button
                   className="btn btn-tiny"
@@ -4147,17 +4511,17 @@ export default function App() {
                     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     collPickMenu([...selectedIds], r.left, r.bottom + 6);
                   }}
-                  title="把选中的素材加进某个分组（不搬文件）"
+                  title={t("app.batch.coll_tip")}
                 >
-                  加入分组
+                  {t("app.batch.coll")}
                 </button>
                 <button
                   className="btn btn-tiny"
                   disabled={busy}
                   onClick={() => setSnapPrompt({ mode: "ids", ids: [...selectedIds] })}
-                  title="把选中的素材记进某份快照（不搬文件）"
+                  title={t("app.batch.snap_tip")}
                 >
-                  加入快照
+                  {t("app.batch.snap")}
                 </button>
                 {/* 批量重命名（0.3.30）：只开**工具面板的 rename 页**并把当前选中带过去 ——
                     重命名规则（前缀/序号/查找替换/大小写）和预览确认都在那边，
@@ -4166,34 +4530,36 @@ export default function App() {
                   className="btn btn-tiny"
                   disabled={busy}
                   onClick={() => setTools({ tab: "rename" })}
-                  title="按规则批量重命名选中的素材（先预览，确认后才动磁盘）"
+                  title={t("app.batch.rename_tip")}
                 >
-                  批量重命名
+                  {t("app.menu.batch_rename")}
                 </button>
                 <button
                   className="btn btn-tiny"
                   disabled={busy || !dir}
                   onClick={() => dir && void doMove(selPaths, dir.path)}
-                  title="移动到当前浏览的文件夹"
+                  title={t("app.batch.move_tip")}
                 >
-                  移到当前目录
+                  {t("app.batch.move")}
                 </button>
                 <button
                   className="btn btn-tiny"
                   disabled={busy}
                   onClick={() => void onCopyFile(selPaths)}
                 >
-                  复制原文件
+                  {t("app.menu.copy_file")}
                 </button>
                 <button
                   className="btn btn-tiny btn-danger"
                   disabled={busy}
-                  onClick={() => void doDelete(selPaths, `这 ${selectedIds.size} 项`)}
+                  onClick={() =>
+                    void doDelete(selPaths, t("app.common.this_n_items", { count: selectedIds.size }))
+                  }
                 >
-                  删除
+                  {t("app.common.delete")}
                 </button>
-                <button className="btn btn-tiny" onClick={clearSel} title="取消多选（Esc）">
-                  取消选择
+                <button className="btn btn-tiny" onClick={clearSel} title={t("app.batch.clear_tip")}>
+                  {t("app.batch.clear")}
                 </button>
               </div>
             )}
@@ -4239,7 +4605,7 @@ export default function App() {
           onCancelRename={() => setRenameId(null)}
           onOpenDefault={onOpenDefault}
           onCopyFile={(a) => void onCopyFile([a.path])}
-          onDelete={(a) => void doDelete([a.path], `「${a.name}」`)}
+          onDelete={(a) => void doDelete([a.path], t("app.common.quoted_name", { name: a.name }))}
           onBeginDrag={onBeginDrag}
           onToast={(m, e) => toast(m, e)}
           tags={selected ? tagMap.get(selected.id) ?? [] : []}
@@ -4297,7 +4663,7 @@ export default function App() {
                     setTagEdit(null);
                   }}
                 >
-                  只看这个标签
+                  {t("app.tag_edit.only_this_tag")}
                 </button>
                 <button
                   onClick={() => {
@@ -4306,7 +4672,7 @@ export default function App() {
                     void source.boardOpen(n).catch((e) => toast(String(e)));
                   }}
                 >
-                  灵感板
+                  {t("app.tag_edit.board")}
                 </button>
                 <button
                   onClick={() => {
@@ -4319,7 +4685,7 @@ export default function App() {
                     });
                   }}
                 >
-                  加入快照…
+                  {t("app.menu.add_to_snap")}
                 </button>
                 <button
                   className="danger"
@@ -4329,7 +4695,7 @@ export default function App() {
                     void deleteTagEverywhere(n);
                   }}
                 >
-                  从素材上移除
+                  {t("app.tag_edit.remove_from_assets")}
                 </button>
               </div>
             ) : null
@@ -4342,7 +4708,7 @@ export default function App() {
               .then(async () => {
                 setTagRuleState(r);
                 setRefreshKey((k) => k + 1);
-                toast(r ? "规则已保存（计数即时生效）" : "规则已清除");
+                toast(r ? t("app.toast.rule_saved") : t("app.toast.rule_cleared"));
               })
               .catch((e) => toast(String(e), true));
           }}
@@ -4421,7 +4787,7 @@ export default function App() {
         onResetDenied={() => {
           setDenied(new Set());
           saveDenied(new Set());
-          toast("已恢复全部自动标签建议");
+          toast(t("app.toast.auto_tags_restored"));
         }}
         onAddFolder={onAddFolder}
         onAddPath={(p) => onAddPath(p)}
@@ -4457,6 +4823,7 @@ function ProgressStrip({
   onCancelScan: () => void;
 }) {
   const { scan, batch } = useProgress();
+  const t = useT();
   return batch ? (
     <div className="progress-bar" role="status" aria-live="polite">
       <div className="progress-track">
@@ -4466,7 +4833,7 @@ function ProgressStrip({
         />
       </div>
       <span className="progress-text">
-        {batch.label ?? "批量处理"} · {fmtNum(batch.done)} / {fmtNum(batch.total)}
+        {batch.label ?? t("app.progress.batch")} · {fmtNum(batch.done)} / {fmtNum(batch.total)}
       </span>
     </div>
   ) : scan.active ? (
@@ -4475,10 +4842,13 @@ function ProgressStrip({
         <div className="progress-fill indet" />
       </div>
       <span className="progress-text">
-        正在扫描 · {fmtNum(scan.dirs)} 目录 / {fmtNum(scan.files)} 文件
+        {t("app.progress.scanning", {
+          dirs: fmtNum(scan.dirs),
+          files: fmtNum(scan.files),
+        })}
       </span>
       <button className="btn btn-tiny" onClick={() => void onCancelScan()}>
-        取消
+        {t("app.common.cancel")}
       </button>
     </div>
   ) : (
@@ -4487,7 +4857,9 @@ function ProgressStrip({
         <div className="progress-track">
           <div className="progress-fill indet" />
         </div>
-        <span className="progress-text">载入中 · 已取 {loadedCount} 项</span>
+        <span className="progress-text">
+          {t("app.progress.loading", { count: loadedCount })}
+        </span>
       </div>
     )
   );
@@ -4528,6 +4900,7 @@ function Lightbox({
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const t = useT();
 
   /* 超长图（长截图 / 详情页）：contain 缩完只剩一条几十像素宽的细线，等于看不见。
      这类图改「宽度锁成舞台宽 + 纵向滚动」——看清内容比一屏装下更重要（owner 2026-11-19）。
@@ -4741,18 +5114,23 @@ function Lightbox({
             {" · "}
             {index + 1}/{total}
           </span>
-          <button className="tb-action" onClick={onPrev} title="上一张（←）" disabled={index <= 0}>
+          <button
+            className="tb-action"
+            onClick={onPrev}
+            title={t("app.lightbox.prev")}
+            disabled={index <= 0}
+          >
             <Icon name="chevron" size={13} className="rot180" />
           </button>
           <button
             className="tb-action"
             onClick={onNext}
-            title="下一张（→）"
+            title={t("app.lightbox.next")}
             disabled={index >= total - 1}
           >
             <Icon name="chevron" size={13} />
           </button>
-          <button className="tb-action" onClick={onClose} title="关闭（Esc）">
+          <button className="tb-action" onClick={onClose} title={t("app.lightbox.close")}>
             <Icon name="close" size={13} />
           </button>
         </div>
@@ -4766,10 +5144,10 @@ function Lightbox({
           onDoubleClick={reset}
           title={
             tall
-              ? "长图：宽度铺满，上下滚动看全"
+              ? t("app.lightbox.tall_hint")
               : zoom > 1
-                ? "拖动平移 · 双击复位 · 右侧鸟瞰图可拖动定位"
-                : "滚轮放大 · 双击复位"
+                ? t("app.lightbox.zoom_hint")
+                : t("app.lightbox.zoom_hint_plain")
           }
         >
           {!tall && loaded !== hi && (
@@ -4814,7 +5192,7 @@ function Lightbox({
               miniDrag.current = false;
               (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
             }}
-            title="拖动定位"
+            title={t("app.lightbox.mini_hint")}
           >
             <img className="lb-mini-img" src={lo} alt="" draggable={false} />
             <div

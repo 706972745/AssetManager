@@ -732,37 +732,9 @@ impl App {
         let mut stats = model::ScanStats::default();
         // 每个库分一份配额：3 个库各 4000 目录，不要出现"A 库把预算吃光、B 库永远不检查"
         let per = (limit / self.libs.len().max(1) as i64).max(200);
-        for l in self.libs.iter_mut() {
-            let list = db::dirs_to_check(&l.conn, per)?;
-            for (id, path, old_mtime) in list {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                let p = Path::new(&path);
-                if !p.is_dir() {
-                    if db::remove_dir_if_leaf(&l.conn, id).unwrap_or(false) {
-                        stats.removed_dirs += 1;
-                    }
-                    continue;
-                }
-                let now = watch::dir_mtime(p);
-                if now == old_mtime && old_mtime != 0 {
-                    continue;
-                }
-                match scan::scan_one_dir(&mut l.conn, &path) {
-                    Ok(st) => {
-                        stats.dirs += 1;
-                        stats.files += st.files;
-                        cb(&model::ScanProgress {
-                            dirs: stats.dirs,
-                            files: stats.files,
-                            current: path.clone(),
-                            done: false,
-                        });
-                    }
-                    Err(_) => stats.errors += 1,
-                }
-            }
+        let ids: Vec<i64> = self.libs.iter().map(|l| l.id).collect();
+        for id in ids {
+            self.incremental_one_lib(id, cancel, per, &mut stats, false, &mut |_, _, p| cb(p))?;
         }
         stats.elapsed_ms = t0.elapsed().as_millis();
         cb(&model::ScanProgress {
@@ -772,6 +744,145 @@ impl App {
             done: true,
         });
         Ok(stats)
+    }
+
+    /// 单库增量扫描（启动编排用）：与 `incremental` 同一套逻辑，只扫指定的库。
+    ///
+    /// 与 `incremental` 的唯一区别是**回调带分母**：`cb(已检查目录数, 本轮待检查目录数, 进度)`。
+    /// 启动页要拿这个分母画确定进度条（`incremental` 的对外回调节奏保持原样：
+    /// 只在真的重扫了目录时回调，避免改变既有调用方的行为）。
+    pub fn incremental_one<F>(
+        &mut self,
+        lib_id: i64,
+        cancel: &AtomicBool,
+        limit: i64,
+        mut cb: F,
+    ) -> Result<model::ScanStats, String>
+    where
+        F: FnMut(i64, i64, &model::ScanProgress),
+    {
+        let t0 = std::time::Instant::now();
+        let mut stats = model::ScanStats::default();
+        let (checked, planned) = self.incremental_one_lib(
+            lib_id,
+            cancel,
+            limit.max(1),
+            &mut stats,
+            true,
+            &mut cb,
+        )?;
+        stats.elapsed_ms = t0.elapsed().as_millis();
+        cb(
+            checked,
+            planned,
+            &model::ScanProgress {
+                dirs: stats.dirs,
+                files: stats.files,
+                current: String::new(),
+                done: true,
+            },
+        );
+        Ok(stats)
+    }
+
+    /// `incremental` / `incremental_one` 共用的单库循环：按 lib_id 找库、`dirs_to_check`
+    /// 拿候选目录、mtime 比对、只重扫变了的。返回 `(已检查目录数, 本轮候选目录数)`。
+    ///
+    /// `report_all = false` 时只在 `scan_one_dir` 成功后回调（旧 `incremental` 的节奏）；
+    /// `true` 时每检查一个目录都回调一次（启动页的进度条需要连续分母）。
+    fn incremental_one_lib<F>(
+        &mut self,
+        lib_id: i64,
+        cancel: &AtomicBool,
+        quota: i64,
+        stats: &mut model::ScanStats,
+        report_all: bool,
+        cb: &mut F,
+    ) -> Result<(i64, i64), String>
+    where
+        F: FnMut(i64, i64, &model::ScanProgress),
+    {
+        let lib = self
+            .libs
+            .iter_mut()
+            .find(|l| l.id == lib_id)
+            .ok_or_else(|| format!("库 {lib_id} 不在已打开的列表里"))?;
+        let list = db::dirs_to_check(&lib.conn, quota)?;
+        let planned = list.len() as i64;
+        let mut checked = 0i64;
+        for (id, path, old_mtime) in list {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            checked += 1;
+            let p = Path::new(&path);
+            if !p.is_dir() {
+                if db::remove_dir_if_leaf(&lib.conn, id).unwrap_or(false) {
+                    stats.removed_dirs += 1;
+                }
+                if report_all {
+                    cb(
+                        checked,
+                        planned,
+                        &model::ScanProgress {
+                            dirs: stats.dirs,
+                            files: stats.files,
+                            current: path.clone(),
+                            done: false,
+                        },
+                    );
+                }
+                continue;
+            }
+            let now = watch::dir_mtime(p);
+            if now == old_mtime && old_mtime != 0 {
+                if report_all {
+                    cb(
+                        checked,
+                        planned,
+                        &model::ScanProgress {
+                            dirs: stats.dirs,
+                            files: stats.files,
+                            current: path.clone(),
+                            done: false,
+                        },
+                    );
+                }
+                continue;
+            }
+            match scan::scan_one_dir(&mut lib.conn, &path) {
+                Ok(st) => {
+                    stats.dirs += 1;
+                    stats.files += st.files;
+                    cb(
+                        checked,
+                        planned,
+                        &model::ScanProgress {
+                            dirs: stats.dirs,
+                            files: stats.files,
+                            current: path.clone(),
+                            done: false,
+                        },
+                    );
+                }
+                Err(_) => {
+                    stats.errors += 1;
+                    if report_all {
+                        cb(
+                            checked,
+                            planned,
+                            &model::ScanProgress {
+                                dirs: stats.dirs,
+                                files: stats.files,
+                                current: path.clone(),
+                                done: false,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Ok((checked, planned))
     }
 
     /// 重建索引（T13）：清掉 assets/dirs（**库根保留**），再把每个库根全量重扫一遍。
@@ -2881,7 +2992,7 @@ impl App {
         reg::board_notes(&self.reg, board)
     }
 
-    /// 便签的新建/更新。`look` 传 `None` = 只挪位置，保留库里原有外观。
+    /// 便签的新建/更新。`look` 传 `None` = 只挪位置，保留库里原有外观（含竖排标记）。
     #[allow(clippy::too_many_arguments)]
     pub fn board_note_put(
         &self,
@@ -2892,7 +3003,7 @@ impl App {
         w: f64,
         h: f64,
         text: &str,
-        look: Option<(&str, f64, &str, bool)>,
+        look: Option<(&str, f64, &str, bool, bool)>,
     ) -> Result<i64, String> {
         reg::board_note_put(&self.reg, board, nid, x, y, w, h, text, look)
     }

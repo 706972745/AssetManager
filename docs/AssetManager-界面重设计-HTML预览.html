@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AssetManager · 界面重设计预览</title>
+<style>
+/* ============================================================
+   设计令牌 —— 与 tokens.css 同源，采用方案修正后的值
+   ============================================================ */
+:root{
+  /* 深色：与 FontManager 运行时令牌逐值一致 */
+  --canvas:#111110; --panel:#171715; --menu:#1c1c1a;
+  --t1:#f2f2ef; --t2:#9a9a94; --t3:#666660;
+  --hair:#2a2a27; --line:#2a2a27;
+  --e1:#1a1a18; --e2:#1f1f1d; --e3:#242422; --e4:#2a2a28;
+  --accent:#5b8cff; --accent-b:#2f6bff; --accent-soft:rgba(91,140,255,.14);
+  --accent-glow:rgba(91,140,255,.42); --accent-glow-soft:rgba(91,140,255,.2);
+  --danger:#d4d4d8; --danger-soft:rgba(212,212,216,.07);
+  --scrim:rgba(0,0,0,.46);
+  --shadow:0 12px 32px rgba(0,0,0,.34);
+  --win-radius:8px;
+  /* 动效令牌：100/180/260/400/600 + 三条缓动，原样搬自 FontManager */
+  --t-micro:100ms; --t-quick:180ms; --t-state:260ms; --t-layout:400ms; --t-scene:600ms;
+  --ease-out:cubic-bezier(.16,1,.3,1); --ease-in:cubic-bezier(.4,0,1,1); --ease-std:cubic-bezier(.4,0,.2,1);
+  --focus-w:2px; --focus-offset:2px;
+}
+body[data-theme="light"]{
+  --canvas:#fafaf8; --panel:#ffffff; --menu:#ffffff;
+  --t1:#141412; --t2:#6b6b66; --t3:#9b9b95;
+  --hair:#e2e2dd; --line:#e2e2dd;
+  --e1:#f2f2ee; --e2:#eaeae5; --e3:#ffffff; --e4:#f7f7f3;
+  --accent:#1b4fe0; --accent-b:#1a42b8; --accent-soft:rgba(27,79,224,.12);
+  --accent-glow:rgba(27,79,224,.3); --accent-glow-soft:rgba(27,79,224,.14);
+  --danger:#3f3f46; --danger-soft:rgba(63,63,70,.07);
+  --scrim:rgba(20,20,18,.24);
+  --shadow:0 12px 32px rgba(20,20,18,.1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:"Inter",system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  font-size:13px;line-height:1.55;color:var(--t1);background:var(--canvas);
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+.mono{font-family:ui-monospace,"JetBrains Mono",SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+/* ============================================================
+   Showcase 外壳
+   ============================================================ */
+.shell{display:grid;grid-template-columns:250px 1fr;height:100vh;overflow:hidden}
+.rail{
+  border-right:1px solid var(--hair);background:var(--panel);
+  display:flex;flex-direction:column;padding:22px 0 14px;overflow-y:auto;
+}
+.rail-brand{padding:0 20px 18px;border-bottom:1px solid var(--hair);margin-bottom:12px}
+.rail-brand h1{font-family:Georgia,"Songti SC",serif;font-size:20px;font-weight:400;letter-spacing:-.01em}
+.rail-brand .sub{font-size:11px;color:var(--t3);margin-top:5px;letter-spacing:.02em}
+.rail-label{font-size:10px;color:var(--t3);letter-spacing:.1em;text-transform:uppercase;padding:8px 20px;margin-top:6px}
+.nav-item{
+  display:flex;align-items:center;gap:11px;width:100%;text-align:left;
+  padding:9px 20px;color:var(--t2);font-size:13px;transition:background .15s,color .15s;
+}
+.nav-item .num{font-family:ui-monospace,monospace;font-size:10px;color:var(--t3);width:16px;flex:none}
+.nav-item:hover{background:var(--e1);color:var(--t1)}
+.nav-item.on{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.nav-item.on .num{color:var(--accent)}
+.rail-foot{margin-top:auto;padding:16px 20px 0;border-top:1px solid var(--hair);font-size:11px;color:var(--t3)}
+.rail-foot b{color:var(--t2);font-weight:500}
+
+.stage{display:flex;flex-direction:column;overflow:hidden;background:var(--canvas)}
+.stage-head{
+  flex:none;padding:20px 34px 17px;border-bottom:1px solid var(--hair);
+  display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
+}
+.stage-head h2{font-family:Georgia,"Songti SC",serif;font-size:24px;font-weight:400;letter-spacing:-.01em}
+.stage-head .desc{font-size:12px;color:var(--t2);margin-top:5px;max-width:640px}
+.theme-switch{display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px;flex:none;background:var(--panel)}
+.theme-switch button{font-size:12px;padding:6px 13px;border-radius:5px;color:var(--t3)}
+.theme-switch button.on{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.stage-body{flex:1;overflow:auto;padding:34px;display:flex;justify-content:center}
+.screen{display:none;width:100%;max-width:1180px;animation:rise .35s cubic-bezier(.16,1,.3,1)}
+.screen.on{display:block}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.screen-cap{
+  display:flex;align-items:baseline;gap:12px;margin:0 2px 16px;font-size:12px;color:var(--t3)
+}
+.screen-cap .tag{font-family:ui-monospace,monospace;font-size:10px;color:var(--accent);border:1px solid var(--accent-soft);border-radius:4px;padding:2px 7px}
+.screen-cap b{color:var(--t2);font-weight:500}
+
+/* ============================================================
+   通用窗口组件（模拟桌面应用）
+   ============================================================ */
+.win{
+  width:100%;min-height:560px;border:1px solid var(--hair);border-radius:var(--win-radius);
+  background:var(--canvas);overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow);
+}
+.titlebar{
+  height:40px;flex:none;display:flex;align-items:center;padding:0 6px 0 14px;gap:9px;
+  border-bottom:1px solid var(--hair);background:var(--e1)
+}
+.brand{font-size:12px;font-weight:500;color:var(--t1);display:flex;align-items:center;gap:7px;white-space:nowrap}
+.brand .mk{width:16px;height:16px;border-radius:4px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:10px}
+.vsep{width:1px;height:16px;background:var(--line);flex:none;margin:0 2px}
+.libname{font-size:12px;color:var(--t2);white-space:nowrap}
+.spacer{flex:1}
+.tb-btn{width:28px;height:28px;display:grid;place-items:center;border-radius:5px;color:var(--t3);flex:none}
+.tb-btn:hover{background:var(--e2);color:var(--t1)}
+.winctl{display:flex;gap:1px}
+.winctl .tb-btn{width:34px;height:28px}
+.winctl .close:hover{background:rgba(224,90,74,.16);color:var(--danger)}
+svg{display:block}
+
+.topbar{
+  flex:none;display:flex;align-items:center;gap:8px;padding:10px 16px;
+  border-bottom:1px solid var(--hair);background:var(--e1);min-height:58px
+}
+.searchbox{display:flex;align-items:center;gap:8px;height:34px;min-width:190px;max-width:300px;flex:1;
+  border:1px solid var(--line);border-radius:5px;background:var(--panel);padding:0 11px;color:var(--t3)}
+.searchbox input{border:0;outline:0;background:none;color:var(--t1);font-size:12px;width:100%}
+.searchbox input::placeholder{color:var(--t3)}
+.ctl{height:34px;display:inline-flex;align-items:center;gap:6px;padding:0 11px;border:1px solid var(--hair);
+  border-radius:5px;background:var(--e1);color:var(--t2);font-size:12px;white-space:nowrap;flex:none}
+.ctl:hover{background:var(--e2);color:var(--t1)}
+.ctl.on{color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-soft)}
+.ctl.icon{width:34px;padding:0;justify-content:center}
+.sizewrap{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3);flex:none}
+.sizewrap .track{width:82px;height:2px;background:var(--line);border-radius:2px;position:relative}
+.sizewrap .track::after{content:"";position:absolute;left:52%;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.dot{width:14px;height:14px;border-radius:50%;flex:none;background:conic-gradient(#e05a4a,#e3d94a,#4f9d5d,#4a7fd9,#8a5bc9,#e05a4a)}
+
+.workspace{flex:1;display:grid;grid-template-columns:1fr;min-height:0;position:relative}
+.rail-hot{position:absolute;left:0;top:0;bottom:0;width:12px;z-index:14}
+.sidebar{
+  position:absolute;left:0;top:0;bottom:0;width:200px;z-index:20;
+  border-right:1px solid var(--hair);padding:12px 0;display:flex;flex-direction:column;
+  background:var(--panel);min-width:0;box-shadow:10px 0 30px rgba(0,0,0,.22);
+  transform:translateX(-102%);transition:transform .32s cubic-bezier(.16,1,.3,1)
+}
+.win.rail-open .sidebar{transform:translateX(0)}
+.side-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 8px;font-size:11px;color:var(--t3)}
+.tree-row{display:flex;align-items:center;gap:8px;height:28px;padding:0 14px;font-size:12px;color:var(--t2);position:relative;white-space:nowrap}
+.tree-row.sel{background:var(--accent-soft);color:var(--accent)}
+.tree-row.sel::before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:2px;background:var(--accent);border-radius:1px}
+.tree-row .cnt{margin-left:auto;font-family:ui-monospace,monospace;font-size:10px;color:var(--t3)}
+.tree-row.sub{padding-left:28px}
+.tree-row .caret{color:var(--t3);font-size:9px;width:8px}
+.side-sp{flex:1}
+.side-div{height:1px;background:var(--hair);margin:8px 0}
+.side-foot{padding:0 8px;display:flex;flex-wrap:wrap;gap:2px}
+.side-foot button{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--t2);padding:6px;border-radius:5px;width:100%}
+.side-foot button:hover{background:var(--e1);color:var(--t1)}
+
+.content{position:relative;overflow:hidden;background:var(--canvas);padding:14px;min-width:0}
+.content-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:11px;color:var(--t3)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.wf{column-count:4;column-gap:10px}
+.wf .thumb{break-inside:avoid;margin-bottom:10px;width:100%}
+.thumb{
+  position:relative;border-radius:5px;overflow:hidden;background:var(--e2);
+  aspect-ratio:1/1;display:flex;align-items:flex-end;padding:7px
+}
+.thumb.tall{aspect-ratio:3/4}
+.thumb.wide{aspect-ratio:4/3}
+.thumb .badge{
+  font-family:ui-monospace,monospace;font-size:9px;letter-spacing:.02em;color:var(--t1);
+  background:rgba(14,14,14,.82);border:1px solid rgba(255,255,255,.16);
+  border-radius:999px;padding:2px 7px;margin-left:auto
+}
+body[data-theme="light"] .thumb .badge{background:rgba(255,255,255,.92);color:#141412;border-color:rgba(20,20,18,.12)}
+.thumb.sel{outline:1.5px solid var(--accent);outline-offset:-1.5px}
+.thumb .dotmark{position:absolute;top:7px;left:7px;width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.85);box-shadow:0 0 0 1px rgba(0,0,0,.2)}
+/* 模拟素材内容（色卡库） */
+.sw1{background:linear-gradient(135deg,#e8b4c8 0 30%,#b8496e 30% 55%,#f2e6d8 55% 78%,#7c2d4a 78%)}
+.sw2{background:linear-gradient(160deg,#d8cfe8 0 22%,#6b4a8c 22% 48%,#e7d9c6 48% 70%,#3f2b57 70%)}
+.sw3{background:linear-gradient(120deg,#f4c95d,#e8883a 45%,#c1442f)}
+.sw4{background:linear-gradient(200deg,#9fd3c7 0 40%,#2f7d6b 40% 70%,#e8f0ea 70%)}
+.sw5{background:#efe9df;display:flex;align-items:center;justify-content:center;gap:5px}
+.sw5 i{display:block;width:16%;height:60%;border-radius:2px}
+.sw6{background:linear-gradient(45deg,#2b2b34 0 25%,#e05a4a 25% 50%,#f0e9de 50% 75%,#5b8cff 75%)}
+.sw7{background:radial-gradient(circle at 30% 30%,#f6d365,#fda085 45%,#b85c6e)}
+.sw8{background:linear-gradient(180deg,#cfe8f5 0 35%,#5b8cff 35% 62%,#1b3a63 62%)}
+.sw9{background:#f3efe8;display:grid;place-items:center}
+.sw9 span{font-family:Georgia,serif;font-size:34px;color:#2b2b34;letter-spacing:-.04em}
+.sw10{background:linear-gradient(135deg,#3a7d6b,#8fc0a9 50%,#e7efe6)}
+.sw11{background:conic-gradient(from 45deg,#e05a4a,#e3d94a,#4f9d5d,#4a7fd9,#8a5bc9,#e05a4a)}
+.sw12{background:linear-gradient(115deg,#dfd8cc 0 50%,#8c7f6d 50%)}
+
+.batchbar{
+  position:absolute;right:14px;bottom:14px;display:flex;align-items:center;gap:10px;height:34px;
+  padding:0 6px 0 13px;border:1px solid var(--line);border-radius:17px;background:var(--panel);
+  font-size:11px;color:var(--t2);box-shadow:0 4px 14px rgba(0,0,0,.2)
+}
+.batchbar .pill{background:var(--accent);color:#fff;border-radius:12px;padding:3px 9px;font-family:ui-monospace,monospace;font-size:10px}
+.batchbar .mini{border-radius:5px;padding:5px 9px;color:var(--t2);font-size:11px}
+.batchbar .mini:hover{background:var(--e1)}
+
+.detail{
+  position:absolute;z-index:30;width:380px;max-height:calc(100% - 20px);
+  border:1px solid var(--line);border-radius:9px;background:var(--panel);
+  box-shadow:var(--shadow);padding:0;overflow:hidden;
+  opacity:0;pointer-events:none;transform:translateY(8px) scale(.985);
+  transform-origin:top left;
+  transition:opacity .18s ease,transform .28s cubic-bezier(.16,1,.3,1)
+}
+.detail.show{opacity:1;pointer-events:auto;transform:none}
+.detail-head{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--hair)}
+.detail-head .fmt{font-family:ui-monospace,monospace;font-size:9px;color:var(--t2);border:1px solid var(--line);border-radius:3px;padding:2px 5px}
+.detail-head .nm{font-size:12px;color:var(--t1);font-weight:500}
+.detail-head .star{margin-left:auto;color:var(--t3)}
+.detail-inner{padding:14px;overflow:auto;max-height:calc(100% - 45px)}
+.detail-preview{height:190px;border-radius:6px;overflow:hidden;margin-bottom:12px;border:1px solid var(--hair)}
+.detail-name{font-size:12px;color:var(--t1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.detail-meta{font-size:10px;color:var(--t3);margin-top:3px}
+.dsec{margin-top:14px}
+.dsec h4{font-size:10px;color:var(--t3);letter-spacing:.06em;margin-bottom:7px;font-weight:400}
+.kv{display:flex;justify-content:space-between;font-size:11px;color:var(--t2);padding:3px 0}
+.kv span:last-child{color:var(--t1)}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-size:10px;padding:3px 8px;border:1px solid var(--line);border-radius:999px;color:var(--t2)}
+.chip.tag{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--accent)}
+.btn-wide{width:100%;height:32px;border:1px solid var(--line);border-radius:5px;background:var(--e1);color:var(--t2);font-size:11px;margin-top:14px}
+
+/* 表格样式（保留；列表视图已改为回收站） */
+.table{width:100%;border-collapse:collapse;font-size:11px}
+.table th{text-align:left;font-weight:400;color:var(--t3);padding:8px 10px;border-bottom:1px solid var(--hair)}
+.table td{padding:9px 10px;border-bottom:1px solid var(--hair);color:var(--t2);white-space:nowrap}
+.table tr.sel td{background:var(--accent-soft)}
+.table .fname{display:flex;align-items:center;gap:9px;color:var(--t1)}
+.table .fico{width:20px;height:20px;border-radius:3px;background:var(--e2);display:grid;place-items:center;color:var(--t3);font-size:9px;flex:none}
+.table .path{color:var(--t3);font-size:10px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.rowbtn{color:var(--accent);font-size:10px;background:none}
+.rowbtn.danger{color:var(--danger)}
+
+/* 右键菜单 */
+.ctx-wrap{position:relative;min-height:520px;background:var(--canvas);overflow:hidden}
+.ctx-menu{
+  position:absolute;width:208px;background:var(--menu);border:1px solid var(--line);border-radius:5px;
+  padding:5px;box-shadow:var(--shadow);z-index:5
+}
+.ctx-item{display:flex;align-items:center;gap:9px;width:100%;height:30px;padding:0 9px;border-radius:4px;font-size:12px;color:var(--t1);text-align:left}
+.ctx-item:hover{background:var(--e2)}
+.ctx-item.danger{color:var(--danger)}
+.ctx-item .ico{width:14px;color:var(--t3);display:grid;place-items:center;flex:none}
+.ctx-item .kbd{margin-left:auto;font-family:ui-monospace,monospace;font-size:10px;color:var(--t3)}
+.ctx-sep{height:1px;background:var(--hair);margin:5px 4px}
+.ctx-head{font-size:10px;color:var(--t3);padding:6px 9px 4px;letter-spacing:.04em}
+.ctx-cue{position:absolute;left:120px;top:150px;font-size:11px;color:var(--t3);display:flex;align-items:center;gap:7px}
+.ctx-cue .pointer{font-size:16px;color:var(--t1)}
+
+/* 截图选区界面 */
+.snip-stage{position:relative;height:560px;background:#202024;overflow:hidden}
+.snip-stage::before{content:"";position:absolute;inset:0;background:rgba(0,0,0,.55)}
+.snip-area{position:absolute;left:110px;top:90px;width:460px;height:270px;border:1px solid #4c8dff;box-shadow:0 0 0 1px rgba(0,0,0,.2)}
+.snip-area .handle{position:absolute;width:7px;height:7px;background:#fff;border:1px solid #4c8dff}
+.h1{left:-4px;top:-4px}.h2{right:-4px;top:-4px}.h3{left:-4px;bottom:-4px}.h4{right:-4px;bottom:-4px}
+.snip-info{position:absolute;left:0;top:-22px;background:#1b1b1b;color:#fff;font-family:ui-monospace,monospace;font-size:11px;padding:3px 8px;border-radius:4px;white-space:nowrap}
+.snip-info .xy{color:#b9b9b9}
+.snip-content{position:absolute;inset:0;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:10px;opacity:.95}
+.snip-content div{border-radius:3px}
+.toolbar{
+  position:absolute;left:50%;transform:translateX(-50%);bottom:56px;display:flex;align-items:center;gap:3px;
+  height:46px;padding:0 8px;border-radius:10px;background:#ffffff;box-shadow:0 8px 30px rgba(0,0,0,.35)
+}
+.tool{width:34px;height:34px;display:grid;place-items:center;border-radius:6px;color:#3a3a3a;flex:none}
+.tool:hover{background:#f0f0f0}
+.tool.on{background:#e8f0ff;color:#1b4fe0;box-shadow:inset 0 0 0 1px #b9d0ff}
+.tool.red{color:#e05a4a}
+.tool .reddot{width:14px;height:14px;border-radius:50%;background:#e05a4a}
+.tool .lines{display:flex;flex-direction:column;gap:2px}
+.tool .lines i{display:block;height:1.5px;background:currentColor;border-radius:1px}
+.tool .fillico{width:14px;height:14px;border:1.5px solid currentColor;border-radius:3px;background:linear-gradient(135deg,transparent 45%,currentColor 45% 55%,transparent 55%)}
+.toolbar .vsep{height:22px;background:#e2e2dd;margin:0 3px}
+.btn-primary{height:34px;display:flex;align-items:center;gap:7px;padding:0 14px;border-radius:7px;background:#1b4fe0;color:#fff;font-size:12px;font-weight:500;flex:none}
+.btn-primary .caret{border-left:1px solid rgba(255,255,255,.35);padding-left:8px;margin-left:2px}
+.snip-hint{position:absolute;left:16px;bottom:16px;color:#c9c9c9;font-size:11px}
+
+/* 标注态（设计界面） */
+.annot{position:relative;height:560px;background:#e9e6df;overflow:hidden}
+.annot .canvas{position:absolute;inset:28px 28px 70px;background:linear-gradient(135deg,#cfd8e8,#e8d5cf 55%,#d8e6d2);border-radius:4px;overflow:hidden}
+.annot .arrow{position:absolute;left:180px;top:150px;width:180px;height:3px;background:#e05a4a;transform:rotate(24deg);transform-origin:left}
+.annot .arrow::after{content:"";position:absolute;right:-2px;top:-5px;border-left:12px solid #e05a4a;border-top:6px solid transparent;border-bottom:6px solid transparent}
+.annot .rect{position:absolute;left:360px;top:120px;width:150px;height:90px;border:2.5px solid #1b4fe0;border-radius:3px}
+.annot .mosaic{position:absolute;left:150px;top:250px;width:120px;height:60px;background:repeating-conic-gradient(#8a8a8a 0 25%,#b5b5b5 0 50%) 0 0/12px 12px;border:1px solid #6a6a6a}
+.annot .note{position:absolute;left:390px;top:250px;background:#fff;border:1px solid #d5d5d5;border-radius:5px;padding:7px 11px;font-size:12px;color:#141412;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.annot .toolbar{bottom:16px}
+
+/* 灵感板 */
+.board{height:560px;background:#161615;position:relative;overflow:hidden;border-radius:var(--win-radius)}
+.board::before{content:"";position:absolute;inset:0;background-image:radial-gradient(rgba(255,255,255,.14) 1px,transparent 1px);background-size:20px 20px}
+.board-top{position:relative;height:42px;display:flex;align-items:center;padding:0 14px;gap:12px;border-bottom:1px solid rgba(255,255,255,.09);background:#1c1c1a;color:#eee}
+.board-name{font-size:12px;color:#f2f2ef}
+.board-count{font-family:ui-monospace,monospace;font-size:10px;color:#8a8a84;margin-left:8px}
+.board-act{display:flex;align-items:center;gap:2px;margin-left:auto}
+.board-act button{width:30px;height:28px;display:grid;place-items:center;border-radius:5px;color:#9a9a94}
+.board-act button:hover{background:#2a2a28;color:#fff}
+.board-act button.on{background:rgba(91,140,255,.16);color:#8ab0ff}
+.board-card{position:absolute;border-radius:4px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.45)}
+.board-card.sel{outline:2px solid #5b8cff;outline-offset:2px}
+.board-card .bh{position:absolute;right:6px;bottom:6px;font-family:ui-monospace,monospace;font-size:9px;color:#fff;background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.2);padding:2px 6px;border-radius:999px}
+.board-note{position:absolute;background:#f4efdc;color:#2b2b34;border-radius:3px;padding:12px 14px;font-family:Georgia,serif;font-size:15px;box-shadow:0 6px 20px rgba(0,0,0,.4);transform:rotate(-2deg)}
+.board-note.sel{outline:2px solid #5b8cff;outline-offset:2px}
+.board-layers{position:absolute;left:0;top:42px;bottom:0;width:190px;background:#1c1c1a;border-right:1px solid rgba(255,255,255,.09);padding:12px 0;color:#eee}
+.board-layers h5{font-size:11px;font-weight:500;color:#b9b9b3;padding:0 14px 10px;display:flex;align-items:center;gap:7px}
+.layer{display:flex;align-items:center;gap:9px;padding:6px 14px;font-size:11px;color:#b9b9b3}
+.layer.sel{background:rgba(91,140,255,.14);color:#9fbeff}
+.layer .ph{width:24px;height:24px;border-radius:3px;flex:none}
+.layer .top{font-size:9px;color:#5b8cff;border:1px solid rgba(91,140,255,.4);border-radius:3px;padding:0 4px;margin-left:auto}
+.board-zoom{position:absolute;left:204px;bottom:14px;display:flex;align-items:center;gap:2px;background:#1c1c1a;border:1px solid rgba(255,255,255,.12);border-radius:7px;padding:3px;color:#b9b9b3}
+.board-zoom button{width:26px;height:24px;display:grid;place-items:center;border-radius:4px;color:#b9b9b3}
+.board-zoom button:hover{background:#2a2a28}
+.board-zoom .pct{font-family:ui-monospace,monospace;font-size:10px;padding:0 6px;color:#eee;cursor:pointer}
+
+/* 设置 */
+.settings{height:560px;display:grid;grid-template-columns:190px 1fr;background:var(--panel)}
+.set-nav{border-right:1px solid var(--hair);padding:14px 0}
+.set-nav button{display:flex;align-items:center;gap:10px;width:100%;height:36px;padding:0 18px;font-size:12px;color:var(--t2);position:relative}
+.set-nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.set-nav button.on::before{content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;background:var(--accent)}
+.set-body{padding:24px 30px;overflow:hidden}
+.set-body h3{font-family:Georgia,serif;font-size:18px;font-weight:400;margin-bottom:4px}
+.set-body .lead{font-size:11px;color:var(--t3);margin-bottom:22px}
+.set-sec{border-top:1px solid var(--hair);padding:14px 0 6px}
+.set-sec h4{font-size:12px;font-weight:500;color:var(--t1);margin-bottom:12px}
+.set-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:8px 0}
+.set-row .lbl{font-size:12px;color:var(--t2)}
+.set-row .hint{font-size:10px;color:var(--t3);margin-top:2px}
+.seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;flex:none}
+.seg button{font-size:11px;padding:6px 12px;color:var(--t2);border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--panel);color:var(--accent);font-weight:500}
+.toggle{width:34px;height:20px;border-radius:999px;background:var(--e3);border:1px solid var(--line);position:relative;flex:none}
+.toggle::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--t2);transition:transform .2s}
+.toggle.on{background:var(--accent);border-color:var(--accent)}
+.toggle.on::after{transform:translateX(14px);background:#fff}
+
+/* 关于 */
+.about{height:560px;display:flex;flex-direction:column;align-items:center;padding:34px 40px;overflow:hidden;background:var(--panel)}
+.about-icon{width:48px;height:48px;border-radius:11px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:22px;border:1px solid var(--hair)}
+.about h3{font-family:Georgia,serif;font-size:24px;font-weight:400;margin-top:14px}
+.about .ver{font-size:11px;color:var(--t3);margin-top:4px}
+.about .lead{font-size:12px;color:var(--t2);max-width:520px;text-align:center;margin-top:14px;line-height:1.7}
+.about-feat{display:grid;grid-template-columns:1fr 1fr;gap:7px 28px;margin-top:22px;width:100%;max-width:600px}
+.about-feat div{display:flex;align-items:center;gap:9px;font-size:11px;color:var(--t2)}
+.about-feat svg{color:var(--accent);flex:none}
+.about-stack{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:20px}
+.about-stack span{font-family:ui-monospace,monospace;font-size:10px;color:var(--t2);border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+.about-links{display:flex;gap:10px;margin-top:auto;width:100%;max-width:600px}
+.about-link{flex:1;display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:11px 13px;text-align:left}
+.about-link:hover{border-color:var(--accent)}
+.about-link .li{width:28px;height:28px;border-radius:6px;background:var(--e1);display:grid;place-items:center;color:var(--t2);flex:none}
+.about-link .lb{font-size:12px;color:var(--t1)}
+.about-link .ls{font-family:ui-monospace,monospace;font-size:9px;color:var(--t3)}
+.about-link .ar{margin-left:auto;color:var(--t3)}
+
+/* 快捷键 */
+.kb{height:560px;display:flex;flex-direction:column;background:var(--panel)}
+.kb-head{height:48px;display:flex;align-items:center;padding:0 22px;border-bottom:1px solid var(--hair)}
+.kb-head h3{font-family:Georgia,serif;font-size:17px;font-weight:400}
+.kb-head .x{margin-left:auto;font-family:ui-monospace,monospace;font-size:10px;color:var(--t3);border:1px solid var(--line);border-radius:4px;padding:3px 7px}
+.kb-body{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:0;overflow:hidden}
+.kb-col{padding:18px 22px;overflow:hidden}
+.kb-col+.kb-col{border-left:1px solid var(--hair)}
+.kb-group{margin-bottom:18px}
+.kb-group h4{font-size:11px;color:var(--accent);font-weight:500;padding-left:9px;border-left:2px solid var(--accent);margin-bottom:8px}
+.kb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--hair)}
+.kb-label{font-size:11px;color:var(--t2)}
+.kb-label .hint{font-size:10px;color:var(--t3);margin-left:7px}
+.kbd{display:inline-flex;gap:3px;flex:none}
+.kbd kbd{font-family:ui-monospace,monospace;font-size:10px;color:var(--t1);background:var(--e1);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:2px 6px;min-width:22px;text-align:center}
+.kb-foot{border-top:1px solid var(--hair);padding:12px 22px;font-size:10px;color:var(--t3)}
+
+/* 命令面板 */
+.cmd{height:560px;background:var(--panel);display:flex;flex-direction:column;align-items:center;padding-top:70px;position:relative}
+.cmd::before{content:"";position:absolute;inset:0;background:rgba(0,0,0,.18)}
+.cmd-box{position:relative;width:min(560px,90%);background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);overflow:hidden}
+.cmd-input{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--hair);color:var(--t3)}
+.cmd-input input{flex:1;border:0;outline:0;background:none;color:var(--t1);font-size:14px}
+.cmd-group{font-size:10px;color:var(--t3);padding:9px 16px 5px;letter-spacing:.05em}
+.cmd-row{display:flex;align-items:center;gap:11px;padding:9px 16px;font-size:12px;color:var(--t2)}
+.cmd-row.on{background:var(--accent-soft);color:var(--accent)}
+.cmd-row .ci{width:16px;display:grid;place-items:center;color:var(--t3)}
+.cmd-row .kbd{margin-left:auto}
+.cmd-foot{border-top:1px solid var(--hair);padding:9px 16px;display:flex;gap:14px;font-size:10px;color:var(--t3)}
+.cmd-foot span{display:flex;align-items:center;gap:5px}
+
+.rail,.stage{scrollbar-width:thin}
+
+/* ============================================================
+   v2.1 对齐 FontManager：配色 / 动效 / 按钮交互 / 三界面结构
+   ============================================================ */
+/* 按钮通用手感：hover 上浮 1px、tap 0.97、焦点环 2px+2px。
+   弹簧近似用 180ms --ease-out；菜单行不位移，避免跳动。 */
+button{
+  transition:background var(--t-quick) var(--ease-std),color var(--t-quick) var(--ease-std),
+             border-color var(--t-quick) var(--ease-std),transform var(--t-quick) var(--ease-out),
+             box-shadow var(--t-quick) var(--ease-std)
+}
+button:not(:disabled):focus-visible{outline:var(--focus-w) solid var(--accent);outline-offset:var(--focus-offset)}
+button:not(:disabled):active{transform:scale(.97)}
+.ctl:hover,.tb-btn:hover,.batchbar .mini:hover,.theme-switch button:hover,.seg button:hover,
+.tool:hover,.btn-primary:hover,.about-link:hover,.trash-action:hover,.trash-empty-btn:hover,
+.board-act button:hover,.board-zoom button:hover,.empty-action:hover{transform:translateY(-1px)}
+.tool.on,.ctl.on,.seg button.on{background:var(--accent-soft);color:var(--accent)}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent-b)}
+.btn-primary:hover{background:var(--accent-b)}
+.ctx-item.danger{color:var(--danger)}
+.ctx-item:hover{background:var(--e2);color:var(--t1)}
+/* 弹层：180ms 遮罩淡入 + 260ms 面板入场，与 FontManager 同档 */
+@keyframes scrimIn{from{opacity:0}to{opacity:1}}
+@keyframes panelIn{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes rowIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes rowOut{to{opacity:0;transform:translateX(24px)}}
+@keyframes softIn{from{opacity:0}to{opacity:1}}
+.stagger>*{animation:rowIn var(--t-state) var(--ease-out) both;animation-delay:calc(min(var(--i,0),14)*40ms)}
+/* ---------- 回收站（照搬 FontManager TrashView） ---------- */
+.trash-view{height:100%;display:flex;flex-direction:column;padding:18px 20px;gap:14px;background:var(--canvas)}
+.trash-bar{display:flex;align-items:center;justify-content:space-between;font-size:13px;color:var(--t2)}
+.trash-empty-btn{font-size:13px;font-weight:500;color:var(--danger);padding:8px 14px;border-radius:4px;
+  border:1px solid color-mix(in srgb,var(--danger) 18%,transparent);background:var(--danger-soft)}
+.trash-empty-btn:hover{background:color-mix(in srgb,var(--danger) 13%,transparent)}
+.trash-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.trash-row{display:flex;align-items:center;gap:12px;border-radius:8px;padding:11px 14px;
+  background:var(--e1);border:1px solid var(--hair);box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.trash-row.removing{animation:rowOut var(--t-quick) var(--ease-in) both}
+.trash-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.trash-name{font-size:14px;font-weight:500;color:var(--t1)}
+.trash-path{font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trash-action{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--t2);
+  padding:8px 12px;border-radius:4px;border:1px solid var(--hair);background:var(--e1);white-space:nowrap}
+.trash-action:hover{background:var(--e2);color:var(--t1)}
+.trash-action.del:hover{color:var(--danger)}
+.trash-empty{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+  text-align:center;padding-bottom:8vh}
+.trash-empty .tile{width:56px;height:56px;border-radius:8px;display:grid;place-items:center;color:var(--accent);
+  background:var(--e1);border:1px solid var(--hair);box-shadow:0 0 28px var(--accent-glow-soft);margin-bottom:14px}
+.trash-empty h3{font-size:20px;font-weight:600;letter-spacing:-.005em}
+.trash-empty p{font-size:13px;color:var(--t2);max-width:380px;line-height:1.5}
+/* ---------- 设置（照搬 FontManager 520px 玻璃面板口径） ---------- */
+.settings-overlay{height:560px;position:relative;display:grid;place-items:center;overflow:hidden;
+  background:var(--canvas);border-radius:var(--win-radius)}
+.settings-overlay::before{content:"";position:absolute;inset:0;background:var(--scrim);animation:scrimIn var(--t-quick) var(--ease-std) both}
+.set-panel{position:relative;width:min(520px,92%);max-height:96%;border-radius:12px;border:1px solid var(--line);
+  background:var(--e3);box-shadow:var(--shadow);overflow:hidden;animation:panelIn var(--t-state) var(--ease-out) both}
+.set-panel::before{content:"";position:absolute;left:12%;top:-8%;width:340px;height:220px;pointer-events:none;
+  background:radial-gradient(closest-side,var(--accent-glow-soft),transparent 70%)}
+.set-panel-head{position:relative;display:flex;align-items:center;justify-content:space-between;
+  padding:18px 20px 14px;border-bottom:1px solid var(--hair)}
+.set-panel-head h3{font-size:16px;font-weight:650;letter-spacing:-.01em}
+.set-panel-head .x{font-family:ui-monospace,monospace;font-size:10px;color:var(--t3);
+  border:1px solid var(--line);border-radius:4px;padding:3px 7px}
+.set-scroll{position:relative;padding:18px 20px 16px;display:flex;flex-direction:column;gap:18px;
+  max-height:470px;overflow:auto;overscroll-behavior:contain}
+.set-sec{display:flex;flex-direction:column;gap:10px}
+.set-group-title{font-family:ui-monospace,"JetBrains Mono",monospace;font-size:9px;font-weight:500;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--t3)}
+.set-item{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 14px;
+  border:1px solid var(--hair);border-radius:8px;background:var(--e1)}
+.set-item .lbl{font-size:14px;font-weight:500}
+.set-item .hint{font-size:11px;color:var(--t3);line-height:1.5;margin-top:2px}
+.set-item .mono{font-family:ui-monospace,"JetBrains Mono",monospace;font-size:11px;color:var(--t2)}
+/* ---------- 关于（照搬 FontManager AboutView） ---------- */
+.about.fm-about{height:560px;overflow:auto;background:var(--canvas);padding:24px 32px;gap:0}
+.about.fm-about .about-icon{width:72px;height:72px;border-radius:14px;background:var(--accent);color:#fff;
+  font-size:32px;box-shadow:0 0 28px var(--accent-glow-soft),0 2px 4px rgba(0,0,0,.2);
+  animation:softIn var(--t-layout) var(--ease-out) both}
+.about.fm-about h3{font-size:24px;font-weight:650;letter-spacing:-.01em;margin-top:14px}
+.about.fm-about .ver{font-size:11px;color:var(--t3);letter-spacing:.04em;margin-top:4px}
+.about.fm-about .lead{font-size:13px;color:var(--t2);max-width:440px;line-height:1.55;margin-top:14px}
+.about.fm-about .about-feat{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:16px;width:min(560px,100%)}
+.about.fm-about .about-feat div{padding:9px 12px;border:1px solid var(--hair);border-radius:8px;
+  background:var(--e1);font-size:11px;color:var(--t2)}
+.about.fm-about .about-stack{margin-top:14px;gap:6px}
+.about.fm-about .about-stack span{font-family:var(--font-ui,"Inter"),system-ui,sans-serif;font-size:11px;
+  padding:4px 10px;border-radius:999px;border:1px solid var(--hair);background:var(--e1);color:var(--t2)}
+.about.fm-about .about-section-title{font-family:ui-monospace,"JetBrains Mono",monospace;font-size:9px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin:18px 0 0}
+.about.fm-about .about-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;
+  margin-top:10px;width:min(560px,100%)}
+.about.fm-about .about-link{display:grid;grid-template-columns:40px minmax(0,1fr) 14px;align-items:center;
+  column-gap:12px;row-gap:5px;text-align:left;padding:16px 18px;border-radius:12px;
+  border:1px solid var(--line);background:var(--panel);box-shadow:none}
+.about.fm-about .about-link:hover{border-color:color-mix(in srgb,var(--accent) 42%,var(--line));background:var(--panel)}
+.about.fm-about .about-link .li{grid-column:1;grid-row:1;width:40px;height:40px;border-radius:10px;
+  color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 18%,transparent)}
+.about.fm-about .about-link .lb{grid-column:2;grid-row:1;font-size:13px;font-weight:600;color:var(--t1)}
+.about.fm-about .about-link .ar{grid-column:3;grid-row:1;color:var(--t3)}
+.about.fm-about .about-link .ls{grid-column:1/-1;grid-row:2;font-size:11px;color:var(--t2)}
+/* 减少动效：与 FontManager 双轨降级一致 */
+@media (prefers-reduced-motion:reduce){
+  :root{--t-micro:1ms;--t-quick:1ms;--t-state:1ms;--t-layout:1ms;--t-scene:1ms}
+  *,*::before,*::after{animation-duration:1ms!important;transition-duration:1ms!important;animation-delay:0ms!important}
+}
+
+
+/* ============================================================
+   v2.2：网格/瀑布流 = AssetManager 真机结构；设置/命令面板 = FontManager
+   ============================================================ */
+/* ---------- AssetManager 真机外框 ---------- */
+.am-title{height:36px;padding:0 12px}
+.am-title .brand .mk{width:14px;height:14px;border-radius:3px;font-size:9px}
+.am-bar{flex:none;display:flex;align-items:center;gap:10px;padding:6px 12px 8px;border-bottom:1px solid var(--hair)}
+.am-search{display:flex;align-items:center;gap:7px;width:236px;height:28px;padding:0 9px;
+  border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--t3)}
+.am-search input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:11px;color:var(--t1)}
+.am-search input::placeholder{color:var(--t3)}
+.am-range{display:flex;align-items:center;gap:8px;flex:none}
+.am-range .track{position:relative;width:88px;height:2px;border-radius:2px;background:var(--line)}
+.am-range .track::after{content:"";position:absolute;left:54%;top:-4px;width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.am-range span{font-family:ui-monospace,"JetBrains Mono",monospace;font-size:10px;color:var(--t3)}
+.am-ico{width:26px;height:26px;display:grid;place-items:center;border-radius:4px;color:var(--t3);flex:none}
+.am-ico:hover{background:var(--e1);color:var(--t1)}
+.am-ico .dot{width:13px;height:13px;border-radius:50%;background:conic-gradient(#e05a4a,#e3d94a,#4f9d5d,#4a7fd9,#8a5bc9,#e05a4a)}
+.am-content{padding:8px;overflow:auto;background:var(--canvas)}
+.am-grid{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px}
+.am-grid .thumb{aspect-ratio:1/1;border-radius:2px;padding:0;align-items:flex-end}
+.am-grid .thumb .badge{position:absolute;right:3px;bottom:3px;font-size:8px;padding:1px 3px;border-radius:2px;
+  background:rgba(18,18,16,.72);color:#fff;border:1px solid rgba(255,255,255,.14);margin:0}
+.am-grid .thumb.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.am-grid .thumb .dotmark{display:none}
+/* 瀑布流：4 列不裁切，保留 AM 的角标 */
+.am-wf{column-count:4;column-gap:6px}
+.am-wf .thumb{width:100%;margin-bottom:6px;break-inside:avoid;border-radius:2px;padding:0;
+  border:1px solid var(--hair)}
+.am-wf .thumb .badge{position:absolute;right:3px;bottom:3px;font-size:8px;padding:1px 3px;border-radius:2px;
+  background:rgba(18,18,16,.72);color:#fff;border:1px solid rgba(255,255,255,.14);margin:0}
+
+/* ---------- 设置：FontManager 双栏面板（900×760 等比缩到 860×516） ---------- */
+.fm-settings{height:560px;position:relative;display:grid;place-items:center;overflow:hidden;
+  background:var(--canvas);border-radius:var(--win-radius)}
+.fm-settings::before{content:"";position:absolute;inset:0;background:var(--scrim);
+  animation:scrimIn var(--t-quick) var(--ease-std) both}
+.set-panel2{position:relative;width:min(860px,94%);height:516px;display:grid;
+  grid-template-columns:186px minmax(0,1fr);border:1px solid var(--line);border-radius:12px;
+  background:var(--e3);box-shadow:var(--shadow);overflow:hidden;
+  animation:setIn var(--t-layout) var(--ease-out) both}
+.set-panel2.closing{animation:panelOut var(--t-quick) var(--ease-in) both}
+@keyframes panelOut{to{opacity:0;transform:translateY(20px)}}
+@keyframes setIn{from{opacity:0;transform:translateY(32px)}to{opacity:1;transform:none}}
+.set-nav2{padding:15px 10px 12px;display:flex;flex-direction:column;gap:7px;
+  border-right:1px solid var(--hair);background:var(--e3);min-height:0}
+.set-nav2 .t{font-size:13px;font-weight:600;padding:0 8px 3px;color:var(--t1)}
+.set-search2{display:flex;align-items:center;gap:6px;height:26px;margin:0 4px;padding:0 8px;
+  border:1px solid var(--line);border-radius:6px;background:var(--e1);color:var(--t3)}
+.set-search2 input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:11px;color:var(--t1)}
+.set-search2 input::placeholder{color:var(--t3)}
+.set-nav2 .rows{display:flex;flex-direction:column;gap:1px;overflow:auto;min-height:0}
+.set-nav2 .row{display:flex;align-items:center;gap:8px;height:29px;padding:0 8px;border-radius:6px;
+  font-size:12px;color:var(--t2);text-align:left;white-space:nowrap}
+.set-nav2 .row:hover{background:var(--e1)}
+.set-nav2 .row.sel{background:var(--e2);color:var(--t1);font-weight:500}
+.set-nav2 .row svg{flex:none;color:var(--t3)}
+.set-nav2 .row.sel svg{color:var(--t1)}
+.set-main2{display:flex;flex-direction:column;min-width:0;min-height:0}
+.set-head2{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px 6px}
+.set-head2 h4{font-size:14px;font-weight:600;color:var(--t1)}
+.set-head2 .x{width:26px;height:26px;display:grid;place-items:center;border-radius:6px;color:var(--t3)}
+.set-head2 .x:hover{background:var(--e1);color:var(--t1)}
+.set-body2{flex:1;overflow:auto;padding:4px 18px 12px;display:flex;flex-direction:column;gap:14px;
+  overscroll-behavior:contain}
+.set-pane[hidden]{display:none}
+.set-pane{display:flex;flex-direction:column;gap:14px;animation:softIn var(--t-state) var(--ease-out) both}
+.set-sec2{display:flex;flex-direction:column;gap:8px}
+.set-sec2 .ttl{font-size:11px;font-weight:600;color:var(--t2)}
+.set-card{border:1px solid var(--hair);border-radius:10px;background:var(--e1);overflow:hidden}
+.set-line{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:9px 13px;border-top:1px solid var(--hair);font-size:13px;color:var(--t1)}
+.set-line:first-child{border-top:0}
+.set-line .mut{font-size:11px;color:var(--t3);margin-top:2px;line-height:1.4}
+.set-line .lab{display:flex;align-items:center;gap:7px}
+.set-line .lab svg{color:var(--t3);flex:none}
+.fm-switch{width:26px;height:15px;border-radius:999px;background:var(--e2);border:1px solid var(--line);
+  position:relative;flex:none;transition:background var(--t-quick) var(--ease-std),border-color var(--t-quick) var(--ease-std)}
+.fm-switch::after{content:"";position:absolute;left:1.5px;top:1.5px;width:10px;height:10px;border-radius:50%;
+  background:var(--t3);transition:transform var(--t-quick) var(--ease-out),background var(--t-quick) var(--ease-std)}
+.fm-switch.on{background:var(--accent);border-color:var(--accent)}
+.fm-switch.on::after{transform:translateX(11px);background:#fff}
+.set-select{height:27px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--e3);
+  font-size:12px;color:var(--t1);display:flex;align-items:center;gap:16px;flex:none}
+.set-select:hover{background:var(--e1)}
+.set-note{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;
+  border:1px dashed var(--line);border-radius:8px;font-size:11px;color:var(--t2)}
+.set-btn2{height:26px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--e3);
+  font-size:11px;color:var(--t2);display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.set-btn2:hover{background:var(--e1);color:var(--t1);transform:translateY(-1px)}
+.set-foot2{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 18px;border-top:1px solid var(--hair);font-size:10px;color:var(--t3)}
+.set-done{height:28px;padding:0 14px;border:1px solid var(--line);border-radius:6px;background:var(--e3);
+  font-size:12px;font-weight:500;color:var(--t1);flex:none}
+.set-done:hover{background:var(--e1);transform:translateY(-1px)}
+.set-reopen{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;
+  height:32px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:var(--e3);
+  color:var(--t2);font-size:12px;box-shadow:var(--shadow)}
+.fm-settings.closed .set-reopen{display:block}
+
+/* ---------- 命令面板：FontManager 复刻 ---------- */
+.cmd2{height:560px;position:relative;display:flex;justify-content:center;align-items:flex-start;
+  padding:64px 40px 40px;background:var(--canvas);border-radius:var(--win-radius);overflow:hidden}
+.cmd2::before{content:"";position:absolute;inset:0;background:var(--scrim);
+  animation:scrimIn var(--t-quick) var(--ease-std) both}
+.pal2{position:relative;width:min(560px,100%);max-height:420px;display:flex;flex-direction:column;
+  border:1px solid var(--line);border-radius:12px;background:var(--e3);box-shadow:var(--shadow);
+  overflow:hidden;animation:palIn var(--t-state) var(--ease-out) both}
+@keyframes palIn{from{opacity:0;transform:translateY(-14px) scale(.98)}to{opacity:1;transform:none}}
+.pal2.closing{animation:palOut 120ms var(--ease-in) both}
+@keyframes palOut{to{opacity:0;transform:translateY(-10px) scale(.985)}}
+.pal-input2{display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid var(--hair);color:var(--t3)}
+.pal-input2 input{flex:1;min-width:0;border:0;outline:0;background:none;font-size:14px;color:var(--t1);
+  caret-color:var(--accent)}
+.pal-input2 input::placeholder{color:var(--t3)}
+.pal-input2 .kbdhint{font-family:ui-monospace,"JetBrains Mono",monospace;font-size:10px;color:var(--t3);
+  padding:3px 7px;border:1px solid var(--line);border-radius:5px;background:var(--e1);flex:none}
+.pal-list2{list-style:none;overflow:auto;padding:6px;display:flex;flex-direction:column;gap:1px}
+.pal-item2{display:flex;align-items:center;gap:11px;width:100%;padding:9px 11px;border-radius:4px;
+  font-family:ui-monospace,"JetBrains Mono",monospace;font-size:9px;font-weight:500;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--t2);text-align:left;
+  transition:background var(--t-micro) ease,color var(--t-micro) ease}
+.pal-item2 svg{flex:none;color:var(--t3)}
+.pal-item2 .hint{margin-left:auto;font-size:11px;letter-spacing:0;text-transform:none;color:var(--t3)}
+.pal-item2.on{background:rgba(212,212,216,.13);color:var(--t1)}
+.pal-item2.on svg{color:var(--accent)}
+.pal-empty2{padding:18px;text-align:center;font-size:13px;color:var(--t3)}
+.cmd-reopen{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;
+  height:32px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:var(--e3);
+  color:var(--t2);font-size:12px;box-shadow:var(--shadow)}
+.cmd2.closed .cmd-reopen{display:block}
+
+
+/* ---------- 回收站：AssetManager 真机表格形态，仅换色 ---------- */
+.am-trash{height:100%;display:flex;flex-direction:column;background:var(--canvas);padding:0}
+.am-trash .trash-bar{padding:8px 12px;border-bottom:1px solid var(--hair);
+  font-size:11px;color:var(--t2);background:var(--canvas)}
+.am-trash .trash-empty-btn{color:var(--t2);border:1px solid var(--line);background:var(--panel);
+  border-radius:4px;padding:4px 9px;font-size:11px;font-weight:400}
+.am-trash .trash-empty-btn:hover{background:var(--e1);color:var(--t1)}
+.am-trash .trash-list{flex:1;overflow:auto;display:block;padding:0}
+.am-trash .trash-row{display:flex;align-items:center;gap:10px;border-radius:0;padding:5px 12px;
+  background:transparent;border:0;border-bottom:1px solid var(--hair);box-shadow:none}
+.am-trash .trash-row:hover{background:var(--e1)}
+.am-trash .trash-row.sel{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.am-trash .tr-thumb{width:30px;height:30px;border-radius:2px;flex:none}
+.am-trash .trash-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.am-trash .trash-name{font-size:11px;font-weight:400;color:var(--t1);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.am-trash .trash-path{font-size:10px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.am-trash .tr-size{width:62px;text-align:right;font-size:10px;color:var(--t2);flex:none}
+.am-trash .tr-date{width:108px;text-align:right;font-size:10px;color:var(--t2);flex:none}
+.am-trash .tr-acts{display:flex;gap:2px;flex:none}
+.am-trash .trash-action{padding:3px 7px;border:0;background:none;font-size:10px;color:var(--t2);
+  border-radius:3px;gap:4px;font-weight:400}
+.am-trash .trash-action:hover{background:var(--e2);color:var(--t1)}
+.am-trash .trash-action svg{display:none}
+
+
+/* ---------- 灵感板 / 截图：跟随主题（深浅两套） ---------- */
+:root{
+  --board-bg:#161615; --board-panel:#1c1c1a; --board-line:rgba(255,255,255,.09);
+  --board-fg:#f2f2ef; --board-fg2:#b9b9b3; --board-fg3:#8a8a84;
+  --board-hover:#2a2a28; --board-dot:rgba(255,255,255,.14);
+  --board-badge:rgba(0,0,0,.75); --board-note:#f4efdc; --board-note-fg:#2b2b34;
+  --snip-stage:#202024; --snip-mask:rgba(0,0,0,.55);
+  --snip-toolbar:#242422; --snip-toolbar-fg:#e8e8e8; --snip-toolbar-hover:#2f2f2c;
+  --snip-toolbar-on:#1d3a66; --snip-toolbar-on-fg:#9fc0ff;
+  --snip-info-bg:#111110; --snip-info-fg:#f2f2ef; --snip-hint:#9a9a94;
+}
+body[data-theme="light"]{
+  --board-bg:#fafaf8; --board-panel:#ffffff; --board-line:#e2e2dd;
+  --board-fg:#141412; --board-fg2:#6b6b66; --board-fg3:#9b9b95;
+  --board-hover:#f1f1ed; --board-dot:rgba(20,20,18,.12);
+  --board-badge:rgba(20,20,18,.72); --board-note:#fff4c9; --board-note-fg:#3a3320;
+  --snip-stage:#eceae4; --snip-mask:rgba(20,20,18,.46);
+  --snip-toolbar:#ffffff; --snip-toolbar-fg:#2a2a28; --snip-toolbar-hover:#f0f0ee;
+  --snip-toolbar-on:#e8f0ff; --snip-toolbar-on-fg:#1b4fe0;
+  --snip-info-bg:#1b1b1b; --snip-info-fg:#ffffff; --snip-hint:#6b6b66;
+}
+.board{background:var(--board-bg);color:var(--board-fg)}
+.board::before{background-image:radial-gradient(var(--board-dot) 1px,transparent 1px)}
+.board-top{background:var(--board-panel);border-bottom-color:var(--board-line);color:var(--board-fg)}
+.board-name{color:var(--board-fg)}
+.board-count{color:var(--board-fg3)}
+.board-act button{color:var(--board-fg2)}
+.board-act button:hover{background:var(--board-hover);color:var(--board-fg)}
+.board-act button.on{background:var(--accent-soft);color:var(--accent)}
+.board-layers{background:var(--board-panel);border-right-color:var(--board-line);color:var(--board-fg)}
+.board-layers h5{color:var(--board-fg2)}
+.layer{color:var(--board-fg2)}
+.layer.sel{background:var(--accent-soft);color:var(--accent)}
+.layer .top{color:var(--accent);border-color:var(--accent-soft)}
+.board-zoom{background:var(--board-panel);border-color:var(--board-line);color:var(--board-fg2)}
+.board-zoom button{color:var(--board-fg2)}
+.board-zoom button:hover{background:var(--board-hover)}
+.board-zoom .pct{color:var(--board-fg)}
+.board-card .bh{background:var(--board-badge)}
+.board-note{background:var(--board-note);color:var(--board-note-fg)}
+.snip-stage{background:var(--snip-stage)}
+.snip-stage::before{background:var(--snip-mask)}
+.toolbar{background:var(--snip-toolbar);box-shadow:0 8px 30px rgba(0,0,0,.28)}
+.tool{color:var(--snip-toolbar-fg)}
+.tool:hover{background:var(--snip-toolbar-hover)}
+.tool.on{background:var(--snip-toolbar-on);color:var(--snip-toolbar-on-fg);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--snip-toolbar-on-fg) 28%,transparent)}
+.toolbar .vsep{background:var(--line)}
+.snip-info{background:var(--snip-info-bg);color:var(--snip-info-fg)}
+.snip-info .xy{color:var(--snip-hint)}
+.snip-hint{color:var(--snip-hint)}
+.annot{background:var(--snip-stage)}
+
+</style>
+</head>
+<body data-theme="light">
+
+<div class="shell">
+  <!-- 左侧导航 -->
+  <aside class="rail">
+    <div class="rail-brand">
+      <h1>界面重设计预览</h1>
+      <div class="sub">AssetManager · v2 提案 · 2026-11-21</div>
+    </div>
+    <div class="rail-label">界面清单</div>
+    <button class="nav-item on" data-screen="grid"><span class="num">01</span>主窗口 · 网格视图</button>
+    <button class="nav-item" data-screen="waterfall"><span class="num">02</span>主窗口 · 瀑布流</button>
+    <button class="nav-item" data-screen="trash"><span class="num">03</span>回收站</button>
+    <button class="nav-item" data-screen="ctx"><span class="num">04</span>右键菜单</button>
+    <button class="nav-item" data-screen="snip"><span class="num">05</span>截图选区界面</button>
+    <button class="nav-item" data-screen="annot"><span class="num">06</span>截图标注 / 设计态</button>
+    <button class="nav-item" data-screen="board"><span class="num">07</span>灵感板</button>
+    <button class="nav-item" data-screen="settings"><span class="num">08</span>设置</button>
+    <button class="nav-item" data-screen="about"><span class="num">09</span>关于</button>
+    <button class="nav-item" data-screen="keys"><span class="num">10</span>快捷键</button>
+    <button class="nav-item" data-screen="cmd"><span class="num">11</span>命令面板</button>
+    <div class="rail-foot">
+      <b>功能零改动</b> · 仅视觉与控件位置<br>
+      文档：方案 v1.3 · 布局照 AM / 面板照 FontManager
+    </div>
+  </aside>
+
+  <!-- 右侧舞台 -->
+  <main class="stage">
+    <div class="stage-head">
+      <div>
+        <h2 id="screenTitle">主窗口 · 网格视图</h2>
+        <div class="desc" id="screenDesc">顶栏分三组、正文 12px、角标只留异类、批量条移到右下——素材始终是主角。</div>
+      </div>
+      <div class="theme-switch">
+        <button data-theme="light" class="on">浅色</button>
+        <button data-theme="dark">深色</button>
+      </div>
+    </div>
+    <div class="stage-body">
+
+      <!-- 01 网格：AssetManager 真机结构，仅换配色 -->
+      <section class="screen on" id="grid">
+        <div class="screen-cap"><span class="tag">01</span><b>AssetManager 真机界面</b> 标题栏 / 搜索 / 尺寸滑杆 / 颜色 / 筛选 / 9 列方形缩略图，位置不动只换色</div>
+        <div class="win">
+          <div class="titlebar am-title"><span class="brand"><span class="mk">◆</span>AssetManager</span></div>
+          <div class="am-bar">
+            <div class="am-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input placeholder="搜索文件名 / 标签..."></div>
+            <div class="am-range"><div class="track"></div><span>176px</span></div>
+            <button class="am-ico" title="按颜色筛选"><span class="dot"></span></button>
+            <button class="am-ico" title="筛选"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16M7 12h10M10 19h4"/></svg></button>
+          </div>
+          <div class="workspace">
+            <div class="rail-hot" id="rail-hot"></div>
+            <aside class="sidebar" id="side-float">
+              <div class="side-head"><span>素材库 3/3</span><span>＋</span></div>
+              <div class="tree-row sel"><span class="caret">▾</span>新建文件夹 (4)<span class="cnt">32766</span></div>
+              <div class="tree-row sub"><span class="caret">▾</span>色彩<span class="cnt">3858</span></div>
+              <div class="tree-row sub"><span class="caret">▸</span>设计师设计作品<span class="cnt">169</span></div>
+              <div class="tree-row"><span class="caret">▾</span>未分类<span class="cnt">231</span></div>
+              <div class="tree-row"><span class="caret">▸</span>截图<span class="cnt">23</span></div>
+              <div class="side-div"></div>
+              <div class="tree-row"><span class="caret">▸</span>快照</div>
+              <div class="side-sp"></div>
+              <div class="side-div"></div>
+              <div class="side-foot">
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v10H3z"/></svg>分组</button>
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 12l-8 8-8-8 8-8z"/></svg>标签</button>
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16v13H4zM8 7V4h8v3"/></svg>在资源管理器中打开库</button>
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>回收站</button>
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>关于</button>
+                <button><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>快捷键</button>
+              </div>
+            </aside>
+            <div class="content am-content" id="grid-content">
+              <div class="am-grid" id="grid-tiles">
+                <div class="thumb sw1"><span class="badge">JPG</span></div>
+                <div class="thumb sw4"><span class="badge">JPG</span></div>
+                <div class="thumb sw3"><span class="badge">JPG</span></div>
+                <div class="thumb sw7"><span class="badge">JPG</span></div>
+                <div class="thumb sw8"><span class="badge">JPG</span></div>
+                <div class="thumb sw6"><span class="badge">JPG</span></div>
+                <div class="thumb sw10"><span class="badge">JPG</span></div>
+                <div class="thumb sw12"><span class="badge">JPG</span></div>
+                <div class="thumb sw2"><span class="badge">JPG</span></div>
+                <div class="thumb sw9"><span>Aa</span><span class="badge">JPG</span></div>
+                <div class="thumb sw5"><i style="background:#c0392b"></i><i style="background:#e67e22"></i><i style="background:#f1c40f"></i><i style="background:#27ae60"></i><i style="background:#2980b9"></i><span class="badge">JPG</span></div>
+                <div class="thumb sw11"><span class="badge">PNG</span></div>
+                <div class="thumb sw1"><span class="badge">JPG</span></div>
+                <div class="thumb sw6"><span class="badge">JPG</span></div>
+                <div class="thumb sw4"><span class="badge">JPG</span></div>
+                <div class="thumb sw3"><span class="badge">WEBP</span></div>
+                <div class="thumb sw8"><span class="badge">JPG</span></div>
+                <div class="thumb sw2"><span class="badge">JPG</span></div>
+                <div class="thumb sw10"><span class="badge">JPG</span></div>
+                <div class="thumb sw7"><span class="badge">JPG</span></div>
+                <div class="thumb sw12"><span class="badge">PNG</span></div>
+                <div class="thumb sw5"><i style="background:#2f7d6b"></i><i style="background:#8fc0a9"></i><i style="background:#e7efe6"></i><span class="badge">JPG</span></div>
+                <div class="thumb sw9"><span>Bb</span><span class="badge">WEBP</span></div>
+                <div class="thumb sw11"><span class="badge">JPG</span></div>
+                <div class="thumb sw1"><span class="badge">JPG</span></div>
+                <div class="thumb sw3"><span class="badge">JPG</span></div>
+                <div class="thumb sw6"><span class="badge">PNG</span></div>
+              </div>
+            </div>
+            <aside class="detail" id="detail-float">
+              <div class="detail-head"><span class="fmt">JPG</span><span class="nm">R-C.jpg</span><span class="star">☆</span></div>
+              <div class="detail-inner">
+                <div class="detail-preview sw11"></div>
+                <div class="detail-name">R-C.jpg</div>
+                <div class="chips" style="margin-top:8px"><span class="chip tag">PNG</span><span class="chip">蓝色</span><span class="chip">配色方案色卡搭配素材</span></div>
+                <div class="detail-meta mono" style="margin-top:9px;line-height:1.5">E:\Users\...\新建文件夹 (4)\色彩\配色方案色卡搭配素材 R-C.jpg</div>
+                <div class="dsec" style="margin-top:11px;border-top:1px solid var(--hair);padding-top:9px">
+                  <div class="kv"><span class="mono">1280 × 1368</span><span class="mono">411 KB</span></div>
+                </div>
+                <div class="dsec"><h4>基本信息</h4>
+                  <div class="kv"><span>格式</span><span>JPG</span></div>
+                  <div class="kv"><span>尺寸</span><span class="mono">1280 × 1368</span></div>
+                  <div class="kv"><span>大小</span><span class="mono">411 KB</span></div>
+                  <div class="kv"><span>修改时间</span><span class="mono">2023-02-09 09:31</span></div>
+                  <div class="kv"><span>添加日期</span><span class="mono">2026-11-19 18:16</span></div>
+                  <div class="kv"><span>位置</span><span>桌面上的新建文件夹 (4)</span></div>
+                  <div class="kv"><span>来源</span><span>R-C.jpg</span></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <!-- 02 瀑布流：AssetManager 真机结构，仅换配色 -->
+      <section class="screen" id="waterfall">
+        <div class="screen-cap"><span class="tag">02</span><b>AssetManager 真机界面</b> 同样的顶栏，4 列瀑布流不裁切，右下角保留格式角标</div>
+        <div class="win">
+          <div class="titlebar am-title"><span class="brand"><span class="mk">◆</span>AssetManager</span></div>
+          <div class="am-bar">
+            <div class="am-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input placeholder="搜索文件名 / 标签..."></div>
+            <div class="am-range"><div class="track"></div><span>320px</span></div>
+            <button class="am-ico" title="按颜色筛选"><span class="dot"></span></button>
+            <button class="am-ico" title="筛选"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16M7 12h10M10 19h4"/></svg></button>
+          </div>
+          <div class="workspace">
+            <div class="content am-content">
+              <div class="am-wf">
+                <div class="thumb sw1" style="aspect-ratio:3/4"><span class="badge">JPG</span></div>
+                <div class="thumb sw9" style="aspect-ratio:1/1"><span>Aa</span><span class="badge">JPG</span></div>
+                <div class="thumb sw4" style="aspect-ratio:4/5"><span class="badge">JPG</span></div>
+                <div class="thumb sw7" style="aspect-ratio:4/3"><span class="badge">MP4</span></div>
+                <div class="thumb sw5" style="aspect-ratio:1/1"><i style="background:#c0392b"></i><i style="background:#e67e22"></i><i style="background:#27ae60"></i><span class="badge">JPG</span></div>
+                <div class="thumb sw2" style="aspect-ratio:3/4"><span class="badge">JPG</span></div>
+                <div class="thumb sw10" style="aspect-ratio:1/1"><span class="badge">JPG</span></div>
+                <div class="thumb sw11" style="aspect-ratio:4/3"><span class="badge">HEIC</span></div>
+                <div class="thumb sw3" style="aspect-ratio:3/4"><span class="badge">PNG</span></div>
+                <div class="thumb sw8" style="aspect-ratio:1/1"><span class="badge">JPG</span></div>
+                <div class="thumb sw6" style="aspect-ratio:4/5"><span class="badge">JPG</span></div>
+                <div class="thumb sw12" style="aspect-ratio:1/1"><span class="badge">WEBP</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 03 回收站：AssetManager 真机表格形态，仅换配色 -->
+      <section class="screen" id="trash">
+        <div class="screen-cap"><span class="tag">03</span><b>AssetManager 真机回收站</b> 缩略图 + 文件名/路径 + 大小 + 时间 + 还原/还原到/彻底删除，位置不动只换色</div>
+        <div class="win">
+          <div class="titlebar am-title"><span class="brand"><span class="mk">◆</span>AssetManager</span></div>
+          <div class="am-bar">
+            <div class="am-search"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input placeholder="搜索文件名 / 标签..."></div>
+            <button class="am-ico" title="筛选"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16M7 12h10M10 19h4"/></svg></button>
+          </div>
+          <div class="am-trash">
+            <div class="trash-bar"><span>回收站 <span class="mono">6</span> 项</span><button class="trash-empty-btn" id="emptyTrash">清空回收站</button></div>
+            <div class="trash-list" id="trashList">
+              <div class="trash-row sel stagger" style="--i:0"><div class="tr-thumb" style="background:linear-gradient(135deg,#e8b4c8 0 30%,#b8496e 30% 55%,#f2e6d8 55% 78%,#7c2d4a 78%)"></div><div class="trash-info"><span class="trash-name">截图 2026-11-21.png</span><span class="trash-path mono">C:\Users\87557\AppData\Local\AssetManager\screenshots\截图 2026-11-21.png</span></div><span class="tr-size mono">568 KB</span><span class="tr-date mono">2026-11-21 20:19</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+              <div class="trash-row stagger" style="--i:1"><div class="tr-thumb" style="background:linear-gradient(160deg,#d8cfe8 0 22%,#6b4a8c 22% 48%,#e7d9c6 48% 70%,#3f2b57 70%)"></div><div class="trash-info"><span class="trash-name">截图 2026-11-21.png</span><span class="trash-path mono">C:\Users\87557\AppData\Local\AssetManager\screenshots\截图 2026-11-21.png</span></div><span class="tr-size mono">567 KB</span><span class="tr-date mono">2026-11-21 20:18</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+              <div class="trash-row stagger" style="--i:2"><div class="tr-thumb" style="background:linear-gradient(120deg,#f4c95d,#e8883a 45%,#c1442f)"></div><div class="trash-info"><span class="trash-name">截图 2026-11-21.png</span><span class="trash-path mono">C:\Users\87557\AppData\Local\AssetManager\screenshots\截图 2026-11-21.png</span></div><span class="tr-size mono">931 KB</span><span class="tr-date mono">2026-11-21 19:28</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+              <div class="trash-row stagger" style="--i:3"><div class="tr-thumb" style="background:linear-gradient(200deg,#9fd3c7 0 40%,#2f7d6b 40% 70%,#e8f0ea 70%)"></div><div class="trash-info"><span class="trash-name">截图 2026-11-21 (2).png</span><span class="trash-path mono">E:\Users\87557\文档\wordbuddy\软件\AssetManager\app-src-tauri\target\release\screenshots\截图 2026-11-21 (2).png</span></div><span class="tr-size mono">166 KB</span><span class="tr-date mono">2026-11-21 16:48</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+              <div class="trash-row stagger" style="--i:4"><div class="tr-thumb" style="background:radial-gradient(circle at 30% 30%,#f6d365,#fda085 45%,#b85c6e)"></div><div class="trash-info"><span class="trash-name">截图 2026-11-21 (2).png</span><span class="trash-path mono">E:\Users\87557\文档\wordbuddy\软件\AssetManager\app-src-tauri\target\release\screenshots\截图 2026-11-21 (2).png</span></div><span class="tr-size mono">435 KB</span><span class="tr-date mono">2026-11-21 16:22</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+              <div class="trash-row stagger" style="--i:5"><div class="tr-thumb" style="background:linear-gradient(45deg,#2b2b34 0 25%,#e05a4a 25% 50%,#f0e9de 50% 75%,#5b8cff 75%)"></div><div class="trash-info"><span class="trash-name">配色方案色卡搭配素材 R-C.jpg</span><span class="trash-path mono">E:\Users\87557\文档\wordbuddy\软件\AssetManager\新建文件夹 (4)\色彩\配色方案色卡搭配素材 R-C.jpg</span></div><span class="tr-size mono">411 KB</span><span class="tr-date mono">2026-11-21 15:55</span><div class="tr-acts"><button class="trash-action restore">还原</button><button class="trash-action">还原到…</button><button class="trash-action del">彻底删除</button></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 04 右键菜单 -->
+      <section class="screen" id="ctx">
+        <div class="screen-cap"><span class="tag">04</span><b>改动点</b> 208px 宽、30px 行高保留；图标槽对齐、快捷键弱化、危险项淡红底</div>
+        <div class="ctx-wrap">
+          <div class="grid" style="grid-template-columns:repeat(5,1fr);padding:26px;gap:12px">
+            <div class="thumb sw1"></div><div class="thumb sw4"></div><div class="thumb sw2"></div><div class="thumb sw7"></div><div class="thumb sw9"><span>Aa</span></div>
+            <div class="thumb sw3"></div><div class="thumb sw5"><i style="background:#c0392b"></i><i style="background:#27ae60"></i></div><div class="thumb sw8"></div><div class="thumb sw10"></div><div class="thumb sw6"></div>
+            <div class="thumb sw11"></div><div class="thumb sw12"></div><div class="thumb sw1"></div><div class="thumb sw4"></div><div class="thumb sw2"></div>
+          </div>
+          <div class="ctx-cue"><span class="pointer">↖</span> 右键任意素材</div>
+          <div class="ctx-menu" style="left:230px;top:120px">
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/></svg></span>在大图中打开<span class="kbd">Space</span></button>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/></svg></span>贴到屏幕上<span class="kbd">B</span></button>
+            <div class="ctx-sep"></div>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/></svg></span>复制原文件<span class="kbd">Ctrl C</span></button>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 12l-8 8-8-8 8-8z"/></svg></span>打标签<span class="kbd">T</span></button>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg></span>加入灵感板</button>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v10H3z"/></svg></span>加入分组</button>
+            <div class="ctx-sep"></div>
+            <div class="ctx-head">文件</div>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16v13H4zM8 7V4h8v3"/></svg></span>在资源管理器中显示</button>
+            <button class="ctx-item"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 20h9M16 4l4 4-9 9H7v-4z"/></svg></span>重命名<span class="kbd">F2</span></button>
+            <div class="ctx-sep"></div>
+            <button class="ctx-item danger"><span class="ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></span>移到回收站<span class="kbd">Del</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 05 截图选区 -->
+      <section class="screen" id="snip">
+        <div class="screen-cap"><span class="tag">05</span><b>改动点</b> 尺寸读数改等宽深底胶囊；工具栏按「选择 / 标注 / 操作」三段分隔</div>
+        <div class="snip-stage">
+          <div class="snip-area">
+            <div class="snip-info">401 × 455 <span class="xy">x132 y362</span></div>
+            <span class="handle h1"></span><span class="handle h2"></span><span class="handle h3"></span><span class="handle h4"></span>
+            <div class="snip-content"><div class="sw1"></div><div class="sw9"></div><div class="sw4"></div><div class="sw5"></div><div class="sw7"></div><div class="sw10"></div></div>
+          </div>
+          <div class="toolbar">
+            <button class="tool on"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 3l14 8-6 1-3 6z"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="14" rx="2"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18l5-12 5 12M6 14h6M14 6l3 3-9 9-3 1z"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20l4-1 10-10-3-3L5 16zM14 6l3 3"/></svg></button>
+            <span class="vsep"></span>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 10h.01M12 10h.01M16 10h.01M8 14h8" font-size="8"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M8 14q4 3 8 0M9 9h.01M15 9h.01"/></svg></button>
+            <button class="tool red"><span class="reddot"></span></button>
+            <button class="tool"><span class="lines"><i style="width:14px"></i><i style="width:10px"></i><i style="width:6px"></i></span></button>
+            <button class="tool"><span class="fillico"></span></button>
+            <span class="vsep"></span>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg></button>
+            <button class="btn-primary"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5H5v11h3"/></svg>复制<span class="caret">▾</span></button>
+          </div>
+          <div class="snip-hint">F1 选区 · Enter 进入标注 · Esc 取消 · Shift 切换 RGB/HEX</div>
+        </div>
+      </section>
+
+      <!-- 06 标注设计态 -->
+      <section class="screen" id="annot">
+        <div class="screen-cap"><span class="tag">06</span><b>改动点</b> 标注工具语义不变，段落分组更清楚；标注元素示意（箭头 / 矩形 / 马赛克 / 气泡）</div>
+        <div class="annot">
+          <div class="canvas">
+            <div class="arrow"></div><div class="rect"></div><div class="mosaic"></div>
+            <div class="note">这里改成新的取色入口 →</div>
+          </div>
+          <div class="toolbar">
+            <button class="tool on"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 3l14 8-6 1-3 6z"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="14" rx="2"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18l5-12 5 12M6 14h6"/></svg></button>
+            <span class="vsep"></span>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14v11H9l-4 3z"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M8 14q4 3 8 0"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5l16 14M20 5L4 19"/></svg></button>
+            <span class="vsep"></span>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg></button>
+            <button class="tool"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 7v6h-6"/></svg></button>
+            <button class="btn-primary"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>保存<span class="caret">▾</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 07 灵感板 -->
+      <section class="screen" id="board">
+        <div class="screen-cap"><span class="tag">07</span><b>改动点</b> 缩放控件去重（保留左下）；图层行高 32px；便签加描边与层次；空状态文案精简</div>
+        <div class="board">
+          <div class="board-top">
+            <span class="board-name">色彩灵感 · 春季</span><span class="board-count">8 张</span>
+            <div class="board-act">
+              <button title="粘贴"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 5V3h6v2"/></svg></button>
+              <button title="文字便签"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14M12 5v14"/></svg></button>
+              <button title="整理"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg></button>
+              <button class="on" title="图层"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg></button>
+              <span style="width:1px;height:16px;background:rgba(255,255,255,.14);margin:0 4px"></span>
+              <button title="关闭"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.7"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </div>
+          </div>
+          <div class="board-layers">
+            <h5><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg>图层</h5>
+            <div class="layer sel"><span class="ph sw1"></span>色卡 01<span class="top">顶</span></div>
+            <div class="layer"><span class="ph sw9"></span>Aa 文字海报</div>
+            <div class="layer"><span class="ph sw7"></span>截图 2026-11-21</div>
+            <div class="layer"><span class="ph" style="background:#f4efdc;display:grid;place-items:center;color:#2b2b34;font-family:Georgia,serif">T</span>配色说明（文字）</div>
+            <div class="layer"><span class="ph sw4"></span>色卡 04</div>
+          </div>
+          <div class="board-card sel" style="left:225px;top:80px;width:150px;height:150px"><div class="sw1" style="width:100%;height:100%"></div><span class="bh">色卡 01</span></div>
+          <div class="board-card" style="left:395px;top:110px;width:130px;height:160px"><div class="sw2" style="width:100%;height:100%"></div></div>
+          <div class="board-note" style="left:235px;top:255px;width:180px">暖色系 → 主视觉<br>冷色作点缀</div>
+          <div class="board-card" style="left:560px;top:90px;width:190px;height:120px"><div class="sw7" style="width:100%;height:100%"></div><span class="bh">MP4</span></div>
+          <div class="board-card" style="left:565px;top:230px;width:130px;height:130px"><div class="sw9" style="width:100%;height:100%;display:grid;place-items:center"><span style="font-family:Georgia,serif;font-size:44px;color:#2b2b34">Aa</span></div></div>
+          <div class="board-zoom"><button>−</button><span class="pct">100%</span><button>＋</button><button title="适应窗口"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button></div>
+        </div>
+      </section>
+
+      <!-- 08 设置：FontManager 双栏面板（左导航 186 + 右内容） -->
+      <section class="screen" id="settings">
+        <div class="screen-cap"><span class="tag">08</span><b>设置</b> 双栏：左导航 + 右分组卡片 + 底栏「即时生效」，面板 860×516、12px 圆角</div>
+        <div class="fm-settings" id="fmSettings">
+          <div class="set-panel2" id="setPanel">
+            <aside class="set-nav2">
+              <div class="t">设置</div>
+              <div class="set-search2"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input placeholder="搜索设置..."></div>
+              <div class="rows" id="setNav">
+                <button class="row sel" data-pane="general"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>通用</button>
+                <button class="row" data-pane="look"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v10H3z"/></svg>外观</button>
+                <button class="row" data-pane="lib"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg>素材库</button>
+                <button class="row" data-pane="data"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/></svg>库数据</button>
+                <button class="row" data-pane="about"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>更新与关于</button>
+              </div>
+            </aside>
+            <section class="set-main2">
+              <header class="set-head2"><h4 id="setTitle">通用</h4><button class="x" id="setClose" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+              <div class="set-body2" id="setBody">
+                <div class="set-pane" data-pane="general">
+                  <div class="set-sec2"><div class="ttl">语言</div>
+                    <div class="set-card">
+                      <div class="set-line"><div class="lab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>语言</div><button class="set-select">简体中文<span style="color:var(--t3)">▾</span></button></div>
+                    </div>
+                    <div class="set-note"><span>没有你的语言？</span><span style="display:flex;gap:6px"><button class="set-btn2">翻译帮助</button><button class="set-btn2">申请添加语言</button></span></div>
+                  </div>
+                  <div class="set-sec2"><div class="ttl">系统</div>
+                    <div class="set-card">
+                      <div class="set-line"><span>关闭到托盘</span><button class="fm-switch" role="switch" aria-checked="false"></button></div>
+                      <div class="set-line"><span>开机自动启动</span><button class="fm-switch" role="switch" aria-checked="false"></button></div>
+                      <div class="set-line"><span>启动时最小化</span><button class="fm-switch" role="switch" aria-checked="false"></button></div>
+                      <div class="set-line"><span>启动时恢复上次打开的素材库</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                      <div class="set-line"><span>速览快捷键</span><button class="set-select" style="font-family:ui-monospace,monospace;font-size:10px">Alt + `</button></div>
+                      <div class="set-line"><span>在完整界面按快捷键唤出速览</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="set-pane" data-pane="look" hidden>
+                  <div class="set-sec2"><div class="ttl">缩略图</div>
+                    <div class="set-card">
+                      <div class="set-line"><span>悬停显示文件名</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                      <div class="set-line"><span>显示自动标签</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                      <div class="set-line"><span>显示格式角标</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                    </div>
+                  </div>
+                  <div class="set-sec2"><div class="ttl">界面</div>
+                    <div class="set-card">
+                      <div class="set-line"><div><div>界面缩放</div><div class="mut">中文建议 100% 起</div></div><button class="set-select">100%<span style="color:var(--t3)">▾</span></button></div>
+                      <div class="set-line"><div><div>动态效果</div><div class="mut">减少时所有过渡压到 1ms</div></div><button class="set-select">正常<span style="color:var(--t3)">▾</span></button></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="set-pane" data-pane="lib" hidden>
+                  <div class="set-sec2"><div class="ttl">素材库</div>
+                    <div class="set-card">
+                      <div class="set-line"><div><div>缩略图格式</div><div class="mut">单格式 WebP，不改原文件</div></div><button class="set-select">WebP<span style="color:var(--t3)">▾</span></button></div>
+                      <div class="set-line"><div><div>库位置</div><div class="mut mono" style="font-size:10px">E:\Users\87557\文档\AssetManager\库</div></div><button class="set-btn2">打开文件夹</button></div>
+                      <div class="set-line"><span>监视文件夹变化</span><button class="fm-switch on" role="switch" aria-checked="true"></button></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="set-pane" data-pane="data" hidden>
+                  <div class="set-sec2"><div class="ttl">库数据</div>
+                    <div class="set-card">
+                      <div class="set-line"><div><div>索引数据库</div><div class="mut mono" style="font-size:10px">index.sqlite · 12.4 MB</div></div><button class="set-btn2">备份</button></div>
+                      <div class="set-line"><div><div>缩略图缓存</div><div class="mut mono" style="font-size:10px">thumbs · 1.8 GB</div></div><button class="set-btn2">清理</button></div>
+                      <div class="set-line"><span>重建索引</span><button class="set-btn2">开始重建</button></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="set-pane" data-pane="about" hidden>
+                  <div class="set-sec2"><div class="ttl">版本</div>
+                    <div class="set-card">
+                      <div class="set-line"><div><div>AssetManager</div><div class="mut mono" style="font-size:10px">0.4.2 · GPL-3.0</div></div><button class="set-btn2">检查更新</button></div>
+                      <div class="set-line"><span>查看快捷键</span><button class="set-btn2">打开</button></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <footer class="set-foot2"><span>所有改动即时生效，不需要点保存</span><button class="set-done" id="setDone">完成</button></footer>
+            </section>
+          </div>
+          <button class="set-reopen" id="setReopen">重新打开设置</button>
+        </div>
+      </section>
+
+      <!-- 09 关于：照搬 FontManager AboutView（图标 + 3×3 能力 + 技术栈 + 两列链接卡） -->
+      <section class="screen" id="about">
+        <div class="screen-cap"><span class="tag">09</span><b>关于</b> 居中单列 · 能力 3×3 · 技术栈描边胶囊 · 链接卡 12px 圆角 / 图标 40px</div>
+        <div class="about fm-about">
+          <div class="about-icon">◆</div>
+          <h3>AssetManager</h3><div class="ver mono">版本 0.4.2 · GPL-3.0</div>
+          <p class="lead">索引式素材管理器：只读你的文件夹、不搬动原始文件。找图、打标签、拼灵感板、拖进设计软件，都在一个窗口里完成。</p>
+          <div class="about-feat stagger">
+            <div style="--i:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7h6l2 2h10v10H3z"/></svg>索引式素材库：不搬动原文件</div>
+            <div style="--i:1"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>缩略图预热与惰性加载</div>
+            <div style="--i:2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 12l-8 8-8-8 8-8z"/></svg>标签：手动 + 自动 + 分组</div>
+            <div style="--i:3"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/></svg>评分 / 备注 / 来源 URL</div>
+            <div style="--i:4"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg>快照：记住你选中的那批</div>
+            <div style="--i:5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/></svg>灵感板：无限画布拼图</div>
+            <div style="--i:6"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>命令面板与全套快捷键</div>
+            <div style="--i:7"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3v18M3 12h18"/></svg>拖出即用：PS / 资源管理器</div>
+            <div style="--i:8"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg>本地优先，不上传任何文件</div>
+          </div>
+          <div class="about-stack"><span>Tauri v2</span><span>Rust</span><span>React 18</span><span>TypeScript</span><span>Vite</span><span>SQLite</span></div>
+          <div class="about-section-title">本项目文档</div>
+          <div class="about-links">
+            <button class="about-link"><span class="li"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4M9 13h6M9 17h6"/></svg></span><span class="lb">项目说明</span><span class="ar">↗</span><span class="ls">docs/AssetManager-项目说明.md</span></button>
+            <button class="about-link"><span class="li"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16v14H4zM8 9h8M8 13h8M8 17h5"/></svg></span><span class="lb">全界面重设计方案</span><span class="ar">↗</span><span class="ls">docs/AssetManager-全界面重设计方案-2026-11-21.md</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 10 快捷键 -->
+      <section class="screen" id="keys">
+        <div class="screen-cap"><span class="tag">10</span><b>改动点</b> 双栏保留；组标题改用 accent 小字 + 左竖条；hint 灰字 10px；键帽统一</div>
+        <div class="kb">
+          <div class="kb-head"><h3>快捷键</h3><span class="x">Esc</span></div>
+          <div class="kb-body">
+            <div class="kb-col">
+              <div class="kb-group"><h4>浏览与预览</h4>
+                <div class="kb-row"><span class="kb-label">打开大图预览</span><span class="kbd"><kbd>Space</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">贴图<span class="hint">只剩图像，可拖到任意位置</span></span><span class="kbd"><kbd>B</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">上一张 / 下一张<span class="hint">大图翻页，网格换选中</span></span><span class="kbd"><kbd>←</kbd><kbd>→</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">大图缩放（1×–8×）</span><span class="kbd"><kbd>滚轮</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">大图缩放复位 1:1</span><span class="kbd"><kbd>双击</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">关大图 / 关贴图 / 关浮层</span><span class="kbd"><kbd>Esc</kbd></span></div>
+              </div>
+              <div class="kb-group"><h4>选择</h4>
+                <div class="kb-row"><span class="kb-label">加选 / 取消这一项</span><span class="kbd"><kbd>Ctrl</kbd><kbd>点击</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">从上一个到这一个连选</span><span class="kbd"><kbd>Shift</kbd><kbd>点击</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">框选</span><span class="kbd"><kbd>空白处拖动</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">全选当前列表</span><span class="kbd"><kbd>Ctrl</kbd><kbd>A</kbd></span></div>
+              </div>
+            </div>
+            <div class="kb-col">
+              <div class="kb-group"><h4>文件</h4>
+                <div class="kb-row"><span class="kb-label">拖出窗口<span class="hint">拖给 PS / 浏览器 = 复制</span></span><span class="kbd"><kbd>拖出</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">复制原文件<span class="hint">CF_HDROP，粘出来是文件</span></span><span class="kbd"><kbd>Ctrl</kbd><kbd>C</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">撤销上一步文件操作</span><span class="kbd"><kbd>Ctrl</kbd><kbd>Z</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">给选中的素材打标签</span><span class="kbd"><kbd>T</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">原来的右键菜单</span><span class="kbd"><kbd>Shift</kbd><kbd>右键</kbd></span></div>
+              </div>
+              <div class="kb-group"><h4>截图 · 贴图（系统级）</h4>
+                <div class="kb-row"><span class="kb-label">选区截图<span class="hint">松手进标注态</span></span><span class="kbd"><kbd>F1</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">贴剪贴板图</span><span class="kbd"><kbd>F3</kbd></span></div>
+              </div>
+              <div class="kb-group"><h4>截图标注</h4>
+                <div class="kb-row"><span class="kb-label">复制到剪贴板</span><span class="kbd"><kbd>Ctrl</kbd><kbd>C</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">保存到截图库</span><span class="kbd"><kbd>Ctrl</kbd><kbd>S</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">矩形 / 椭圆 / 直线 / 箭头</span><span class="kbd"><kbd>R</kbd><kbd>E</kbd><kbd>L</kbd><kbd>A</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">画笔 / 荧光笔</span><span class="kbd"><kbd>P</kbd><kbd>H</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">马赛克 / 模糊 / 色块</span><span class="kbd"><kbd>M</kbd><kbd>B</kbd><kbd>G</kbd></span></div>
+                <div class="kb-row"><span class="kb-label">文字 / 序号 / 引线气泡</span><span class="kbd"><kbd>T</kbd><kbd>N</kbd><kbd>K</kbd></span></div>
+              </div>
+            </div>
+          </div>
+          <div class="kb-foot">拖出去 / 移走的永远是磁盘上的原文件；缩略图只负责显示。</div>
+        </div>
+      </section>
+
+      <!-- 11 命令面板：FontManager 复刻 -->
+      <section class="screen" id="cmd">
+        <div class="screen-cap"><span class="tag">11</span><b>命令面板</b> 560px · 12px 圆角 · 9px 等宽标签 · 选中浅灰底 · Ctrl K 胶囊</div>
+        <div class="cmd2" id="cmdOverlay">
+          <div class="pal2" id="cmdPanel">
+            <div class="pal-input2">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+              <input id="cmdInput" placeholder="搜索命令、素材库、标签..." autocomplete="off">
+              <span class="kbdhint">Ctrl K</span>
+            </div>
+            <ul class="pal-list2" id="cmdList">
+              <li><button class="pal-item2 on" data-label="前往素材库"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg><span>前往素材库</span></button></li>
+              <li><button class="pal-item2" data-label="前往收藏"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3l2.5 5.5L20 9l-4 4 1 6-5-3-5 3 1-6-4-4 5.5-.5z"/></svg><span>前往收藏</span></button></li>
+              <li><button class="pal-item2" data-label="转到最近导入"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>转到最近导入</span></button></li>
+              <li><button class="pal-item2" data-label="打开回收站"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg><span>打开回收站</span></button></li>
+              <li><button class="pal-item2" data-label="切换网格视图"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg><span>切换网格视图</span></button></li>
+              <li><button class="pal-item2" data-label="切换瀑布流"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="6" height="10"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="16" width="6" height="4"/><rect x="14" y="12" width="6" height="8"/></svg><span>切换瀑布流</span></button></li>
+              <li><button class="pal-item2" data-label="新建快照"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/></svg><span>新建快照</span></button></li>
+              <li><button class="pal-item2" data-label="关于 AssetManager"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span>关于 AssetManager</span></button></li>
+              <li><button class="pal-item2" data-label="打开设置"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.4 2.6a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L5.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.6h5l.4-2.6a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/></svg><span>打开设置</span></button></li>
+              <li><button class="pal-item2" data-label="快捷键"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg><span>快捷键</span></button></li>
+            </ul>
+            <div class="pal-empty2" id="cmdEmpty" hidden>没有匹配的命令</div>
+          </div>
+          <button class="cmd-reopen" id="cmdReopen">重新打开命令面板</button>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+// 界面切换
+var items = document.querySelectorAll('.nav-item');
+var screens = document.querySelectorAll('.screen');
+var title = document.getElementById('screenTitle');
+var desc = document.getElementById('screenDesc');
+var meta = {
+  grid:['主窗口 · 网格视图','AssetManager 真机结构：标题栏 / 搜索 / 尺寸 / 颜色 / 筛选 / 9 列方形缩略图，只把配色换成纸墨 + 蓝。'],
+  waterfall:['主窗口 · 瀑布流','AssetManager 真机结构：同一套顶栏，4 列瀑布流不裁切，右下角保留格式角标。'],
+  trash:['回收站','AssetManager 真机表格：缩略图 + 文件名/路径 + 大小 + 时间 + 还原/还原到/彻底删除，只换配色。'],
+  ctx:['右键菜单','208px 宽 / 30px 行高保持；图标槽对齐、快捷键弱化、危险项淡红底。'],
+  snip:['截图选区界面','选区尺寸读数改等宽深底胶囊；工具栏按「选择 / 标注 / 操作」三段分隔。'],
+  annot:['截图标注 / 设计态','工具语义不变，段落分组更清楚；示意箭头、矩形、马赛克与气泡标注。'],
+  board:['灵感板','缩放控件去重（保留左下）；图层行高 32px；便签加描边与层次。'],
+  settings:['设置','FontManager 双栏：186px 左导航 + 右分组卡片 + 底栏「即时生效」；面板 860×516、12px 圆角。'],
+  about:['关于','照搬 FontManager：72px 图标、3×3 能力区、描边技术栈胶囊、两列 12px 链接卡。'],
+  keys:['快捷键','双栏保留、所有键位不变；组标题 accent 小字 + 左竖条，hint 灰字 10px。'],
+  cmd:['命令面板','FontManager 复刻：560px、12px 圆角、9px 等宽命令名、选中浅灰底、Ctrl K 胶囊、上下键切换。']
+};
+items.forEach(function(btn){
+  btn.addEventListener('click',function(){
+    items.forEach(function(b){b.classList.remove('on')});
+    screens.forEach(function(s){s.classList.remove('on')});
+    btn.classList.add('on');
+    var id=btn.getAttribute('data-screen');
+    document.getElementById(id).classList.add('on');
+    title.textContent=meta[id][0];
+    desc.textContent=meta[id][1];
+  });
+});
+// 主题切换
+var tb=document.querySelectorAll('.theme-switch button');
+tb.forEach(function(b){
+  b.addEventListener('click',function(){
+    tb.forEach(function(x){x.classList.remove('on')});
+    b.classList.add('on');
+    document.body.setAttribute('data-theme',b.getAttribute('data-theme'));
+  });
+});
+
+// ===== 左栏：默认隐藏，悬停左缘或左上角 logo 才展开 =====
+var gridScreen=document.getElementById('grid');
+var win=gridScreen.querySelector('.win');
+var hot=document.getElementById('rail-hot');
+var side=document.getElementById('side-float');
+var brand=win.querySelector('.brand');
+var closeTimer=null;
+function openSide(){clearTimeout(closeTimer);win.classList.add('rail-open')}
+function closeSide(){clearTimeout(closeTimer);closeTimer=setTimeout(function(){win.classList.remove('rail-open')},320)}
+hot.addEventListener('mouseenter',openSide);
+hot.addEventListener('mouseleave',closeSide);
+side.addEventListener('mouseenter',openSide);
+side.addEventListener('mouseleave',closeSide);
+brand.addEventListener('mouseenter',openSide);
+brand.addEventListener('mouseleave',closeSide);
+
+// ===== 详情：右键素材 → 在鼠标旁渐入浮层 =====
+var detail=document.getElementById('detail-float');
+var content=document.getElementById('grid-content');
+content.addEventListener('contextmenu',function(e){
+  var tile=e.target.closest('.thumb');
+  if(!tile)return;
+  e.preventDefault();
+  var cr=content.getBoundingClientRect();
+  var x=e.clientX-cr.left+14;
+  var y=e.clientY-cr.top+10;
+  // 贴边翻转：保证浮层不出内容区
+  var dw=380, dh=detail.offsetHeight||460;
+  if(x+dw>cr.width-8)x=e.clientX-cr.left-dw-14;
+  if(x<6)x=6;
+  if(y+dh>cr.height-8)y=Math.max(6,cr.height-dh-8);
+  detail.style.left=x+'px';
+  detail.style.top=y+'px';
+  detail.classList.add('show');
+});
+// 切换素材时更新浮层内容（机械替换文字，不动结构）
+var tileMeta=[
+  ['JPG','R-C.jpg','1280 × 1368','411 KB','JPG','2023-02-09 09:31','桌面上的新建文件夹 (4)'],
+  ['PNG','色卡研究 03.png','1600 × 2400','1.2 MB','PNG','2026-11-19 16:40','新建文件夹 (4)'],
+  ['WEBP','色彩灵感 12.webp','1898 × 1366','564 KB','WEBP','2026-11-21 16:19','截图']
+];
+document.querySelectorAll('#grid-tiles .thumb').forEach(function(t,i){
+  t.addEventListener('contextmenu',function(){
+    var m=tileMeta[i%tileMeta.length];
+    detail.querySelector('.fmt').textContent=m[0];
+    detail.querySelector('.nm').textContent=m[1];
+    detail.querySelector('.detail-name').textContent=m[1];
+    detail.querySelectorAll('.kv .mono')[0].textContent=m[2];
+    detail.querySelectorAll('.kv .mono')[1].textContent=m[3];
+    var kvs=detail.querySelectorAll('.dsec:last-child .kv');
+    kvs[0].querySelector('span:last-child').textContent=m[4];
+    kvs[1].querySelector('span:last-child').textContent=m[2];
+    kvs[2].querySelector('span:last-child').textContent=m[3];
+    kvs[3].querySelector('span:last-child').textContent=m[5];
+    kvs[5].querySelector('span:last-child').textContent=m[6];
+  });
+});
+// 点空白处关闭详情浮层
+content.addEventListener('mousedown',function(e){
+  if(!e.target.closest('.detail')&&!e.target.closest('.thumb'))detail.classList.remove('show');
+});
+
+// ===== 回收站按钮手感演示：恢复 / 删除 / 清空（仅预览动画） =====
+var trashList=document.getElementById('trashList');
+if(trashList){
+  function removeRow(row){
+    row.classList.remove('stagger');
+    row.classList.add('removing');
+    setTimeout(function(){
+      row.remove();
+      var n=document.querySelectorAll('#trashList .trash-row').length;
+      var bar=document.querySelector('.trash-bar .mono');
+      if(bar)bar.textContent=n;
+      if(n===0){
+        trashList.innerHTML='<div class="trash-empty"><span class="tile"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></span><h3>回收站是空的</h3><p>移到回收站的素材会暂时留在这里，直到你恢复或彻底删除。</p></div>';
+      }
+    },180);
+  }
+  trashList.addEventListener('click',function(e){
+    var btn=e.target.closest('.trash-action');
+    if(btn)removeRow(btn.closest('.trash-row'));
+  });
+  var emptyBtn=document.getElementById('emptyTrash');
+  if(emptyBtn)emptyBtn.addEventListener('click',function(){
+    document.querySelectorAll('#trashList .trash-row').forEach(function(r,i){
+      setTimeout(function(){removeRow(r)},i*40);
+    });
+  });
+}
+
+
+// ===== 设置：左导航切页 / 开关 / 关闭重开 =====
+(function(){
+  var nav=document.getElementById('setNav');
+  if(!nav)return;
+  var title=document.getElementById('setTitle');
+  var panes=document.querySelectorAll('#setBody .set-pane');
+  nav.addEventListener('click',function(e){
+    var row=e.target.closest('.row'); if(!row)return;
+    nav.querySelectorAll('.row').forEach(function(r){r.classList.remove('sel')});
+    row.classList.add('sel');
+    var key=row.getAttribute('data-pane');
+    title.textContent=row.textContent.trim();
+    panes.forEach(function(p){p.hidden=p.getAttribute('data-pane')!==key});
+    var body=document.getElementById('setBody'); body.scrollTop=0;
+  });
+  document.querySelectorAll('#fmSettings .fm-switch').forEach(function(sw){
+    sw.addEventListener('click',function(){
+      var on=sw.classList.toggle('on');
+      sw.setAttribute('aria-checked',on?'true':'false');
+    });
+  });
+  var wrap=document.getElementById('fmSettings'), panel=document.getElementById('setPanel');
+  function close(){
+    panel.classList.add('closing');
+    setTimeout(function(){wrap.classList.add('closed');panel.classList.remove('closing')},180);
+  }
+  document.getElementById('setClose').addEventListener('click',close);
+  document.getElementById('setDone').addEventListener('click',close);
+  document.getElementById('setReopen').addEventListener('click',function(){
+    wrap.classList.remove('closed');panel.classList.remove('closing');
+    panel.style.animation='none';panel.offsetHeight;panel.style.animation='';
+  });
+})();
+
+// ===== 命令面板：输入过滤 / 上下键 / Esc 关闭 =====
+(function(){
+  var overlay=document.getElementById('cmdOverlay'); if(!overlay)return;
+  var input=document.getElementById('cmdInput');
+  var list=document.getElementById('cmdList');
+  var empty=document.getElementById('cmdEmpty');
+  var items=Array.prototype.slice.call(list.querySelectorAll('.pal-item2'));
+  var cursor=0;
+  function visible(){return items.filter(function(b){return b.parentNode.style.display!=='none'})}
+  function paint(){
+    items.forEach(function(b){b.classList.remove('on')});
+    var v=visible(); if(v[cursor])v[cursor].classList.add('on');
+  }
+  function filter(){
+    var q=input.value.trim().toLowerCase();
+    items.forEach(function(b){
+      var hit=!q||b.getAttribute('data-label').toLowerCase().includes(q);
+      b.parentNode.style.display=hit?'':'none';
+    });
+    var v=visible(); empty.hidden=v.length>0; cursor=0; paint();
+  }
+  input.addEventListener('input',filter);
+  input.addEventListener('keydown',function(e){
+    var v=visible();
+    if(e.key==='ArrowDown'){e.preventDefault();cursor=Math.min(cursor+1,v.length-1);paint()}
+    if(e.key==='ArrowUp'){e.preventDefault();cursor=Math.max(cursor-1,0);paint()}
+    if(e.key==='Escape'){e.preventDefault();close()}
+  });
+  list.addEventListener('mousemove',function(e){
+    var b=e.target.closest('.pal-item2'); if(!b)return;
+    var v=visible(); cursor=v.indexOf(b); paint();
+  });
+  function close(){
+    var panel=document.getElementById('cmdPanel');
+    panel.classList.add('closing');
+    setTimeout(function(){overlay.classList.add('closed');panel.classList.remove('closing')},130);
+  }
+  document.getElementById('cmdReopen').addEventListener('click',function(){
+    overlay.classList.remove('closed');
+    var panel=document.getElementById('cmdPanel'); panel.classList.remove('closing');
+    panel.style.animation='none';panel.offsetHeight;panel.style.animation='';
+    input.value='';filter();input.focus();
+  });
+  input.focus();
+})();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AssetManager</title>
+    <!--
+      托盘自绘菜单（右键托盘图标弹出）：独立轻量页，与 splash.html 同一路数 ——
+      不引 React、不引 app.css / tokens.css、不引任何 CSS 框架，样式全部内联。
+      窗口由 Rust 侧（main.rs 的 build_tray_menu_window）建：透明无边框、置顶、
+      不占任务栏、失焦即藏；尺寸与位置也在 Rust 侧按图标矩形算好。
+
+      ⚠️ 这页**绝不**加载 index.html / 主 React 应用：那会把整个素材库前端再跑一遍，
+      双份事件监听 + 双份查询。本页只 invoke 命令，显示时机由 Rust 直接 eval
+      `window.__trayShow()`（窗口没有接 event 权限，也不必要）。
+
+      ── 结构 ──
+      #trm 是**透明壳**（inset 0，无底色），里面两张同款卡片：
+      - .trm-main 主卡片：打开主界面 / 打开设置 / [切换素材库 ▸] / 切换主题 ▸ /
+        检查更新 / 分隔线 / 退出软件（右侧带版本号）；
+      - .trm-sub 二级面板：同款卡片风格的小列表（纯文字行 + ✓ 前缀），
+        默认 display:none，开在主卡片左侧（主卡片贴屏幕左缘时开右侧，
+        方向由 Rust 的 tray_menu_sub 判定并返回，JS 据此给 #trm 挂
+        sub-left / sub-right 类）。
+
+      ── 视觉基调（照 FontManager）──
+      白/深色不透明实底卡片、圆角 10px、四周 10px 透明圈、轻落影；
+      行是纯文字、行高 40、文字距卡缘 20px、字号 14；hover 是淡灰圆角短条
+      （左右 inset 8px、圆角 6px）；选中态 = 行首 ✓ 前缀（未选中留等宽空位）。
+
+      ── 尺寸与 main.rs 的常量一一对应（改哪边都要同步另一边）──
+      窗口宽 = TRAY_MENU_W = 292（卡片 272 + 两侧透明圈 10×2）；
+      二级展开时窗口加宽一个半区（292 → 584）。
+      行高：普通行 / 子选项 40；分隔线 11（1px + 上下 5px）；
+      窗口上下透明圈合计 20（10px × 2）。主菜单高度由 Rust 按行数算
+      （tray_menu_height），二级高度按 tray_menu_sub_height 算 —— 这里 CSS 改了
+      行高而那边没改，菜单就会被裁掉一截或底部留一块挡点击的透明死区。
+
+      ── 主题 ── 四段按「系统 → 用户强制」叠：:root 深色 → @media 浅色 →
+      [data-theme] 强制。颜色数值照 tokens.css 抄（独立页引不了），
+      用户偏好由 tray.ts 从 localStorage 的 `am.prefs.v1` 读出来落成属性。
+
+      ── 文案 ── 不进 src/locales 的 i18n key 体系（独立页不参与 i18n:check），
+      九语表写在 src/tray.ts 顶部的 L10N 常量里。
+    -->
+    <style>
+      /* ── 深色（默认）：:root 上就是深色值，跟 tokens.css 的 :root 段逐条对应 ── */
+      :root {
+        color-scheme: dark;
+        --ink-rgb: 255, 255, 255;
+        --text-primary: #e8e8e8;
+        --text-secondary: rgba(232, 232, 232, 0.6);
+        --text-tertiary: rgba(232, 232, 232, 0.4);
+        --e2: rgba(255, 255, 255, 0.07);
+        --shadow-ambient: 0 24px 48px rgba(0, 0, 0, 0.25);
+        --shadow-mass: 0 6px 12px rgba(0, 0, 0, 0.3);
+        --trm-surface: #1b1b1b;
+      }
+
+      /* ── 跟系统：与 App.tsx 的 system 档同一条判据（prefers-color-scheme） ── */
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --ink-rgb: 22, 22, 32;
+          --text-primary: #1c1c24;
+          --text-secondary: rgba(28, 28, 38, 0.62);
+          --text-tertiary: rgba(28, 28, 38, 0.44);
+          --e2: rgba(22, 22, 32, 0.07);
+          --shadow-ambient: 0 24px 48px rgba(30, 30, 55, 0.08);
+          --shadow-mass: 0 6px 12px rgba(30, 30, 55, 0.08);
+          --trm-surface: #ffffff;
+        }
+      }
+
+      /* ── 用户强制：属性选择器必须排在 @media 之后，「用户选的」永远压过「系统的」 ── */
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --ink-rgb: 255, 255, 255;
+        --text-primary: #e8e8e8;
+        --text-secondary: rgba(232, 232, 232, 0.6);
+        --text-tertiary: rgba(232, 232, 232, 0.4);
+        --e2: rgba(255, 255, 255, 0.07);
+        --shadow-ambient: 0 24px 48px rgba(0, 0, 0, 0.25);
+        --shadow-mass: 0 6px 12px rgba(0, 0, 0, 0.3);
+        --trm-surface: #1b1b1b;
+      }
+
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --ink-rgb: 22, 22, 32;
+        --text-primary: #1c1c24;
+        --text-secondary: rgba(28, 28, 38, 0.62);
+        --text-tertiary: rgba(28, 28, 38, 0.44);
+        --e2: rgba(22, 22, 32, 0.07);
+        --shadow-ambient: 0 24px 48px rgba(30, 30, 55, 0.08);
+        --shadow-mass: 0 6px 12px rgba(30, 30, 55, 0.08);
+        --trm-surface: #ffffff;
+      }
+
+      :root {
+        --t-micro: 100ms;
+        --t-quick: 180ms;
+        --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        /* 窗口本身是 transparent:true：背景必须留空，透明圈/圆角才不会被黑底吃掉 */
+        background: transparent;
+        overflow: hidden;
+        cursor: default;
+        color: var(--text-primary);
+        font-family: "Inter Variable", "Inter", system-ui, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC",
+          "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      /* #trm 只是透明壳：两张卡片绝对定位在其中；指针离开壳 = 离开主卡与子面板两者 */
+      #trm {
+        position: absolute;
+        inset: 0;
+      }
+
+      /* 卡片：不透明实底（透明窗口里 backdrop-filter 没有东西可 blur，整卡会看穿） */
+      .trm-card {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        width: calc(100% - 20px);
+        display: flex;
+        flex-direction: column;
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--trm-surface);
+        box-shadow:
+          var(--shadow-mass),
+          var(--shadow-ambient);
+      }
+
+      /* 二级展开：窗口加宽一倍，两卡各占一半；面板在左（sub-left）时主卡靠右 */
+      #trm.sub-left .trm-card,
+      #trm.sub-right .trm-card {
+        width: calc(50% - 20px);
+      }
+
+      #trm.sub-left .trm-main {
+        left: auto;
+        right: 10px;
+      }
+
+      .trm-sub {
+        display: none;
+      }
+
+      #trm.sub-left .trm-sub {
+        display: flex;
+        left: 10px;
+        right: auto;
+      }
+
+      #trm.sub-right .trm-sub {
+        display: flex;
+        left: auto;
+        right: 10px;
+      }
+
+      /* 弹层入场：窗口复用，动画由 tray.ts 在每次 __trayShow 时重放（两张卡一起放） */
+      .trm-card.in {
+        animation: trm-in var(--t-quick) var(--ease-out);
+      }
+
+      @keyframes trm-in {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .trm-card.in {
+          animation: none;
+        }
+        :root {
+          --t-micro: 1ms;
+          --t-quick: 1ms;
+        }
+      }
+
+      /* 行：纯文字、左对齐、无图标；hover 是圆角短条（左右 inset 8px）。
+         行高锁 40 —— main.rs 的 tray_menu_height / tray_menu_sub_height
+         按它算窗口高度，别改成 auto。 */
+      .trm-item,
+      .trm-opt {
+        display: flex;
+        align-items: center;
+        width: calc(100% - 16px);
+        margin: 0 8px;
+        height: 40px;
+        flex: none;
+        padding: 0 12px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        font: inherit;
+        font-size: 14px;
+        color: var(--text-secondary);
+        text-align: left;
+        cursor: pointer;
+        transition: background var(--t-micro) ease, color var(--t-micro) ease;
+      }
+
+      .trm-item:hover,
+      .trm-opt:hover {
+        background: var(--e2);
+        color: var(--text-primary);
+      }
+
+      .trm-label,
+      .trm-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* 二级父项右侧的 ▸ 箭头：淡色小字，不抢文字 */
+      .trm-arrow {
+        flex: none;
+        margin-left: 12px;
+        font-size: 12px;
+        color: var(--text-tertiary);
+      }
+
+      /* 「退出软件」右侧的版本号（副标题口径：弱色、不占行高） */
+      .trm-ver {
+        flex: none;
+        margin-left: 12px;
+        font-size: 11px;
+        color: var(--text-tertiary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .trm-item:disabled {
+        cursor: default;
+        opacity: 0.4;
+      }
+
+      .trm-item:disabled:hover {
+        background: transparent;
+        color: var(--text-secondary);
+      }
+
+      /* 选中态：行首 ✓ 前缀；未选中的行留出等宽空位，所有行文字起点对齐 */
+      .trm-check {
+        flex: none;
+        width: 14px;
+        margin-right: 8px;
+        font-size: 13px;
+        line-height: 1;
+        color: var(--text-primary);
+        text-align: center;
+      }
+
+      /* 库目录尾段提示（多个库同名时靠它分辨） */
+      .trm-dir {
+        flex: none;
+        max-width: 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+        color: var(--text-tertiary);
+      }
+
+      /* 分隔线：主菜单唯一一条，在「退出软件」之前；总高 11 = 1px 线 + 上下 5px */
+      .trm-sep {
+        width: calc(100% - 16px);
+        height: 1px;
+        flex: none;
+        margin: 5px 8px;
+        background: rgba(var(--ink-rgb), 0.07);
+      }
+
+      /* 检查更新的结果态：结果直接写在这一项的标签上（不弹设置页） */
+      .trm-item.trm-update-busy,
+      .trm-item.trm-update-failed {
+        color: var(--text-tertiary);
+      }
+
+      .trm-item.trm-update-found {
+        color: var(--text-primary);
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- 结构由 src/tray.ts 渲染：#trm 是透明壳，内含主卡片与二级面板两张卡。 -->
+    <div id="trm"></div>
+    <script type="module" src="/src/tray.ts"></script>
+  </body>
+</html>

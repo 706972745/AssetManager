@@ -216,15 +216,17 @@ export function Settings({
           [next.toggle, "peek_toggle"],
         ]);
         if (failed.length) {
-          onToast(`这些组合被别的软件占了：${failed.join("、")}`, true);
+          onToast(t("settings.toast.hotkeysTaken", { keys: failed.join(t("app.common.list_sep")) }), true);
         } else {
-          onToast(accel ? `已改为 ${accel}` : "已清空（这个功能暂时没有快捷键）");
+          onToast(
+            accel ? t("settings.toast.hotkeySet", { accel }) : t("settings.toast.hotkeyCleared")
+          );
         }
       } catch (e) {
         onToast(String(e), true);
       }
     },
-    [hotkeys, onToast]
+    [hotkeys, onToast, t]
   );
 
   /** 重建索引是重操作（几万文件要十几秒），点一次先变成"再点一次确认" */
@@ -295,13 +297,13 @@ export function Settings({
       try {
         const r = await source.exportLibraryZip(root);
         if (!r) return; // 用户在选文件夹那一步点了取消
-        const names = r.parts.map((p) => p.name).join("、");
+        const names = r.parts.map((p) => p.name).join(t("app.common.list_sep"));
         const notes: string[] = [];
-        if (r.parts.length > 1) notes.push(`分 ${r.parts.length} 个包`);
-        if (r.skipped > 0) notes.push(`${r.skipped} 张文件不在原位，没进包`);
-        if (r.oversized > 0) notes.push(`${r.oversized} 个文件单个就超过单包上限`);
+        if (r.parts.length > 1) notes.push(t("app.toast.zip_parts", { count: r.parts.length }));
+        if (r.skipped > 0) notes.push(t("settings.toast.zipSkipped", { count: r.skipped }));
+        if (r.oversized > 0) notes.push(t("app.toast.zip_oversized", { count: r.oversized }));
         onToast(
-          `已导出 ${r.files} 张 → ${names}`,
+          t("app.toast.zip_exported", { count: r.files, names }),
           r.skipped > 0 || r.oversized > 0,
           notes.join(" · ") || undefined
         );
@@ -311,7 +313,7 @@ export function Settings({
         setBusy(false);
       }
     },
-    [source, onToast]
+    [source, onToast, t]
   );
 
   /** 导出**一个库**的用户数据（0.4.5：`<库名>-userdata-<时间戳>.D-AssetManager`）。
@@ -321,18 +323,18 @@ export function Settings({
       setBusy(true);
       try {
         const p = await source.exportUserdata(root);
-        onToast("已导出这个库的用户数据", false, p);
+        onToast(t("settings.toast.userdataExported"), false, p);
       } catch (e) {
         onToast(String(e), true);
       } finally {
         setBusy(false);
       }
     },
-    [source, onToast]
+    [source, onToast, t]
   );
 
   const groups = useMemo<
-    { key: SettingsKey; title: string; tk: TKey; rows: RowDef[] }[]
+    { key: SettingsKey; tk: TKey; rows: RowDef[] }[]
   >(() => {
     const seg = (value: number | string, options: { v: number | string; label: string }[], on: (v: any) => void) => (
       <div className="seg">
@@ -365,14 +367,13 @@ export function Settings({
          九种语言 + 跟随系统；缺翻译自动回落英文（见 lib/i18n.ts）。 */
       {
         key: "general",
-        title: "语言",
         tk: "lang.title",
         rows: [
           {
             id: "language",
-            label: "语言",
-            hint: "立即生效；下次启动也保持",
-            kw: "语言 language locale 中文 English 繁體 日本語 Deutsch Español Français Русский Português",
+            label: t("lang.label"),
+            hint: t("settings.langHint"),
+            kw: t("settings.kw.language"),
             node: (
               <LangSelect
                 value={localePref}
@@ -389,10 +390,10 @@ export function Settings({
             id: "language-missing",
             label: "",
             block: true,
-            kw: "翻译 贡献 语言 translate contribute",
+            kw: t("settings.kw.translate"),
             node: (
               <div className="set-lang-miss">
-                <div className="set-lang-miss-title">没有你的语言？</div>
+                <div className="set-lang-miss-title">{t("lang.missing")}</div>
                 <div className="set-lang-miss-actions">
                   <button
                     className="btn btn-tiny"
@@ -402,7 +403,7 @@ export function Settings({
                         .catch((e) => onToast(String(e), true))
                     }
                   >
-                    翻译指南
+                    {t("lang.guide")}
                   </button>
                   <button
                     className="btn btn-tiny"
@@ -412,7 +413,7 @@ export function Settings({
                         .catch((e) => onToast(String(e), true))
                     }
                   >
-                    申请添加语言
+                    {t("lang.request")}
                   </button>
                 </div>
               </div>
@@ -423,28 +424,29 @@ export function Settings({
       /* ---- 系统：关闭到托盘 / 开机自启 / 启动时最小化 ---- */
       {
         key: "general",
-        title: "系统",
         tk: "sys.title",
         rows: [
           {
             id: "closeToTray",
-            label: "点叉号时收进托盘",
-            hint: "开：叉号只把窗口收进托盘小图标，程序在后台继续跑，点图标就回来；关：叉号直接退出程序",
-            kw: "托盘 tray 最小化 关闭 退出 后台 叉号",
+            label: t("settings.closeToTray"),
+            hint: t("settings.closeToTrayHint"),
+            kw: t("settings.kw.closeTray"),
             node: sw(draft.closeToTray, () => patch({ closeToTray: !draft.closeToTray })),
           },
           {
             id: "autostart",
-            label: "开机自动启动",
-            hint: "登录 Windows 后自动打开（可在任务管理器「启动」里关掉）",
-            kw: "开机 自启 启动 autostart 登录",
+            label: t("sys.autostart"),
+            hint: t("sys.autostartHint"),
+            kw: t("settings.kw.autostart"),
             node: sw(!!autoStart, () => {
               const next = !autoStart;
               /* 乐观更新：注册表写入通常几毫秒，但失败要退回去并说清楚 */
               setAutoStart(next);
               void source
                 .setAutostart(next)
-                .then(() => onToast(next ? "已开启开机自动启动" : "已关闭开机自动启动"))
+                .then(() =>
+                  onToast(next ? t("settings.toast.autostartOn") : t("settings.toast.autostartOff"))
+                )
                 .catch((e) => {
                   setAutoStart(!next);
                   onToast(String(e), true);
@@ -453,37 +455,36 @@ export function Settings({
           },
           {
             id: "startMinimized",
-            label: "启动时最小化",
-            hint: "启动后直接待在托盘里，不弹窗口",
-            kw: "启动 最小化 托盘 不弹窗",
+            label: t("sys.startMinimized"),
+            hint: t("sys.startMinimizedHint"),
+            kw: t("settings.kw.startMinimized"),
             node: sw(draft.startMinimized, () => patch({ startMinimized: !draft.startMinimized })),
           },
         ],
       },
       {
         key: "general",
-        title: "通用",
         tk: "nav.general",
         rows: [
           {
             id: "size",
-            label: "默认缩略图尺寸",
-            hint: "启动时用它；顶栏滑杆只改当前这一次",
-            kw: "缩略图 尺寸 大小 格宽",
+            label: t("settings.defaultSize"),
+            hint: t("settings.defaultSizeHint"),
+            kw: t("settings.kw.size"),
             node: seg(draft.size, [
-              { v: 0, label: "小" },
-              { v: 1, label: "中" },
-              { v: 2, label: "大" },
+              { v: 0, label: t("topbar.size_small") },
+              { v: 1, label: t("topbar.size_medium") },
+              { v: 2, label: t("topbar.size_large") },
             ], (v) => patch({ size: v as number })),
           },
           {
             id: "view",
-            label: "默认视图",
-            hint: "网格 / 瀑布流",
-            kw: "视图 网格 瀑布流",
+            label: t("settings.defaultView"),
+            hint: t("settings.defaultViewHint"),
+            kw: t("settings.kw.view"),
             node: seg(draft.view, [
-              { v: "grid", label: "网格" },
-              { v: "waterfall", label: "瀑布流" },
+              { v: "grid", label: t("settings.viewGrid") },
+              { v: "waterfall", label: t("settings.viewWaterfall") },
             ], (v) => patch({ view: v as Prefs["view"] })),
           },
         ],
@@ -493,14 +494,13 @@ export function Settings({
            放在这里的原因见 LibraryCard 顶部注释：用户找不到侧栏那个 +，
            来设置里找「库地址」，找不到就会把「数据文件夹」当素材库设。 */
         key: "libs",
-        title: "素材库",
         tk: "nav.libs",
         rows: [
           {
             id: "library",
-            label: "素材库",
+            label: t("nav.libs"),
             block: true,
-            kw: "素材库 库地址 文件夹 添加 移除 路径 library root folder",
+            kw: t("settings.kw.library"),
             node: (
               <LibraryCard
                 source={source}
@@ -514,35 +514,34 @@ export function Settings({
       },
       {
         key: "appearance",
-        title: "外观",
         tk: "nav.appearance",
         rows: [
           {
             id: "theme",
-            label: "主题",
-            hint: "默认「系统」：系统切到浅色，软件跟着变浅；也可以固定成浅色或深色",
-            kw: "主题 系统 跟随系统 深色 浅色 暗色 亮色 自动 theme system dark light auto",
+            label: t("settings.theme"),
+            hint: t("settings.themeHint"),
+            kw: t("settings.kw.theme"),
             node: seg(draft.theme, [
-              { v: "light", label: "浅色" },
-              { v: "dark", label: "深色" },
-              { v: "system", label: "系统" },
+              { v: "light", label: t("settings.themeLight") },
+              { v: "dark", label: t("settings.themeDark") },
+              { v: "system", label: t("settings.themeSystem") },
             ], (v) => patch({ theme: v as Prefs["theme"] })),
           },
           {
             id: "motion",
-            label: "动态效果",
-            hint: "「减少」会把全站过渡压到 1ms，并关掉滚轮惯性——和系统「减少动态效果」同一效果",
-            kw: "动效 动画 减少 motion reduce 惯性",
+            label: t("settings.motion"),
+            hint: t("settings.motionHint"),
+            kw: t("settings.kw.motion"),
             node: seg(draft.motion, [
-              { v: "system", label: "跟随系统" },
-              { v: "reduced", label: "减少" },
+              { v: "system", label: t("lang.system") },
+              { v: "reduced", label: t("settings.motionReduced") },
             ], (v) => patch({ motion: v as Prefs["motion"] })),
           },
           {
             id: "tilename",
-            label: "悬停显示文件名",
-            hint: "关闭后只显示缩略图与格式徽标，界面更干净",
-            kw: "文件名 悬停 hover 标签",
+            label: t("settings.tileName"),
+            hint: t("settings.tileNameHint"),
+            kw: t("settings.kw.tileName"),
             node: (
               <button
                 className={`switch ${draft.showTileName ? "on" : ""}`}
@@ -556,9 +555,9 @@ export function Settings({
           },
           {
             id: "autotags",
-            label: "显示自动标签",
-            hint: "按原始文件的格式 / 类型 / 像素 / 比例 / 体积推导；关掉后详情只留你手打的标签",
-            kw: "自动标签 auto derived 标签 tag",
+            label: t("settings.autoTags"),
+            hint: t("settings.autoTagsHint"),
+            kw: t("settings.kw.autoTags"),
             node: (
               <button
                 className={`switch ${draft.autoTags ? "on" : ""}`}
@@ -572,12 +571,12 @@ export function Settings({
           },
           {
             id: "autotags-reset",
-            label: "恢复被否决的自动标签",
-            hint: "在自动标签上右键「不再建议」只记在本机，这里一次性清空",
-            kw: "否决 denied 不再建议 恢复 重置",
+            label: t("settings.resetDenied"),
+            hint: t("settings.resetDeniedHint"),
+            kw: t("settings.kw.resetDenied"),
             node: (
               <button className="btn btn-tiny" onClick={onResetDenied}>
-                恢复
+                {t("settings.restore")}
               </button>
             ),
           },
@@ -589,17 +588,17 @@ export function Settings({
             id: "uiscale",
             label: "",
             block: true,
-            kw: "缩放 界面 zoom scale 显示 大小 100% 125% 放大",
+            kw: t("settings.kw.zoom"),
             node: (
               <div className="set-zoom">
                 <div className="set-zoom-head">
-                  <span className="set-zoom-title">界面缩放</span>
+                  <span className="set-zoom-title">{t("zoom.title")}</span>
                   <span className="set-zoom-hint">
-                    {`已根据你的屏幕调整——当前为 ${Math.round((scaleNow ?? 1) * 100)}%`}
+                    {t("zoom.hint", { percent: `${Math.round((scaleNow ?? 1) * 100)}%` })}
                   </span>
                 </div>
                 {seg(draft.uiScale === null ? "auto" : String(draft.uiScale), [
-                  { v: "auto", label: "自动" },
+                  { v: "auto", label: t("zoom.auto") },
                   { v: "0.8", label: "80%" },
                   { v: "0.9", label: "90%" },
                   { v: "1", label: "100%" },
@@ -618,14 +617,15 @@ export function Settings({
       },
       {
         key: "cache",
-        title: "缓存与索引",
         tk: "nav.cache",
         rows: [
           {
             id: "cache-size",
-            label: "缩略图缓存",
-            hint: stat ? `${stat.files.toLocaleString()} 个文件，全部可再生` : "正在统计…",
-            kw: "缓存 占用 大小 缩略图 cache",
+            label: t("settings.thumbCache"),
+            hint: stat
+              ? t("settings.cacheStat", { count: stat.files.toLocaleString() })
+              : t("settings.cacheCounting"),
+            kw: t("settings.kw.cacheSize"),
             node: (
               <span className="set-value mono">
                 {stat ? fmtSize(stat.bytes) : "—"}
@@ -634,15 +634,15 @@ export function Settings({
           },
           {
             id: "warm-auto",
-            label: "启动时自动预热缩略图",
-            hint: "空闲时把全库的图先做一遍，之后滑到任何位置都是立刻出图",
-            kw: "预热 预生成 后台 缩略图 warm 自动",
+            label: t("settings.warmAuto"),
+            hint: t("settings.warmAutoHint"),
+            kw: t("settings.kw.warmAuto"),
             node: (
               <button
                 className={`switch ${draft.warmThumbs ? "on" : ""}`}
                 role="switch"
                 aria-checked={draft.warmThumbs}
-                aria-label="启动时自动预热缩略图"
+                aria-label={t("settings.warmAuto")}
                 onClick={() => patch({ warmThumbs: !draft.warmThumbs })}
               >
                 <span className="switch-knob" />
@@ -651,15 +651,21 @@ export function Settings({
           },
           {
             id: "warm-now",
-            label: "预生成全部缩略图",
+            label: t("settings.warmNow"),
             hint: !warm?.total
-              ? "还没跑过。跑一次之后，整个库滑动全程零等待（低优先，随时可停）"
+              ? t("settings.warmNever")
               : warm.running
-                ? `进行中 ${warm.done.toLocaleString()} / ${warm.total.toLocaleString()}`
+                ? t("settings.warmRunning", {
+                    done: warm.done.toLocaleString(),
+                    total: warm.total.toLocaleString(),
+                  })
                 : warm.done >= warm.total
-                  ? `已完成 ${warm.total.toLocaleString()} 张 —— 现在滑到哪都是立刻出来`
-                  : `上次停在 ${warm.done.toLocaleString()} / ${warm.total.toLocaleString()}`,
-            kw: "预热 预生成 全库 缩略图 warm 立即",
+                  ? t("settings.warmDone", { total: warm.total.toLocaleString() })
+                  : t("settings.warmStopped", {
+                      done: warm.done.toLocaleString(),
+                      total: warm.total.toLocaleString(),
+                    }),
+            kw: t("settings.kw.warmNow"),
             node: (
               <button
                 className="btn"
@@ -669,10 +675,10 @@ export function Settings({
                   try {
                     if (warm?.running) {
                       setWarm(await source.warmStop());
-                      onToast("已停止预热", false, "已生成的缩略图都留着，下次接着做");
+                      onToast(t("settings.toast.warmStopped"), false, t("settings.toast.warmStoppedDetail"));
                     } else {
                       setWarm(await source.warmThumbs(draft.size === 2 ? 512 : draft.size === 0 ? 256 : 384));
-                      onToast("已开始后台预热", false, "低优先跑，滚动时会让路；不用等它");
+                      onToast(t("settings.toast.warmStarted"), false, t("settings.toast.warmStartedDetail"));
                     }
                   } catch (e) {
                     onToast(String(e), true);
@@ -681,19 +687,21 @@ export function Settings({
                   }
                 }}
               >
-                {warm?.running ? "停止" : "开始"}
+                {warm?.running ? t("settings.stop") : t("settings.start")}
               </button>
             ),
           },
           {
             id: "meta-palette",
-            label: "素材元数据",
-            hint: "主色板与相似指纹在出缩略图时顺带算好；这里可以把老缓存的那批补算上",
-            kw: "色板 主色 palette 颜色 指纹 重复 元数据",
+            label: t("settings.metaPalette"),
+            hint: t("settings.metaPaletteHint"),
+            kw: t("settings.kw.palette"),
             node: (
               <div className="set-inline">
                 <span className="set-value mono">
-                  {metaMiss ? `缺色板 ${metaMiss[0]} · 缺哈希 ${metaMiss[1]}` : "—"}
+                  {metaMiss
+                    ? t("settings.metaMissing", { palette: metaMiss[0], hash: metaMiss[1] })
+                    : "—"}
                 </span>
                 <button
                   className="btn"
@@ -705,9 +713,11 @@ export function Settings({
                       const v = await source.metaMissing();
                       setMetaMiss(v);
                       onToast(
-                        done > 0 ? `补算 ${done} 张` : "没有可补算的（缓存里还没有缩略图）",
+                        done > 0
+                          ? t("settings.toast.paletteFilled", { count: done })
+                          : t("settings.toast.paletteNone"),
                         false,
-                        left > 0 ? `还剩 ${left} 张，再点一次继续` : undefined
+                        left > 0 ? t("settings.toast.paletteLeft", { count: left }) : undefined
                       );
                     } catch (e) {
                       onToast(String(e), true);
@@ -716,20 +726,22 @@ export function Settings({
                     }
                   }}
                 >
-                  补算
+                  {t("settings.fillIn")}
                 </button>
               </div>
             ),
           },
           {
             id: "refs",
-            label: "工程引用",
-            hint: "扫 psd / ai / blend / max / c4d 这类文件里写的外部素材路径，用来发现「工程还在、素材没了」",
-            kw: "引用 refs 工程 psd blend 丢失 缺失",
+            label: t("settings.refs"),
+            hint: t("settings.refsHint"),
+            kw: t("settings.kw.refs"),
             node: (
               <div className="set-inline">
                 <span className="set-value mono">
-                  {refSum ? `${refSum[0]} 条 · 丢失 ${refSum[1]}` : "—"}
+                  {refSum
+                    ? t("settings.refsSummary", { total: refSum[0], missing: refSum[1] })
+                    : "—"}
                 </span>
                 <button
                   className="btn"
@@ -740,7 +752,7 @@ export function Settings({
                       const [n, r] = await source.refsScan(120);
                       const v = await source.refsSummary();
                       setRefSum(v);
-                      onToast(`扫了 ${n} 个工程文件，记下 ${r} 条引用`);
+                      onToast(t("settings.toast.refsScanned", { files: n, refs: r }));
                     } catch (e) {
                       onToast(String(e), true);
                     } finally {
@@ -748,16 +760,16 @@ export function Settings({
                     }
                   }}
                 >
-                  扫描
+                  {t("settings.scan")}
                 </button>
               </div>
             ),
           },
           {
             id: "cache-limit",
-            label: "缓存上限",
-            hint: "超过后按最久未用淘汰（下次清理时生效）",
-            kw: "上限 限制 淘汰 lru",
+            label: t("settings.cacheLimit"),
+            hint: t("settings.cacheLimitHint"),
+            kw: t("settings.kw.cacheLimit"),
             node: (
               <div className="set-num">
                 <input
@@ -776,9 +788,9 @@ export function Settings({
           },
           {
             id: "cache-clear",
-            label: "清理缩略图缓存",
-            hint: "只删 cache/thumbs，不动任何原文件；清理后滚动时会重新生成",
-            kw: "清理 删除 释放 空间 gc",
+            label: t("settings.cacheClear"),
+            hint: t("settings.cacheClearHint"),
+            kw: t("settings.kw.cacheClear"),
             node: (
               <button
                 className="btn"
@@ -789,9 +801,14 @@ export function Settings({
                     const [before, freed] = await source.cacheGc(0, 0);
                     refreshStat();
                     onToast(
-                      freed > 0 ? "缓存已清理" : "缓存已经是空的",
+                      freed > 0 ? t("app.toast.cache_cleared") : t("app.toast.cache_empty"),
                       false,
-                      freed > 0 ? `释放 ${fmtSize(freed)}（清理前 ${fmtSize(before)}）` : undefined
+                      freed > 0
+                        ? t("app.toast.cache_freed", {
+                            freed: fmtSize(freed),
+                            before: fmtSize(before),
+                          })
+                        : undefined
                     );
                   } catch (e) {
                     onToast(String(e), true);
@@ -800,24 +817,24 @@ export function Settings({
                   }
                 }}
               >
-                {busy ? "清理中…" : "立即清理"}
+                {busy ? t("settings.cleaning") : t("settings.cleanNow")}
               </button>
             ),
           },
           {
             id: "indexed",
-            label: "已索引素材",
-            hint: "索引是派生数据，随时可以重建；原文件不受影响",
-            kw: "索引 素材 数量 条数",
+            label: t("settings.indexed"),
+            hint: t("settings.indexedHint"),
+            kw: t("settings.kw.indexed"),
             node: <span className="set-value mono">{total === null ? "—" : total.toLocaleString()}</span>,
           },
           {
             id: "rebuild",
-            label: "重建索引",
+            label: t("settings.rebuild"),
             hint: confirmRebuild
-              ? "会清空索引并全量重扫所有库根（几万文件约十几秒，期间可以取消）"
-              : "索引跟磁盘对不上、换过硬盘的时候用；原文件不动",
-            kw: "重建 索引 rebuild 重扫 修复",
+              ? t("settings.rebuildConfirmHint")
+              : t("settings.rebuildHint"),
+            kw: t("settings.kw.rebuild"),
             node: (
               <button
                 className={`btn ${confirmRebuild ? "btn-danger" : ""}`}
@@ -832,7 +849,11 @@ export function Settings({
                   setBusy(true);
                   try {
                     await source.rebuildIndex();
-                    onToast("已开始重建", false, "后台在跑，扫完会自动刷新；想停就点界面底部的取消");
+                    onToast(
+                      t("app.toast.reindex_started"),
+                      false,
+                      t("settings.toast.reindexStartedDetail")
+                    );
                   } catch (e) {
                     onToast(String(e), true);
                   } finally {
@@ -840,7 +861,7 @@ export function Settings({
                   }
                 }}
               >
-                {confirmRebuild ? "再点一次确认" : "重建"}
+                {confirmRebuild ? t("settings.confirmAgain") : t("app.common.rebuild")}
               </button>
             ),
           },
@@ -852,16 +873,15 @@ export function Settings({
            owner 2026-11-21：「有些本该放在一起的却分开在不同的地方了」——
            全部库数据的进出（导出 + 库索引文件 + 数据位置）收进同一页。 */
         key: "backup",
-        title: "库数据与备份",
         tk: "nav.backup",
         rows: [
           {
             id: "export",
-            label: "导出用户数据（按库）",
+            label: t("settings.exportUserdata"),
             hint: libName
-              ? `把「${libName}」的库根 / 评分 / 备注 / 标签 / 分组写成 <库名>-userdata-时间戳.D-AssetManager；不含原图（索引可重建，这份是人写的东西）。有多个库时会先让你选导哪一个`
-              : `把一个库的库根 / 评分 / 备注 / 标签 / 分组写成 <库名>-userdata-时间戳.D-AssetManager；不含原图。有多个库时会先让你选导哪一个`,
-            kw: "导出 备份 export userdata data 换机 按库",
+              ? t("settings.exportUserdataHintLib", { name: libName })
+              : t("settings.exportUserdataHint"),
+            kw: t("settings.kw.exportData"),
             node: (
               <button
                 className="btn"
@@ -876,17 +896,17 @@ export function Settings({
                   await runDataExport(roots[0] ?? activePath ?? null);
                 }}
               >
-                导出
+                {t("settings.export")}
               </button>
             ),
           },
           {
             id: "package",
-            label: "导出资产包",
+            label: t("settings.exportPackage"),
             hint: libName
-              ? `把「${libName}」的全部原图打成一个包（含清单：路径/评分/备注/手工标签），换机时双击即可导入`
-              : "把当前素材库的全部原图打成一个包（含清单：路径/评分/备注/手工标签），换机时双击即可导入",
-            kw: "导出 资产包 打包 package 迁移 换机 备份",
+              ? t("settings.exportPackageHintLib", { name: libName })
+              : t("settings.exportPackageHint"),
+            kw: t("settings.kw.exportPackage"),
             node: (
               <button
                 className="btn"
@@ -899,9 +919,11 @@ export function Settings({
                     if (!r) return;
                     const file = r.path.split(/[\\/]/).pop() ?? r.path;
                     onToast(
-                      `已导出 ${r.ok} 张 → ${file}`,
+                      t("settings.toast.packageExported", { count: r.ok, file }),
                       r.skipped > 0,
-                      r.skipped ? `${r.skipped} 张文件不在原位，没进包` : undefined
+                      r.skipped
+                        ? t("settings.toast.zipSkipped", { count: r.skipped })
+                        : undefined
                     );
                   } catch (e) {
                     onToast(String(e), true);
@@ -910,17 +932,17 @@ export function Settings({
                   }
                 }}
               >
-                导出
+                {t("settings.export")}
               </button>
             ),
           },
           {
             id: "library-zip",
-            label: "导出整个库（ZIP）",
+            label: t("settings.exportZip"),
             hint: libName
-              ? `把「${libName}」的原图和库数据打成一个普通 zip：文件名带年月日，原图保留文件夹层级，软件数据收在 _AssetManager/ 目录里；超过 4 GB 自动分片，任何解压软件都能打开。**有多个库时会先让你选导哪一个**`
-              : `把当前素材库的原图和库数据打成一个普通 zip：文件名带年月日，原图保留文件夹层级，软件数据收在 _AssetManager/ 目录里；超过 4 GB 自动分片。有多个库时会先让你选导哪一个`,
-            kw: "导出 zip 压缩 备份 打包 整库 library export",
+              ? t("settings.exportZipHintLib", { name: libName })
+              : t("settings.exportZipHint"),
+            kw: t("settings.kw.exportZip"),
             node: (
               <button
                 className="btn"
@@ -935,16 +957,16 @@ export function Settings({
                   await runZipExport(roots[0] ?? activePath ?? null);
                 }}
               >
-                导出
+                {t("settings.export")}
               </button>
             ),
           },
           {
             id: "libfiles",
-            label: "每个库的索引文件",
+            label: t("settings.libFiles"),
             block: true,
-            kw: "库 文件 db 索引 独立 备份 拆库",
-            hint: "拆库之后每个素材库各有一个独立文件：单个库坏了不影响别的，整库搬走只要拷一个文件",
+            kw: t("settings.kw.libFiles"),
+            hint: t("settings.libFilesHint"),
             node: (
               <div className="lib-files">
                 {libFiles.length === 0 && <span className="set-value">—</span>}
@@ -966,9 +988,9 @@ export function Settings({
             id: "datadir",
             /* 标签改成「索引与缓存位置」：叫「数据文件夹」时用户会理解成「我的素材放哪」，
                2026-11-16 就是这么把素材库根设进来的（然后觉得"没有任何效果"）。 */
-            label: "索引与缓存位置",
+            label: t("settings.dataRoot"),
             block: true,
-            kw: "数据 目录 路径 位置 文件夹 自定义 迁移 换盘 data root 索引 缓存",
+            kw: t("settings.kw.dataRoot"),
             node: (
               <DataFolderCard source={source} onToast={onToast} onAddPath={onAddPath} />
             ),
@@ -977,14 +999,13 @@ export function Settings({
       },
       {
         key: "shortcuts",
-        title: "快捷键",
         tk: "nav.shortcuts",
         rows: [
           {
             id: "hk-snip",
-            label: "截图（选完区存到截图目录）",
-            hint: "系统级：软件不在前台也能按",
-            kw: "截图 抓屏 snip screenshot f1 系统 全局",
+            label: t("app.menu.snip"),
+            hint: t("shortcuts.hkSnipHint"),
+            kw: t("settings.kw.hkSnip"),
             node: (
               <HotkeyField
                 value={hotkeys.snip}
@@ -994,18 +1015,18 @@ export function Settings({
           },
           {
             id: "hk-clip",
-            label: "把剪贴板里的图用贴图打开",
-            hint: "连按可以依次贴出最近 10 张（来自截图目录与回收站），窗内 ← → 也能翻",
-            kw: "无边框 看图 贴图 剪贴板 粘贴 f3 paste 系统 全局 历史",
+            label: t("app.menu.clip_peek"),
+            hint: t("shortcuts.hkClipHint"),
+            kw: t("settings.kw.hkClip"),
             node: (
               <HotkeyField value={hotkeys.clip} onChange={(v) => void applyHotkey("clip", v)} />
             ),
           },
           {
             id: "hk-toggle",
-            label: "显示 / 隐藏屏幕上所有贴图",
-            hint: "系统级：对一下底下的内容时一下全收走，再按一下全放回来",
-            kw: "隐藏 显示 贴图 全部 收起 alt f3 toggle 系统 全局",
+            label: t("shortcuts.hkToggle"),
+            hint: t("shortcuts.hkToggleHint"),
+            kw: t("settings.kw.hkToggle"),
             node: (
               <HotkeyField
                 value={hotkeys.toggle}
@@ -1013,18 +1034,18 @@ export function Settings({
               />
             ),
           },
-          { id: "k1", label: "全屏预览选中的素材", kw: "空格 预览", node: <Kbd keys={["Space"]} /> },
-          { id: "k2", label: "上一个 / 下一个", kw: "方向键 切换", node: <Kbd keys={["←", "→"]} /> },
-          { id: "k3", label: "关闭预览 / 收起详情 / 关闭面板", kw: "esc 关闭 退出", node: <Kbd keys={["Esc"]} /> },
-          { id: "k4", label: "撤销上一步文件操作", kw: "撤销 ctrl z", node: <Kbd keys={["Ctrl", "Z"]} /> },
-          { id: "k5", label: "打开设置", kw: "设置 ctrl 逗号", node: <Kbd keys={["Ctrl", ","]} /> },
+          { id: "k1", label: t("app.cmd.preview"), kw: t("settings.kw.preview"), node: <Kbd keys={["Space"]} /> },
+          { id: "k2", label: t("shortcuts.prevNext"), kw: t("settings.kw.prevNext"), node: <Kbd keys={["←", "→"]} /> },
+          { id: "k3", label: t("shortcuts.closeAll"), kw: t("settings.kw.closeAll"), node: <Kbd keys={["Esc"]} /> },
+          { id: "k4", label: t("app.cmd.undo"), kw: t("settings.kw.undo"), node: <Kbd keys={["Ctrl", "Z"]} /> },
+          { id: "k5", label: t("shortcuts.openSettings"), kw: t("settings.kw.openSettings"), node: <Kbd keys={["Ctrl", ","]} /> },
           {
             id: "k6",
-            label: "命令面板（所有操作都能搜）",
-            kw: "命令 面板 搜索 ctrl k palette",
+            label: t("shortcuts.commandPalette"),
+            kw: t("settings.kw.commandPalette"),
             node: <Kbd keys={["Ctrl", "K"]} />,
           },
-          { id: "k6", label: "用默认程序打开原文件", kw: "打开 双击", node: <Kbd keys={["双击"]} /> },
+          { id: "k6", label: t("shortcuts.openDefault"), kw: t("settings.kw.openDefault"), node: <Kbd keys={[t("shortcuts.kbdDouble")]} /> },
         ],
       },
       {
@@ -1032,20 +1053,19 @@ export function Settings({
            开关放在这一页而不是「常用」，是因为用户找更新一定先点「更新」这一页；
            关掉它连版本号都不查（不是"查了不提醒"），这一点必须写在 hint 里。 */
         key: "update",
-        title: "更新",
         tk: "nav.update",
         rows: [
           {
             id: "update-auto",
-            label: "自动检查更新",
-            hint: "每天最多查一次。查到新版本只提醒，不会自己下载、更不会自己装；关掉之后连版本号都不查（一个请求都不发）。",
-            kw: "更新 update 版本 version 升级 自动 检查 提醒",
+            label: t("settings.updateAuto"),
+            hint: t("settings.updateAutoHint"),
+            kw: t("settings.kw.updateAuto"),
             node: (
               <button
                 className={`switch ${draft.updateCheck ? "on" : ""}`}
                 role="switch"
                 aria-checked={draft.updateCheck}
-                aria-label="自动检查更新"
+                aria-label={t("settings.updateAuto")}
                 onClick={() => patch({ updateCheck: !draft.updateCheck })}
               >
                 <span className="switch-knob" />
@@ -1054,9 +1074,9 @@ export function Settings({
           },
           {
             id: "update-run",
-            label: "检查与安装",
+            label: t("settings.updateRun"),
             block: true,
-            kw: "更新 update 版本 version 升级 检查 下载 安装 安装包 跳过 发布",
+            kw: t("settings.kw.updateRun"),
             node: <UpdateSection prefs={draft} onPrefs={patch} onToast={onToast} />,
           },
         ],
@@ -1089,11 +1109,11 @@ export function Settings({
       <div
         className="set-sheet"
         role="dialog"
-        aria-label="偏好设置"
+        aria-label={t("settings.dialogAria")}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <aside className="set-nav">
-          <div className="set-nav-title">设置</div>
+          <div className="set-nav-title">{t("settings.title")}</div>
           <div className="set-search">
             <Icon name="search" size={13} stroke={1.7} className="set-search-icon" />
             <input
@@ -1103,7 +1123,11 @@ export function Settings({
               aria-label={t("common.searchSettings")}
             />
             {q && (
-              <button className="set-search-clear" onClick={() => setQ("")} title="清空">
+              <button
+                className="set-search-clear"
+                onClick={() => setQ("")}
+                title={t("settings.clearSearch")}
+              >
                 <Icon name="close" size={11} stroke={1.8} />
               </button>
             )}
@@ -1128,8 +1152,8 @@ export function Settings({
                   <span
                     className="set-nav-dot"
                     role="img"
-                    aria-label={`有新版本 ${updateAvailable}`}
-                    title={`有新版本 ${updateAvailable}`}
+                    aria-label={t("settings.updateDot", { version: updateAvailable })}
+                    title={t("settings.updateDot", { version: updateAvailable })}
                   />
                 ) : null}
               </button>
@@ -1139,23 +1163,25 @@ export function Settings({
 
         <section className="set-main">
           <header className="set-head">
-            <h2 className="set-head-title">{needle ? `搜索：${q.trim()}` : t(current.tk)}</h2>
-            <button className="set-close" onClick={onClose} title="关闭（Esc）">
+            <h2 className="set-head-title">
+              {needle ? t("settings.searchPrefix", { query: q.trim() }) : t(current.tk)}
+            </h2>
+            <button className="set-close" onClick={onClose} title={t("settings.closeEsc")}>
               <Icon name="close" size={15} stroke={1.5} />
             </button>
           </header>
 
           <div className="set-body scroll-hot" ref={bodyRef}>
             {shown.length === 0 ? (
-              <p className="set-empty">没有匹配「{q.trim()}」的设置项。</p>
+              <p className="set-empty">{t("settings.empty", { query: q.trim() })}</p>
             ) : (
-              /* key 用 `section:标题`：语言 / 系统 / 通用 三张卡片的 section 都是 "general"，
+              /* key 用 `section:标题 key`：语言 / 系统 / 通用 三张卡片的 section 都是 "general"，
                  同 key 的兄弟节点会被 React 复用 —— 表现是「点快捷键，内容却是语言/系统，
                  还重复一遍」。0.3.30 装上去当天就被 owner 抓到，这里必须唯一。 */
               shown.map((g) => (
                 /* 设计稿 §3.6 / HTML 预览 set-sec2：分组标题提到卡片**外面**（11px 小标题 +
                    下面一张发丝线卡），不再是"卡片头里塞一行大写小字"。 */
-                <div className="set-sec" key={`${g.key}:${g.title}`}>
+                <div className="set-sec" key={`${g.key}:${g.tk}`}>
                   <div className="set-sec-ttl">{t(g.tk)}</div>
                   <div className="set-card">
                   {g.rows.map((r) =>
@@ -1180,7 +1206,7 @@ export function Settings({
           </div>
 
           <footer className="set-foot">
-            <span className="set-dirty">所有改动即时生效，不需要点保存</span>
+            <span className="set-dirty">{t("settings.footerNote")}</span>
             <button className="set-btn set-btn-accent" onClick={onClose}>
               {t("common.done")}
             </button>
@@ -1195,10 +1221,10 @@ export function Settings({
           className="dlg"
           role="dialog"
           aria-modal="true"
-          aria-label="导出哪个素材库"
+          aria-label={t("settings.pickLibAria")}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <div className="dlg-title">导出哪个素材库？</div>
+          <div className="dlg-title">{t("settings.pickLibTitle")}</div>
           <div className="dlg-body">
             <div className="zippick">
               {libPick.roots.map((root) => (
@@ -1223,7 +1249,7 @@ export function Settings({
           </div>
           <div className="dlg-actions">
             <button className="btn" onClick={() => setLibPick(null)}>
-              取消
+              {t("app.common.cancel")}
             </button>
           </div>
         </div>

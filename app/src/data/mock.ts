@@ -1,4 +1,5 @@
 import type { Asset, DirNode, Query, Source } from "../types";
+import { t } from "../lib/i18n";
 
 /** 浏览器预览用的假数据源：形状与桌面端一致，方便 UI 单独开发。 */
 
@@ -229,7 +230,7 @@ export const mockSource: Source = {
   },
 
   async scanStart() {
-    throw new Error("浏览器预览模式不支持扫描，请用桌面端");
+    throw new Error(t("mock.scan"));
   },
   async scanCancel() {
     return true;
@@ -241,31 +242,31 @@ export const mockSource: Source = {
     return { files: paths.length, bytes: 0 };
   },
   async dragOut() {
-    throw new Error("浏览器预览模式不支持拖出，请用桌面端");
+    throw new Error(t("mock.drag_out"));
   },
   async watch() {
     return 0;
   },
   async rebuildIndex() {
-    throw new Error("浏览器预览模式不支持重建索引，请用桌面端");
+    throw new Error(t("mock.rebuild_index"));
   },
   async exportUserdata() {
-    throw new Error("浏览器预览模式不支持导出，请用桌面端");
+    throw new Error(t("mock.export_userdata"));
   },
   async openImportFile() {
-    throw new Error("浏览器预览模式下不能导入文件（双击导出文件要用桌面版）");
+    throw new Error(t("mock.import_exported"));
   },
   async importFiles() {
-    throw new Error("浏览器预览模式下不能把文件复制进素材库，请用桌面版");
+    throw new Error(t("mock.import_copy"));
   },
   async pickAndImport() {
-    throw new Error("浏览器预览模式下不能导入文件，请用桌面版");
+    throw new Error(t("mock.import_plain"));
   },
   async exportPackage() {
-    throw new Error("浏览器预览模式下不能导出资产包，请用桌面版");
+    throw new Error(t("mock.export_package"));
   },
   async exportLibraryZip() {
-    throw new Error("浏览器预览模式下不能把整个库导出成 zip，请用桌面版");
+    throw new Error(t("mock.export_zip"));
   },
   async pickFolder() {
     return null;
@@ -298,13 +299,13 @@ export const mockSource: Source = {
     return { images: 0, videos: 0, entries: 0, hasIndexDb: false };
   },
   async setDataRoot() {
-    throw new Error("浏览器预览模式不支持切换数据文件夹，请用桌面端");
+    throw new Error(t("mock.datadir_switch"));
   },
   async relaunch() {
-    throw new Error("浏览器预览模式不支持重启，请用桌面端");
+    throw new Error(t("mock.relaunch"));
   },
   async openRecycle() {
-    throw new Error("浏览器预览模式不支持打开回收站");
+    throw new Error(t("mock.recycle_open"));
   },
   async trashMedia() {
     return [];
@@ -332,13 +333,13 @@ export const mockSource: Source = {
     return 0;
   },
   async reveal() {
-    throw new Error("浏览器预览模式不支持定位文件");
+    throw new Error(t("mock.reveal"));
   },
   async openDefault() {
-    throw new Error("浏览器预览模式不支持打开原文件，请用桌面端");
+    throw new Error(t("mock.open_default"));
   },
   async copyFile() {
-    throw new Error("浏览器预览模式不支持复制原文件，请用桌面端");
+    throw new Error(t("mock.copy_file"));
   },
   /* 浏览器预览没有 LL 键盘钩子：一律「判不了 → 放行」，和桌面端的 fail-open 同口径 */
   async keyRecent() {
@@ -346,7 +347,7 @@ export const mockSource: Source = {
   },
   async rename(_p, name) {
     const a = assets.find((x) => x.path === _p);
-    if (!a) throw new Error("找不到这个文件");
+    if (!a) throw new Error(t("mock.file_missing"));
     const dir = a.path.slice(0, a.path.lastIndexOf("/"));
     a.name = name;
     a.path = `${dir}/${name}`;
@@ -354,13 +355,13 @@ export const mockSource: Source = {
     return a.path;
   },
   async mkdir() {
-    throw new Error("浏览器预览模式不支持建文件夹");
+    throw new Error(t("mock.mkdir"));
   },
   async move() {
-    throw new Error("浏览器预览模式不支持移动文件");
+    throw new Error(t("mock.move"));
   },
   async moveStart() {
-    throw new Error("浏览器预览模式不支持移动文件");
+    throw new Error(t("mock.move"));
   },
   async setRating(ids: number[], rating: number) {
     return ids.length && rating >= 0 ? ids.length : 0;
@@ -403,37 +404,37 @@ export const mockSource: Source = {
     return 0;
   },
   async deleteTag() {
-    throw new Error("浏览器预览模式不支持删除标签");
+    throw new Error(t("mock.tag_delete"));
   },
   async tagGroups() {
     return [{ name: "常用", count: 4, color: null, tags: 2 }];
   },
   async setTagColor() {
-    throw new Error("浏览器预览模式不支持改标签颜色");
+    throw new Error(t("mock.tag_color"));
   },
   async setTagGroup() {
-    throw new Error("浏览器预览模式不支持分组");
+    throw new Error(t("mock.tag_group"));
   },
   async renameTag() {
-    throw new Error("浏览器预览模式不支持重命名标签");
+    throw new Error(t("mock.tag_rename"));
   },
   async newGroup() {
-    throw new Error("浏览器预览模式不支持新建分组");
+    throw new Error(t("mock.group_new"));
   },
   async renameGroup() {
-    throw new Error("浏览器预览模式不支持重命名分组");
+    throw new Error(t("mock.group_rename"));
   },
   async setGroupColor() {
-    throw new Error("浏览器预览模式不支持改分组颜色");
+    throw new Error(t("mock.group_color"));
   },
   async deleteGroup() {
-    throw new Error("浏览器预览模式不支持删除分组");
+    throw new Error(t("mock.group_delete"));
   },
   async remove() {
-    throw new Error("浏览器预览模式不支持删除");
+    throw new Error(t("mock.delete"));
   },
   async undo() {
-    throw new Error("浏览器预览模式没有可撤销的操作");
+    throw new Error(t("mock.undo_empty"));
   },
   /* 浏览器预览没有真实缓存：给一组假数字，让设置面板的排版能看全 */
   async cacheStat() {
@@ -443,7 +444,7 @@ export const mockSource: Source = {
     return [186 * 1024 * 1024, 0] as [number, number];
   },
   async dataDir() {
-    return "%LOCALAPPDATA%\\AssetManager（浏览器预览为假路径）";
+    return t("mock.data_dir_fake");
   },
   /* ---- T24/T25/T26/T33：浏览器预览下给空数据，界面排版照常能看 ---- */
   async peekCopyFile() {},
@@ -457,20 +458,20 @@ export const mockSource: Source = {
     return null;
   },
   async peekSaveLib() {
-    throw new Error("浏览器预览下不能写截图库，请用桌面版");
+    throw new Error(t("mock.peek_save"));
   },
   async setUiTheme() {},
   async clipPeek() {
-    throw new Error("浏览器预览模式没有剪贴板贴图");
+    throw new Error(t("mock.clip_peek"));
   },
   async clipHistory() {
     return [];
   },
   async snipStart() {
-    throw new Error("浏览器预览模式没有截图");
+    throw new Error(t("mock.snip"));
   },
   async snipCrop() {
-    throw new Error("浏览器预览模式没有截图");
+    throw new Error(t("mock.snip"));
   },
   async snipFinish() {
     return null;
@@ -478,7 +479,7 @@ export const mockSource: Source = {
   async snipCancel() {},
   async snipReady() {},
   async snipFull() {
-    throw new Error("浏览器预览模式没有截图");
+    throw new Error(t("mock.snip"));
   },
   async snipWindowAt() {
     return null;
@@ -488,17 +489,24 @@ export const mockSource: Source = {
     return [];
   },
   async peekOpen() {
-    throw new Error("浏览器预览模式没有独立的无边框窗口");
+    throw new Error(t("mock.peek_window"));
   },
   async peekZoom() {},
   async peekRatio() {},
   async peekClose() {},
   async boardOpen() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async boardClose() {},
+  /* 浏览器预览没有真窗口：置顶永远"成功"，让顶栏按钮的按下手感能演示 */
+  async boardTop(on: boolean) {
+    return on;
+  },
+  async boardIsTop() {
+    return true;
+  },
   async boardPaste() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async collList() {
     return [
@@ -525,16 +533,16 @@ export const mockSource: Source = {
     return [];
   },
   async collOpen() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async collPaste() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async snapshotList() {
     return [{ id: 1, name: "初选", count: 1, createdAt: 1700000000000, updatedAt: 1700000000000 }];
   },
   async snapshotCreate() {
-    throw new Error("浏览器预览模式没有快照");
+    throw new Error(t("mock.snapshot"));
   },
   async snapshotRename() {},
   async snapshotDelete() {},
@@ -543,10 +551,10 @@ export const mockSource: Source = {
     return { added: ids.length, total: ids.length, already: 0, failed: [] };
   },
   async snapshotAddTag() {
-    throw new Error("浏览器预览模式没有快照");
+    throw new Error(t("mock.snapshot"));
   },
   async snapshotCombine() {
-    throw new Error("浏览器预览模式没有快照");
+    throw new Error(t("mock.snapshot"));
   },
   async boardLayout() {
     return [];
@@ -570,7 +578,7 @@ export const mockSource: Source = {
     return [];
   },
   async boardAddPaths() {
-    return [[], ["浏览器预览模式没有素材库"]];
+    return [[], [t("mock.library")]];
   },
   async snapshotResolve() {
     return { items: [], found: 0, missing: 0 };
@@ -588,10 +596,10 @@ export const mockSource: Source = {
     return null;
   },
   async snapshotOpen() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async snapshotPaste() {
-    throw new Error("浏览器预览模式没有灵感板");
+    throw new Error(t("mock.board"));
   },
   async peekTop(on: boolean) {
     return on;
@@ -633,22 +641,22 @@ export const mockSource: Source = {
     return [];
   },
   async renamePlan() {
-    throw new Error("浏览器预览模式不支持批量重命名");
+    throw new Error(t("mock.rename_batch"));
   },
   async renameApply() {
-    throw new Error("浏览器预览模式不支持批量重命名");
+    throw new Error(t("mock.rename_batch"));
   },
   async tagGetRule() {
     return null;
   },
   async tagSetRule() {
-    throw new Error("浏览器预览模式不支持自动标签规则");
+    throw new Error(t("mock.auto_rule"));
   },
   async libFiles() {
     return [] as [string, string, number][];
   },
   async resizeSave() {
-    throw new Error("浏览器预览模式不支持调整尺寸");
+    throw new Error(t("mock.resize"));
   },
   async exif() {
     return null;
@@ -675,9 +683,9 @@ export const mockSource: Source = {
     };
   },
   async updateDownload() {
-    throw new Error("浏览器预览下不能下载安装包，请用桌面版");
+    throw new Error(t("mock.update_download"));
   },
   async updateInstall() {
-    throw new Error("浏览器预览下不能安装更新，请用桌面版");
+    throw new Error(t("mock.update_install"));
   },
 };

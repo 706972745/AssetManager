@@ -1,3 +1,5 @@
+import { t } from "./lib/i18n";
+
 export type Kind = 0 | 1 | 2 | 3 | 4 | 5;
 
 /**
@@ -293,6 +295,8 @@ export interface BoardNote {
   /** 文字颜色 `#rrggbb`（空 = 默认浅色） */
   color: string;
   bold: boolean;
+  /** 竖排（0.5.2）：true = Photoshop 直排文字那种自上而下、回车往左开新列 */
+  vert: boolean;
   /** 所属组（0 = 没打组；同一块板上相同的非零值 = 同一组） */
   grp: number;
 }
@@ -607,6 +611,10 @@ export interface Source {
   /** 开一块灵感板：该标签下所有素材铺到无限画布上。返回张数（0 = 已有那块被聚焦） */
   boardOpen(tag: string, title?: string): Promise<number>;
   boardClose(): Promise<void>;
+  /** 置顶开关（只作用于当前这块板子的窗口会话，不落盘）。返回后端认下的值 */
+  boardTop(on: boolean): Promise<boolean>;
+  /** 问后端当前窗口的真实置顶状态（前端不用本地默认值猜） */
+  boardIsTop(): Promise<boolean>;
   /**
    * 灵感板里 Ctrl+V：剪贴板图片存进**程序目录\screenshots**、入库、打上这块板的标签，
    * 返回刚入库的那张（前端直接贴到视口中心）。
@@ -699,7 +707,10 @@ export interface Source {
   ): Promise<number>;
   /** 灵感板便签：读这块板上所有文字注释（含字体外观与组号） */
   boardNotes(board: string): Promise<BoardNote[]>;
-  /** 灵感板便签：新建（`nid = null`）或更新一张，返回 nid。`look = null` 保留原字体外观 */
+  /**
+   * 灵感板便签：新建（`nid = null`）或更新一张，返回 nid。
+   * `look = null` 保留原字体外观（含横竖排）
+   */
   boardNotePut(
     board: string,
     nid: number | null,
@@ -708,7 +719,14 @@ export interface Source {
     w: number,
     h: number,
     text: string,
-    look: { font: string; fs: number; color: string; bold: boolean } | null,
+    look: {
+      font: string;
+      fs: number;
+      color: string;
+      bold: boolean;
+      /** 竖排（Photoshop 直排文字）：回车往左开新列 */
+      vert: boolean;
+    } | null,
   ): Promise<number>;
   /** 灵感板便签：删一张 */
   boardNoteDel(board: string, nid: number): Promise<number>;
@@ -960,13 +978,24 @@ export const KIND_IMAGE = 0;
 export const THUMB_FAILED = 2;
 export const THUMB_UNSUPPORTED = 3;
 
+/** 类型名。用 getter 延迟到取值时翻译，切换语言后重渲染即可跟上 */
 export const KIND_LABEL: Record<number, string> = {
-  0: "图片",
-  1: "视频",
-  2: "音频",
+  get 0() {
+    return t("types.kind_image");
+  },
+  get 1() {
+    return t("types.kind_video");
+  },
+  get 2() {
+    return t("types.kind_audio");
+  },
   3: "3D",
-  4: "文档",
-  5: "其他",
+  get 4() {
+    return t("types.kind_document");
+  },
+  get 5() {
+    return t("types.kind_other");
+  },
 };
 
 export function badge(ext: string): string {
@@ -984,10 +1013,11 @@ export function fmtSize(n: number): string {
   return `${(n / 1073741824).toFixed(2)} GB`;
 }
 
+/** 万 / 亿 这类大数单位按语言给（中文「12.3 万」，英文用 10 的幂写法） */
 export function fmtNum(n: number): string {
   if (n < 10000) return String(n);
-  if (n < 100000000) return `${(n / 10000).toFixed(1)} 万`;
-  return `${(n / 100000000).toFixed(2)} 亿`;
+  if (n < 100000000) return t("types.num_wan", { n: (n / 10000).toFixed(1) });
+  return t("types.num_yi", { n: (n / 100000000).toFixed(2) });
 }
 
 export function fmtTime(ts: number): string {

@@ -140,6 +140,8 @@ CREATE TABLE IF NOT EXISTS board_notes (
   fs REAL NOT NULL DEFAULT 0,
   color TEXT NOT NULL DEFAULT '',
   bold INTEGER NOT NULL DEFAULT 0,
+  /* 竖排（0.5.2）：1 = Photoshop「直排文字工具」那种自右向左换列；0/缺省 = 横排。 */
+  vert INTEGER NOT NULL DEFAULT 0,
   grp INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (board, nid)
@@ -184,6 +186,8 @@ pub fn open(path: &Path) -> Res<Connection> {
     add_col(&c, "board_notes", "fs", "fs REAL NOT NULL DEFAULT 0")?;
     add_col(&c, "board_notes", "color", "color TEXT NOT NULL DEFAULT ''")?;
     add_col(&c, "board_notes", "bold", "bold INTEGER NOT NULL DEFAULT 0")?;
+    /* 老库补列后一律 `vert = 0`：以前写下的便签本来就是横排，读出来语义不变。 */
+    add_col(&c, "board_notes", "vert", "vert INTEGER NOT NULL DEFAULT 0")?;
     db::migrate_versioned(&c)?;
     Ok(c)
 }
@@ -1012,6 +1016,8 @@ pub struct BoardNoteRow {
     /// 文字颜色 `#rrggbb`（空 = 默认浅色）
     pub color: String,
     pub bold: bool,
+    /// 竖排（true = 文字自上而下、回车往左开新列；false = 横排）
+    pub vert: bool,
     /// 所属组（0 = 没打组）
     pub grp: i64,
 }
@@ -1020,7 +1026,7 @@ pub struct BoardNoteRow {
 pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
     let mut st = c
         .prepare(
-            "SELECT nid, x, y, w, h, text, font, fs, color, bold, grp
+            "SELECT nid, x, y, w, h, text, font, fs, color, bold, vert, grp
              FROM board_notes WHERE board = ?1 ORDER BY nid",
         )
         .map_err(e2s)?;
@@ -1037,7 +1043,8 @@ pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
                 fs: r.get(7)?,
                 color: r.get(8)?,
                 bold: r.get::<_, i64>(9)? != 0,
-                grp: r.get(10)?,
+                vert: r.get::<_, i64>(10)? != 0,
+                grp: r.get(11)?,
             })
         })
         .map_err(e2s)?;
@@ -1046,8 +1053,8 @@ pub fn board_notes(c: &Connection, board: &str) -> Res<Vec<BoardNoteRow>> {
 
 /// 新建或更新一张便签。`nid = None` 表示新建（发号 `MAX(nid)+1`），返回最终 nid。
 ///
-/// `look` 是外观（字体/字号/颜色/加粗）；传 `None` 表示**保留库里原样** ——
-/// 只挪位置时不该把外观冲成默认值。
+/// `look` 是外观（字体/字号/颜色/加粗/竖排）；传 `None` 表示**保留库里原样** ——
+/// 只挪位置时不该把外观冲成默认值（竖排标记也在外观里，不能顺手冲掉）。
 #[allow(clippy::too_many_arguments)]
 pub fn board_note_put(
     c: &Connection,
@@ -1058,7 +1065,7 @@ pub fn board_note_put(
     w: f64,
     h: f64,
     text: &str,
-    look: Option<(&str, f64, &str, bool)>,
+    look: Option<(&str, f64, &str, bool, bool)>,
 ) -> Res<i64> {
     let nid = match nid {
         Some(n) if n > 0 => n,
@@ -1074,14 +1081,29 @@ pub fn board_note_put(
         }
     };
     match look {
-        Some((font, fs, color, bold)) => c.execute(
-            "INSERT INTO board_notes (board, nid, x, y, w, h, text, font, fs, color, bold, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+        Some((font, fs, color, bold, vert)) => c.execute(
+            "INSERT INTO board_notes (board, nid, x, y, w, h, text, font, fs, color, bold, vert, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
              ON CONFLICT(board, nid) DO UPDATE SET
                x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h,
                text=excluded.text, font=excluded.font, fs=excluded.fs,
-               color=excluded.color, bold=excluded.bold, updated_at=excluded.updated_at",
-            params![board, nid, x, y, w, h, text, font, fs, color, bold as i64, db::now_ts()],
+               color=excluded.color, bold=excluded.bold, vert=excluded.vert,
+               updated_at=excluded.updated_at",
+            params![
+                board,
+                nid,
+                x,
+                y,
+                w,
+                h,
+                text,
+                font,
+                fs,
+                color,
+                bold as i64,
+                vert as i64,
+                db::now_ts()
+            ],
         ),
         None => c.execute(
             "INSERT INTO board_notes (board, nid, x, y, w, h, text, updated_at)
@@ -1220,6 +1242,7 @@ mod tests {
         assert_eq!(rows[0].text, "第一张");
         assert_eq!(rows[1].x, 30.0);
         assert_eq!(rows[0].grp, 0, "新建便签默认没打组");
+        assert!(!rows[0].vert, "新建/老库便签默认横排（vert = 0）");
         assert!(rows[0].font.is_empty() && rows[0].fs == 0.0, "默认外观为空");
 
         // 同一个 nid 再写一次 = 更新，不是多一行
@@ -1229,7 +1252,7 @@ mod tests {
         assert_eq!(rows[0].text, "改过");
         assert_eq!(rows[0].w, 260.0);
 
-        // 外观单独写：字体 / 字号 / 颜色 / 加粗都要原样回来
+        // 外观单独写：字体 / 字号 / 颜色 / 加粗 / **竖排** 都要原样回来
         board_note_put(
             &c,
             "tag:参考",
@@ -1239,7 +1262,7 @@ mod tests {
             260.0,
             140.0,
             "改过",
-            Some(("Microsoft YaHei", 31.5, "#ffcc00", true)),
+            Some(("Microsoft YaHei", 31.5, "#ffcc00", true, true)),
         )
         .unwrap();
         let rows = board_notes(&c, "tag:参考").unwrap();
@@ -1247,12 +1270,14 @@ mod tests {
         assert_eq!(rows[0].fs, 31.5);
         assert_eq!(rows[0].color, "#ffcc00");
         assert!(rows[0].bold);
+        assert!(rows[0].vert, "竖排标记要落盘并读回来");
 
         // 只挪位置（look = None）不许把外观冲掉
         board_note_put(&c, "tag:参考", Some(a), 12.0, 22.0, 260.0, 140.0, "改过", None).unwrap();
         let rows = board_notes(&c, "tag:参考").unwrap();
         assert_eq!(rows[0].font, "Microsoft YaHei", "只挪位置不该重置字体");
         assert_eq!(rows[0].fs, 31.5);
+        assert!(rows[0].vert, "只挪位置不该把竖排改回横排");
 
         // 打组：图片 gid 为正、便签 nid 取负；解组写回 0
         let g = board_group_set(&c, "tag:参考", &[7, -a], -1).unwrap();

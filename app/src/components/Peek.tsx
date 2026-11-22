@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "../data/source";
 import { loadPrefs } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
+import { useT } from "../lib/i18n";
 
 /**
  * 贴图窗口（UI 里叫「贴图」，也就是 owner 说的「贴图」——同一件事）。
@@ -79,6 +80,7 @@ function bootData(): {
 
 /** 16px 线性图标（只用一个，不值得为它引依赖） */
 export function Peek() {
+  const t = useT();
   const boot = useMemo(bootData, []);
   const [idx, setIdx] = useState(boot.i);
   const [pinned, setPinned] = useState(true); // 默认置顶（owner 要求）
@@ -107,12 +109,12 @@ export function Peek() {
     setFrame((v) => {
       const next = !v;
       void source.peekSetFrame(next);
-      flash(next ? "蓝色边框：开" : "蓝色边框：关");
+      flash(next ? t("peek.frameOn") : t("peek.frameOff"));
       return next;
     });
     /* 兜底：所有窗口（含本窗）都会收到 `peek:frame`，正常路径由事件驱动更新；
        这里先本地改一次是为了手感跟手，事件回来时值相同，不会闪。 */
-  }, [flash]);
+  }, [flash, t]);
 
   /* 其他贴图窗口切了这个开关 → 本窗跟着变（全局偏好的唯一同步方式） */
   useEffect(
@@ -337,13 +339,13 @@ export function Peek() {
   /* 右键菜单 */
   const menuItems: CtxItem[] = [
     {
-      label: "复制原图文件",
+      label: t("peek.copyFile"),
       icon: "copy",
       shortcut: "Ctrl+C",
       action: () => cur && void source.peekCopyFile([cur.path]).catch(() => {}),
     },
     {
-      label: "复制当前显示尺寸",
+      label: t("peek.copyDisplay"),
       icon: "copy",
       action: () => {
         // 屏幕上真实占用的像素（不是图片原始尺寸）—— 排版截图时要用的是这个数
@@ -353,61 +355,61 @@ export function Peek() {
       },
     },
     {
-      label: "以原始尺寸存到截图库",
+      label: t("peek.saveLib"),
       icon: "save",
       action: () => {
         if (!cur) return;
         void source
           .peekSaveLib(cur.path)
-          .then(() => flash("已存到截图库（screenshots）"))
+          .then(() => flash(t("peek.savedLib")))
           .catch((e: unknown) => flash(String((e as Error)?.message ?? e)));
       },
     },
     {
-      label: "另存到…",
+      label: t("peek.saveAs"),
       icon: "reveal",
       shortcut: "Ctrl+S",
       action: () => cur && void source.saveAs(cur.path).catch(() => {}),
     },
     { kind: "separator" },
     {
-      label: "截图",
+      label: t("peek.snip"),
       icon: "image",
       shortcut: "F1",
       action: () => void source.snipStart().catch(() => {}),
     },
     { kind: "separator" },
     {
-      label: `${pinned ? "✓ " : ""}窗口置顶`,
+      label: `${pinned ? "✓ " : ""}${t("peek.top")}`,
       icon: "star",
       action: () => void source.peekTop(!pinned).then(setPinned).catch(() => {}),
     },
     {
-      label: `${frame ? "✓ " : ""}蓝色边框`,
+      label: `${frame ? "✓ " : ""}${t("peek.frame")}`,
       icon: "image",
       action: toggleFrame,
     },
     { kind: "separator" },
     {
-      label: `顺时针转 90°${rot ? `（已转 ${rot}°）` : ""}`,
+      label: rot ? t("peek.rotateMore", { deg: rot }) : t("peek.rotate"),
       icon: "play",
       shortcut: "R",
       action: () => applyRot((rot + 90) % 360),
     },
     {
-      label: `${flip.h ? "✓ " : ""}左右镜像`,
+      label: `${flip.h ? "✓ " : ""}${t("peek.flipH")}`,
       icon: "copy",
       shortcut: "H",
       action: () => setFlip((f) => ({ ...f, h: !f.h })),
     },
     {
-      label: `${flip.v ? "✓ " : ""}上下镜像`,
+      label: `${flip.v ? "✓ " : ""}${t("peek.flipV")}`,
       icon: "copy",
       shortcut: "V",
       action: () => setFlip((f) => ({ ...f, v: !f.v })),
     },
     {
-      label: "还原旋转 / 镜像 / 缩放",
+      label: t("peek.resetView"),
       icon: "search",
       shortcut: "0",
       disabled: rot === 0 && !flip.h && !flip.v && view.s <= 1,
@@ -418,7 +420,7 @@ export function Peek() {
       },
     },
     { kind: "separator" },
-    { label: "关闭这个贴图", icon: "close", shortcut: "Esc", danger: true, action: close },
+    { label: t("peek.close"), icon: "close", shortcut: "Esc", danger: true, action: close },
   ];
 
   const px = cur?.src ?? "";

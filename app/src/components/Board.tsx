@@ -7,6 +7,8 @@ import {
   Layers,
   Maximize2,
   Minus,
+  Pin,
+  PinOff,
   Plus,
   Type,
   X,
@@ -16,6 +18,7 @@ import type { BoardNote } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 import { createShiftWheelPan } from "../lib/windowShiftPan";
 import { isOwnDrag } from "../lib/ownDrag";
+import { useT, type TKey } from "../lib/i18n";
 
 /**
  * 灵感板（照 PureRef）：把一个标签下的所有素材铺在一块**无边界画布**上。
@@ -106,33 +109,34 @@ const NOTE_H = 120;
 const NOTE_FS = 16;
 const NOTE_FS_DEF = 12.5;
 
-/** 字体下拉：系统里常见的几家，选不到的会自动回退到系统默认（CSS 就是这么工作的） */
-const FONTS: [string, string][] = [
-  ["", "默认"],
-  ["Microsoft YaHei", "微软雅黑"],
-  ["PingFang SC", "苹方"],
-  ["Source Han Sans SC", "思源黑体"],
-  ["Source Han Serif SC", "思源宋体"],
-  ["SimHei", "黑体"],
-  ["SimSun", "宋体"],
-  ["KaiTi", "楷体"],
-  ["FangSong", "仿宋"],
-  ["DengXian", "等线"],
-  ["Arial", "Arial"],
-  ["Georgia", "Georgia"],
-  ["Times New Roman", "Times New Roman"],
-  ["Consolas", "Consolas"],
-  ["Impact", "Impact"],
+/** 字体下拉：系统里常见的几家，选不到的会自动回退到系统默认（CSS 就是这么工作的）。
+ *  第二列是文案 key（拉丁字体名不用翻译，给 null 直接用字体名本身）。 */
+const FONTS: [string, TKey | null][] = [
+  ["", "board.font_default"],
+  ["Microsoft YaHei", "board.font_yahei"],
+  ["PingFang SC", "board.font_pingfang"],
+  ["Source Han Sans SC", "board.font_src_han_sans"],
+  ["Source Han Serif SC", "board.font_src_han_serif"],
+  ["SimHei", "board.font_simhei"],
+  ["SimSun", "board.font_simsun"],
+  ["KaiTi", "board.font_kaiti"],
+  ["FangSong", "board.font_fangsong"],
+  ["DengXian", "board.font_dengxian"],
+  ["Arial", null],
+  ["Georgia", null],
+  ["Times New Roman", null],
+  ["Consolas", null],
+  ["Impact", null],
 ];
 /** 文字颜色的几个预设（空 = 默认浅色） */
-const NOTE_COLORS: [string, string][] = [
-  ["", "默认"],
-  ["#ffffff", "白"],
-  ["#ffd45e", "黄"],
-  ["#ff7b72", "红"],
-  ["#7ee787", "绿"],
-  ["#C4B5FD", "紫"],
-  ["#9e9e9e", "灰"],
+const NOTE_COLORS: [string, TKey][] = [
+  ["", "board.color_default"],
+  ["#ffffff", "board.color_white"],
+  ["#ffd45e", "board.color_yellow"],
+  ["#ff7b72", "board.color_red"],
+  ["#7ee787", "board.color_green"],
+  ["#C4B5FD", "board.color_purple"],
+  ["#9e9e9e", "board.color_gray"],
 ];
 /** 常用字体（排在下拉最上面）；本机装了的字体另外从后端枚举，见 `am_system_fonts` */
 const COMMON_FONT_VALS = new Set(FONTS.map(([v]) => v).filter(Boolean));
@@ -179,6 +183,7 @@ function layout(items: BoardItem[]): { boxes: Box[]; width: number; height: numb
 }
 
 export function Board() {
+  const t = useT();
   const boot = useMemo(bootData, []);
   const [items, setItems] = useState<BoardItem[]>(() => boot?.items ?? []);
   /* 文字便签：坐标同样住在 `pos`（key = `-nid`），这里的 state 只负责文字与渲染 */
@@ -186,6 +191,8 @@ export function Board() {
   const notesRef = useRef<BoardNote[]>([]);
   /** 正在编辑的那张便签（nid）；null = 没有 */
   const [editId, setEditId] = useState<number | null>(null);
+  /** 编辑中的 textarea：点便签外面时要拿它的当前值去提交 */
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
   /* 选中集合（0.4.17）：key 和 `pos` 一致 —— 图片 id 正数、便签 `-nid` 负数。
      打组只是把这个集合"黏"下来：点组里任一员时，整组成员自动进选区。 */
   const [sel, setSel] = useState<Set<number>>(new Set());
@@ -202,6 +209,25 @@ export function Board() {
   const [layersOpen, setLayersOpen] = useState(true);
   /** 当前**最顶层**的那张。只记一张 —— 需求是"最近点哪张哪张在上面"，不是 PS 那种层叠序 */
   const [topId, setTopId] = useState<number | null>(null);
+  /* 置顶开关（默认开）：板子是拖到一边对着主窗看参考的，被主窗盖住就失去意义。
+     初值只是"新窗口的默认值"，真值问后端 —— 用户可能刚点过，本地值会撒谎。 */
+  const [boardTop, setBoardTop] = useState(true);
+  useEffect(() => {
+    void source
+      .boardIsTop()
+      .then((v) => setBoardTop(v))
+      .catch(() => {});
+  }, []);
+  /* 乐观更新：先把按钮翻过去，后端认下的值再校正一次；失败就翻回原值并静默
+     （顶栏没有地方挂红字，置顶失败也不影响画布上的任何操作）。 */
+  const toggleTop = useCallback(() => {
+    const want = !boardTop;
+    setBoardTop(want);
+    void source
+      .boardTop(want)
+      .then((real) => setBoardTop(real))
+      .catch(() => setBoardTop(!want));
+  }, [boardTop]);
   const { boxes, width: cw, height: ch } = useMemo(() => layout(items), [items]);
   const boxById = useMemo(() => {
     const m = new Map<number, Box>();
@@ -255,6 +281,28 @@ export function Board() {
     return () => window.removeEventListener("mousedown", h);
   }, [fontPop]);
 
+  /* 点便签以外的**任何地方**（画布空白 / 图片 / 别的便签 / 图层面板 / 顶栏…）= 结束编辑。
+     以前只有 textarea 自己失焦才提交，可画布 mousedown 对 textarea 直接 return、面板又
+     stopPropagation，点哪儿都不失焦，编辑态只能靠 Esc 退。这里挂在**捕获阶段**：
+     在 stopPropagation 之前就拿到事件，一次覆盖所有区域。
+     例外：底部便签工具条 + 字体弹层 —— 它们就是编辑时用来改字号/字体/竖排的，
+     点一下就退出编辑等于用不了。 */
+  useEffect(() => {
+    if (editId == null) return;
+    const h = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      if (t.closest(`[data-note="${editId}"]`)) return;
+      if (t.closest(".board-notebar, .board-fontpop")) return;
+      /* blur 走的是 textarea 自己的 onBlur → commitNote：空文本照旧删便签，
+         有字就存盘，不用在这里重写一遍提交逻辑。 */
+      taRef.current?.blur();
+    };
+    window.addEventListener("mousedown", h, true);
+    return () => window.removeEventListener("mousedown", h, true);
+  }, [editId]);
+
   /* 便签的"框"就是文字本身的尺寸（CSS 不设宽高），渲染完量一次写进 `pos` ——
      组框、整组缩放、落库都要真实大小。`offsetWidth` 是布局尺寸，不吃画布 transform。 */
   useEffect(() => {
@@ -279,7 +327,7 @@ export function Board() {
     () =>
       createShiftWheelPan({
         onUnavailable: () =>
-          setHint({ text: "Shift+滚轮 移动窗口不可用（当前窗口缺少窗口权限）", bad: true }),
+          setHint({ text: t("board.shift_pan_unavailable"), bad: true }),
       }),
     []
   );
@@ -455,6 +503,8 @@ export function Board() {
         fs: n.fs ?? 0,
         color: n.color ?? "",
         bold: !!n.bold,
+        /* 老库/老数据没有 vert（迁移后是 0）：读成横排，不会突然变竖排 */
+        vert: !!n.vert,
         grp: n.grp ?? 0,
       }));
       for (const n of list) {
@@ -502,7 +552,7 @@ export function Board() {
           Math.round(b.w),
           Math.round(b.h),
           n.text,
-          { font: n.font, fs: n.fs, color: n.color, bold: n.bold }
+          { font: n.font, fs: n.fs, color: n.color, bold: n.bold, vert: n.vert }
         )
         .catch(() => {});
     },
@@ -545,7 +595,7 @@ export function Board() {
     const cy = (H / 2 - v.y) / v.k;
     const x = Math.round(cx - NOTE_W / 2);
     const y = Math.round(cy - NOTE_H / 2);
-    const look = { font: "", fs: NOTE_FS, color: "", bold: false };
+    const look = { font: "", fs: NOTE_FS, color: "", bold: false, vert: false };
     try {
       const nid = await source.boardNotePut(board, null, x, y, NOTE_W, NOTE_H, "", look);
       pos.current.set(-nid, { x, y, w: NOTE_W, h: NOTE_H });
@@ -596,8 +646,8 @@ export function Board() {
             Math.round(b.h),
             text,
             cur
-              ? { font: cur.font, fs: cur.fs, color: cur.color, bold: cur.bold }
-              : { font: "", fs: NOTE_FS_DEF, color: "", bold: false }
+              ? { font: cur.font, fs: cur.fs, color: cur.color, bold: cur.bold, vert: cur.vert }
+              : { font: "", fs: NOTE_FS_DEF, color: "", bold: false, vert: false }
           )
           .catch(() => {});
     },
@@ -640,7 +690,7 @@ export function Board() {
     const keys = [...selRef.current];
     if (!board) return;
     if (keys.length < 2) {
-      setHint({ text: "先按住 Shift 点选两样以上，再按 Ctrl+G 打组", bad: true });
+      setHint({ text: t("board.group_need_two"), bad: true });
       return;
     }
     try {
@@ -650,7 +700,7 @@ export function Board() {
         for (const k of keys) n.set(k, g);
         return n;
       });
-      setHint({ text: `已打组（${keys.length} 个）：拖动任一成员整组一起走`, bad: false });
+      setHint({ text: t("board.group_done", { n: keys.length }), bad: false });
     } catch (e) {
       setHint({ text: String(e), bad: true });
     }
@@ -666,7 +716,7 @@ export function Board() {
       if (g) gs.add(g);
     }
     if (!gs.size) {
-      setHint({ text: "选中的东西没有打组", bad: true });
+      setHint({ text: t("board.group_none"), bad: true });
       return;
     }
     try {
@@ -682,7 +732,7 @@ export function Board() {
           return m;
         });
       }
-      setHint({ text: `已解组（${gs.size} 组 / ${n} 个）`, bad: false });
+      setHint({ text: t("board.ungroup_done", { groups: gs.size, n }), bad: false });
     } catch (e) {
       setHint({ text: String(e), bad: true });
     }
@@ -690,7 +740,7 @@ export function Board() {
 
   /** 改便签外观：立刻作用到 DOM + state + 落库（工具条每次点击走一遍） */
   const setNoteLook = useCallback(
-    (nid: number, patch: Partial<Pick<BoardNote, "font" | "fs" | "color" | "bold">>) => {
+    (nid: number, patch: Partial<Pick<BoardNote, "font" | "fs" | "color" | "bold" | "vert">>) => {
       notesRef.current = notesRef.current.map((n) => (n.nid === nid ? { ...n, ...patch } : n));
       setNotes(notesRef.current);
       const n = notesRef.current.find((x) => x.nid === nid);
@@ -731,7 +781,7 @@ export function Board() {
     setItems(order);
     if (boot?.board) void source.boardPlace(boot.board, rows).catch(() => {});
     fitTo(width, height);
-    setHint({ text: `已整理 ${order.length} 张`, bad: false });
+    setHint({ text: t("board.tidy_done", { n: order.length }), bad: false });
   }, [items, boxById, boot?.board, fitTo]);
 
   useEffect(() => {
@@ -1326,10 +1376,10 @@ export function Board() {
       setItems((old) => (old.some((x) => x.id === it.id) ? old : [...old, it]));
       setHint({
         text: snap
-          ? `已存进程序目录的 screenshots，并加进快照「${snap.name}」`
+          ? t("board.paste_snap", { name: snap.name })
           : coll
-            ? `已存进程序目录的 screenshots，并加进分组「${coll.name}」`
-            : `已存进程序目录的 screenshots，并打上「${tag}」`,
+            ? t("board.paste_coll", { name: coll.name })
+            : t("board.paste_tag", { tag: tag ?? "" }),
         bad: false,
       });
     } catch (e) {
@@ -1371,14 +1421,14 @@ export function Board() {
             return [...old, ...items.filter((x) => !have.has(x.id))];
           });
           items.forEach((it) => remember(it.id));
-          setHint({ text: `已放上 ${items.length} 张`, bad: false });
+          setHint({ text: t("board.add_paths_done", { n: items.length }), bad: false });
         }
         if (bad.length) {
           setHint({
             text:
               bad.length === 1
                 ? bad[0]
-                : `${bad.length} 个文件没放上来（不在素材库里）：${bad[0]}`,
+                : t("board.add_paths_bad", { n: bad.length, first: bad[0] }),
             bad: true,
           });
         }
@@ -1497,7 +1547,7 @@ export function Board() {
     const out: CtxItem[] = [];
     if (sel.size > 1) {
       out.push({
-        label: `打组（${sel.size} 个）`,
+        label: t("board.menu_group", { n: sel.size }),
         icon: "grid",
         shortcut: "Ctrl+G",
         action: () => void doGroup(),
@@ -1505,7 +1555,7 @@ export function Board() {
     }
     if ([...sel].some((k) => grpMap.get(k))) {
       out.push({
-        label: "解组",
+        label: t("board.menu_ungroup"),
         icon: "grid",
         shortcut: "Ctrl+Shift+G",
         action: () => void doUngroup(),
@@ -1520,13 +1570,13 @@ export function Board() {
       const nid = menu.note;
       return [
         {
-          label: "编辑文字",
+          label: t("board.menu_edit_note"),
           icon: "file",
           action: () => setEditId(nid),
         },
         { kind: "separator" },
         {
-          label: "删除这张便签",
+          label: t("board.menu_del_note"),
           icon: "trash",
           danger: true,
           action: () => delNote(nid),
@@ -1539,72 +1589,72 @@ export function Board() {
       return [
         ...groupMenu(),
         {
-          label: "添加文字便签",
+          label: t("board.menu_add_note"),
           icon: "file",
           shortcut: "T",
           action: () => void addNote(),
         },
         {
-          label: "一键整理图片",
+          label: t("board.menu_tidy"),
           icon: "grid",
           action: tidy,
         },
         { kind: "separator" },
         {
-          label: "从资源管理器拖文件进来",
+          label: t("board.menu_drag_hint"),
           icon: "import",
-          action: () => setHint({ text: "直接把图片拖进画布即可（只收已入库的图）", bad: false }),
+          action: () => setHint({ text: t("board.menu_drag_bubble"), bad: false }),
         },
         {
-          label: "粘贴剪贴板图片",
+          label: t("board.menu_paste"),
           icon: "copy",
           shortcut: "Ctrl+V",
           action: () => void paste(),
         },
         { kind: "separator" },
-        { label: "全部适应窗口", icon: "expand", shortcut: "F", action: fit },
-        { label: "回到 100%", icon: "search", shortcut: "0", action: reset100 },
+        { label: t("board.menu_fit"), icon: "expand", shortcut: "F", action: fit },
+        { label: t("board.menu_reset"), icon: "search", shortcut: "0", action: reset100 },
         { kind: "separator" },
-        { label: "关闭这块灵感板", icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
+        { label: t("board.menu_close"), icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
       ];
     }
     return [
       {
-        label: "用默认程序打开原文件",
+        label: t("board.menu_open_default"),
         icon: "file",
         action: () => void source.openDefault(it.path).catch(() => {}),
       },
       {
-        label: "用贴图打开",
+        label: t("board.menu_open_peek"),
         icon: "expand",
         action: () => void source.peekOpen([it.id], 0).catch(() => {}),
       },
       {
-        label: "复制原图文件",
+        label: t("board.menu_copy_file"),
         icon: "copy",
         shortcut: "Ctrl+C",
         action: () => void source.peekCopyFile([it.path]).catch(() => {}),
       },
       {
-        label: "另存原文件为…",
+        label: t("board.menu_save_as"),
         icon: "file",
         action: () => void source.saveAs(it.path, it.name).catch((e) => setHint({ text: String(e), bad: true })),
       },
       {
-        label: "在资源管理器中显示",
+        label: t("board.menu_reveal"),
         icon: "reveal",
         action: () => void source.reveal(it.path).catch(() => {}),
       },
       { kind: "separator" },
-      { label: "全部适应窗口", icon: "expand", shortcut: "F", action: fit },
-      { label: "回到 100%", icon: "search", shortcut: "0", action: reset100 },
+      { label: t("board.menu_fit"), icon: "expand", shortcut: "F", action: fit },
+      { label: t("board.menu_reset"), icon: "search", shortcut: "0", action: reset100 },
       { kind: "separator" },
-      { label: "关闭这块灵感板", icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
+      { label: t("board.menu_close"), icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
     ];
   }, [menu, items, notes, fit, reset100, paste, addNote, tidy, delNote, sel, grpMap, doGroup, doUngroup]);
 
   if (!boot) {
-    return <div className="board-miss">灵感板数据丢失，请回到主窗口重新打开</div>;
+    return <div className="board-miss">{t("board.missing_all")}</div>;
   }
 
   const shown = items.filter((it) => vis.has(it.id));
@@ -1627,8 +1677,9 @@ export function Board() {
   }, [items, notes, boxById, layersOpen]);
   /* 选区包围盒：只在"多选 / 选中了组"时显示。拖动中由 `syncSelBox` 直接改 DOM */
   const selBox = sel.size > 1 ? bboxOf(sel) : null;
-  /* 底部字体工具条作用的那张便签：选区里只有一张便签时 */
+  /* 底部字体工具条作用的那张便签：正在编辑的那张优先，否则选区里只有一张便签时 */
   const lookNote = (() => {
+    if (editId != null) return notes.find((n) => n.nid === editId) ?? null;
     if (sel.size !== 1) return null;
     const k = [...sel][0];
     return k < 0 ? (notes.find((n) => n.nid === -k) ?? null) : null;
@@ -1641,12 +1692,17 @@ export function Board() {
     lookNote?.font && !COMMON_FONT_VALS.has(lookNote.font) && !extraFonts.includes(lookNote.font)
       ? lookNote.font
       : "";
+  /* 字体族名 → 显示名：内置的几家走译文，本机枚举出来的直接显示族名 */
+  const fontLabel = (v: string) => {
+    const key = FONTS.find(([f]) => f === v)?.[1];
+    return key ? t(key) : v;
+  };
   /* 字体搜索：常用排在前面，本机的全部字体跟在后面（每行用自己的字体渲染自己名字） */
   const fontHits = useMemo(() => {
     const q = fontQ.trim().toLowerCase();
     const common: { v: string; label: string }[] = [
-      { v: "", label: "默认" },
-      ...FONTS.filter(([v]) => v).map(([v, label]) => ({ v, label })),
+      { v: "", label: t("board.font_default") },
+      ...FONTS.filter(([v]) => v).map(([v, key]) => ({ v, label: key ? t(key) : v })),
     ];
     const hitC = q
       ? common.filter((o) => o.label.toLowerCase().includes(q) || o.v.toLowerCase().includes(q))
@@ -1758,7 +1814,7 @@ export function Board() {
                   )}
                 </>
               )}
-              <span className="board-handle" data-handle title="拖动改大小（Alt+滚轮也行）" />
+              <span className="board-handle" data-handle title={t("board.handle_resize")} />
             </div>
           );
         })}
@@ -1774,7 +1830,7 @@ export function Board() {
             <div
               key={`n${n.nid}`}
               data-note={n.nid}
-              className={`board-note ${editing ? "editing" : ""} ${sel.has(-n.nid) ? "sel" : ""} ${grpMap.get(-n.nid) ? "in-group" : ""}`}
+              className={`board-note ${editing ? "editing" : ""} ${n.vert ? "vert" : ""} ${sel.has(-n.nid) ? "sel" : ""} ${grpMap.get(-n.nid) ? "in-group" : ""}`}
               style={{
                 left: b.x,
                 top: b.y,
@@ -1783,7 +1839,7 @@ export function Board() {
                 color: n.color || undefined,
                 fontWeight: n.bold ? 700 : 400,
               }}
-              title={editing ? undefined : "双击改文字 · 拖动挪位置 · 右下角缩放"}
+              title={editing ? undefined : t("board.note_tip")}
               onDoubleClick={(e) => {
                 /* 必须拦住：外层双击是「打开贴图 / fit」，会把便签一起带走 */
                 e.stopPropagation();
@@ -1792,6 +1848,7 @@ export function Board() {
             >
               {editing ? (
                 <textarea
+                  ref={taRef}
                   className="board-note-input"
                   defaultValue={n.text}
                   autoFocus
@@ -1799,7 +1856,7 @@ export function Board() {
                   /* wrap=off：**只有回车才换行**。默认的 textarea 会按容器宽度软折行，
                      双击进编辑时一行字突然变两行，看起来像"文字被改了"。 */
                   wrap="off"
-                  placeholder="写点什么…（Esc 保存，清空即删）"
+                  placeholder={t("board.note_placeholder")}
                   onBlur={(e) => commitNote(n.nid, e.currentTarget.value)}
                   onKeyDown={(e) => {
                     /* 打字期间不许触发全局快捷键（T 新便签 / Ctrl+V 粘图 / F 适应窗口） */
@@ -1812,10 +1869,13 @@ export function Board() {
                 />
               ) : (
                 <div className={`board-note-text ${n.text ? "" : "empty"}`}>
-                  {n.text || "双击写字"}
+                  {n.text || t("board.note_empty")}
                 </div>
               )}
-              <span className="board-handle" data-handle title="拖动缩放（字号跟着变）" />
+              {/* 缩放手柄：编辑时藏起来（用户只要一根光标，不要任何框/角标） */}
+              {!editing && (
+                <span className="board-handle" data-handle title={t("board.note_handle")} />
+              )}
             </div>
           );
         })}
@@ -1827,7 +1887,7 @@ export function Board() {
             className="board-selbox"
             style={{ left: selBox.x, top: selBox.y, width: selBox.w, height: selBox.h }}
           >
-            <span className="board-selbox-handle" data-group-handle title="拖动缩放整组" />
+            <span className="board-selbox-handle" data-group-handle title={t("board.selbox_handle")} />
           </div>
         )}
       </div>
@@ -1844,17 +1904,17 @@ export function Board() {
         <div className="board-layers" onMouseDown={(e) => e.stopPropagation()}>
           <div className="board-layers-head">
             <Layers size={13} strokeWidth={1.8} className="board-layers-icon" />
-            <span className="board-layers-title">图层</span>
-            <span className="mono board-layers-count" title="图片数 · 文字数">
+            <span className="board-layers-title">{t("board.layers")}</span>
+            <span className="mono board-layers-count" title={t("board.layers_count_tip")}>
               {items.length}
               {notes.length ? `+${notes.length}` : ""}
             </span>
-            <button title="收起图层面板（L）" onClick={() => setLayersOpen(false)}>
+            <button title={t("board.layers_collapse")} onClick={() => setLayersOpen(false)}>
               <X size={12} strokeWidth={1.9} />
             </button>
           </div>
           <div className="board-layers-list">
-            {!layerRows.length && <div className="board-layers-empty">板上还没有东西</div>}
+            {!layerRows.length && <div className="board-layers-empty">{t("board.layers_empty")}</div>}
             {layerRows.map((r) => {
               if (r.img) {
                 const it = r.img;
@@ -1863,7 +1923,7 @@ export function Board() {
                     key={it.id}
                     data-layer={it.id}
                     className={`board-layer ${sel.has(it.id) ? "on" : ""}`}
-                    title={`${it.name}\n点一下 = 选中并居中`}
+                    title={`${it.name}\n${t("board.layer_focus_tip")}`}
                     onClick={() => {
                       setTopId(it.id);
                       const n = new Set([it.id]);
@@ -1880,7 +1940,7 @@ export function Board() {
                       <img src={it.src} alt="" draggable={false} loading="lazy" decoding="async" />
                     )}
                     <span className="board-layer-name">{it.name}</span>
-                    {topId === it.id && <span className="board-layer-top">顶</span>}
+                    {topId === it.id && <span className="board-layer-top">{t("board.layer_top")}</span>}
                   </div>
                 );
               }
@@ -1891,7 +1951,7 @@ export function Board() {
                   key={`n${n.nid}`}
                   data-layer-note={n.nid}
                   className={`board-layer board-layer-note ${sel.has(-n.nid) ? "on" : ""}`}
-                  title={`${preview || "（空文字）"}\n点 = 选中并居中 · 双击 = 改字`}
+                  title={`${preview || t("board.note_text_empty")}\n${t("board.layer_note_tip")}`}
                   onClick={() => {
                     const s = new Set([-n.nid]);
                     selRef.current = s;
@@ -1904,7 +1964,7 @@ export function Board() {
                   }}
                 >
                   <span className="board-layer-ph board-layer-t">T</span>
-                  <span className="board-layer-name">{preview || "（空文字）"}</span>
+                  <span className="board-layer-name">{preview || t("board.note_text_empty")}</span>
                   <span className="board-layer-meta mono">
                     {Math.round(n.fs || NOTE_FS_DEF)}
                   </span>
@@ -1919,25 +1979,25 @@ export function Board() {
       {!items.length && !notes.length && (
         <div className="board-empty">
           <span className="board-empty-title">
-            {boot.snapshot ? "这份快照里的图这次一张都没找到" : "这块板还是空的"}
+            {boot.snapshot ? t("board.empty_snapshot") : t("board.empty_board")}
           </span>
           <span className="board-empty-hint">
             {boot.snapshot ? (
               <>
-                条目不会被删 —— 移动硬盘插回来、或者把目录重新加进素材库之后，
-                在侧栏右键这份快照点「重新对账」就行。
+                {t("board.empty_snapshot_hint")}
                 <br />
               </>
             ) : null}
-            <kbd className="mono">Ctrl+V</kbd> 粘贴剪贴板里的图片 —— 会存到程序目录的{" "}
-            <span className="mono">screenshots</span>，
+            <kbd className="mono">Ctrl+V</kbd> {t("board.empty_paste_lead")}{" "}
+            <span className="mono">screenshots</span>
             {boot.snapshot
-              ? `并加进快照「${boot.snapshot.name}」`
+              ? t("board.empty_paste_snap", { name: boot.snapshot.name })
               : boot.coll
-                ? `并加进分组「${boot.coll.name}」`
-                : `并打上「${boot.tag}」标签`}
+                ? t("board.empty_paste_coll", { name: boot.coll.name })
+                : t("board.empty_paste_tag", { tag: boot.tag ?? "" })}
             <br />
-            也可以按 <kbd className="mono">T</kbd> 先写一段文字注释。
+            {t("board.empty_note_lead")} <kbd className="mono">T</kbd>{" "}
+            {t("board.empty_note_tail")}
           </span>
         </div>
       )}
@@ -1946,12 +2006,20 @@ export function Board() {
 
       {/* 文本框的字体工具条（0.4.17）：只在"恰好选中一张便签"时出现，
           固定在底部中央 —— 不跟着画布平移缩放，所以永远点得到。 */}
+      {/* 工具条自己不吃画布手势；`preventDefault` 是为了**别把焦点从 textarea 抢走** ——
+          编辑时点字号/竖排，光标要留在便签里继续打字（原生 button 会抢焦点 → blur → 退出编辑）。 */}
       {lookNote && (
-        <div className="board-notebar" onMouseDown={(e) => e.stopPropagation()}>
+        <div
+          className="board-notebar"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+          }}
+        >
           {/* 字体按钮：点开带搜索的弹层。本机装了上千款字体，原生 select 拉不动 */}
           <button
             className="board-notebar-fontbtn"
-            title={`字体：常用 + 本机已安装${extraFonts.length ? `（${extraFonts.length} 款）` : ""}`}
+            title={`${t("board.font_btn_tip")}${extraFonts.length ? t("board.font_btn_tip_n", { n: extraFonts.length }) : ""}`}
             onClick={() => {
               setFontQ("");
               setFontPop((v) => !v);
@@ -1959,14 +2027,14 @@ export function Board() {
           >
             <span className="board-notebar-fontname">
               {lookNote.font
-                ? (FONTS.find(([v]) => v === lookNote.font)?.[1] ?? lookNote.font)
-                : "默认"}
+                ? fontLabel(lookNote.font)
+                : t("board.font_default")}
             </span>
             <ChevronDown size={11} strokeWidth={2} />
           </button>
           <span className="board-notebar-sep" />
           <button
-            title="字号变小"
+            title={t("board.font_size_down")}
             onClick={() =>
               setNoteLook(lookNote.nid, {
                 fs: Math.max(6, Math.round(((lookNote.fs || NOTE_FS_DEF) / 1.15) * 10) / 10),
@@ -1977,7 +2045,7 @@ export function Board() {
           </button>
           <span className="mono board-notebar-size">{Math.round(lookNote.fs || NOTE_FS_DEF)}</span>
           <button
-            title="字号变大"
+            title={t("board.font_size_up")}
             onClick={() =>
               setNoteLook(lookNote.nid, {
                 fs: Math.min(400, Math.round((lookNote.fs || NOTE_FS_DEF) * 1.15 * 10) / 10),
@@ -1989,10 +2057,25 @@ export function Board() {
           <span className="board-notebar-sep" />
           <button
             className={lookNote.bold ? "on" : ""}
-            title="加粗"
+            title={t("board.bold")}
             onClick={() => setNoteLook(lookNote.nid, { bold: !lookNote.bold })}
           >
             <BoldIcon size={12} strokeWidth={2.1} />
+          </button>
+          <span className="board-notebar-sep" />
+          {/* 横排 / 竖排（0.5.2）：竖排 = Photoshop「直排文字工具」，
+              文字自上而下、回车往**左**开新列（CSS writing-mode: vertical-rl 就是这个语义）。
+              点一下立即重排 + 立即落库（setNoteLook 走 noteRemember）。 */}
+          <button
+            className={`board-notebar-vert ${lookNote.vert ? "on" : ""}`}
+            title={
+              lookNote.vert
+                ? t("board.vert_on_tip")
+                : t("board.vert_off_tip")
+            }
+            onClick={() => setNoteLook(lookNote.nid, { vert: !lookNote.vert })}
+          >
+            <span>{lookNote.vert ? t("board.vert") : t("board.horiz")}</span>
           </button>
           <span className="board-notebar-sep" />
           {NOTE_COLORS.map(([v, label]) => (
@@ -2000,7 +2083,7 @@ export function Board() {
               key={v || "def"}
               className={`board-notebar-color ${v ? "" : "def"} ${lookNote.color === v ? "on" : ""}`}
               style={v ? { background: v } : undefined}
-              title={`文字颜色：${label}`}
+              title={t("board.note_color_tip", { color: t(label) })}
               onClick={() => setNoteLook(lookNote.nid, { color: v })}
             />
           ))}
@@ -2015,7 +2098,7 @@ export function Board() {
             className="board-fontpop-q"
             autoFocus
             spellCheck={false}
-            placeholder={`搜索 ${extraFonts.length + FONTS.length - 1} 款字体…`}
+            placeholder={t("board.font_search", { n: extraFonts.length + FONTS.length - 1 })}
             value={fontQ}
             onChange={(e) => setFontQ(e.target.value)}
             onKeyDown={(e) => {
@@ -2041,7 +2124,7 @@ export function Board() {
                 {o.v && <span className="board-fontpop-tag mono">{o.v}</span>}
               </button>
             ))}
-            {fontHits.all.length > 0 && <div className="board-fontpop-sep">本机已安装</div>}
+            {fontHits.all.length > 0 && <div className="board-fontpop-sep">{t("board.font_local")}</div>}
             {fontHits.all.slice(0, 200).map((o) => (
               <button
                 key={o.v}
@@ -2058,15 +2141,15 @@ export function Board() {
             ))}
             {fontHits.all.length > 200 && (
               <div className="board-fontpop-more">
-                还有 {fontHits.all.length - 200} 款 —— 继续输入缩小范围
+                {t("board.font_more", { n: fontHits.all.length - 200 })}
               </div>
             )}
             {!fontHits.common.length && !fontHits.all.length && (
-              <div className="board-fontpop-more">没有匹配的字体</div>
+              <div className="board-fontpop-more">{t("board.font_none")}</div>
             )}
             {strayFont && (
               <div className="board-fontpop-more">
-                当前字体「{strayFont}」不在本机字体列表里，显示时会回退
+                {t("board.font_stray", { font: strayFont })}
               </div>
             )}
           </div>
@@ -2080,16 +2163,16 @@ export function Board() {
         style={{ left: layersOpen ? LAYERS_W + 14 : 14 }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <button title="缩小" onClick={() => zoomBy(1 / 1.2)}>
+        <button title={t("board.zoom_out")} onClick={() => zoomBy(1 / 1.2)}>
           <Minus size={12} strokeWidth={1.9} />
         </button>
-        <span className="mono board-zoom" onClick={reset100} title="点一下回到 100%">
+        <span className="mono board-zoom" onClick={reset100} title={t("board.zoom_reset_tip")}>
           {Math.round(zoom * 100)}%
         </span>
-        <button title="放大" onClick={() => zoomBy(1.2)}>
+        <button title={t("board.zoom_in")} onClick={() => zoomBy(1.2)}>
           <Plus size={12} strokeWidth={1.9} />
         </button>
-        <button title="全部适应窗口（F）" onClick={fit}>
+        <button title={t("board.fit_tip")} onClick={fit}>
           <Maximize2 size={12} strokeWidth={1.9} />
         </button>
       </div>
@@ -2100,43 +2183,59 @@ export function Board() {
           <span className="board-name">{boot.title}</span>
           <span className="board-count mono">
             {items.length}
-            {boot.more ? `/${boot.total}` : ""} 张
-            {!!boot.missing && ` · ${boot.missing} 张这次没找到`}
+            {boot.more ? `/${boot.total}` : ""}
+            {t("board.unit_image")}
+            {!!boot.missing && t("board.missing_count", { n: boot.missing })}
           </span>
         </div>
         <div className="board-actions">
           <button
-            title="粘贴剪贴板图片（Ctrl+V）：存进程序目录的 screenshots，并打上这个标签"
+            title={t("board.paste_tip")}
             onClick={() => void paste()}
           >
             <ClipboardPaste size={13} strokeWidth={1.8} />
           </button>
-          <button title="添加文字便签（T）" onClick={() => void addNote()}>
+          <button title={t("board.add_note_tip")} onClick={() => void addNote()}>
             <Type size={13} strokeWidth={1.8} />
           </button>
-          <button title="一键整理图片：按当前顺序重排成整齐的瀑布流" onClick={tidy}>
+          <button title={t("board.tidy_tip")} onClick={tidy}>
             <LayoutGrid size={13} strokeWidth={1.8} />
           </button>
           <button
-            title="图层面板（L）：所有图片一览，点谁谁置顶"
+            title={t("board.layers_tip")}
             className={layersOpen ? "on" : ""}
             onClick={() => setLayersOpen((v) => !v)}
           >
             <Layers size={13} strokeWidth={1.8} />
           </button>
           <span className="board-sep" />
-          <button title="缩小" onClick={() => zoomBy(1 / 1.2)}>
+          <button title={t("board.zoom_out")} onClick={() => zoomBy(1 / 1.2)}>
             <Minus size={13} strokeWidth={1.8} />
           </button>
           <span className="mono board-zoom">{Math.round(zoom * 100)}%</span>
-          <button title="放大" onClick={() => zoomBy(1.2)}>
+          <button title={t("board.zoom_in")} onClick={() => zoomBy(1.2)}>
             <Plus size={13} strokeWidth={1.8} />
           </button>
-          <button title="全部适应窗口（F）" onClick={fit}>
+          <button title={t("board.fit_tip")} onClick={fit}>
             <Maximize2 size={13} strokeWidth={1.8} />
           </button>
           <span className="board-sep" />
-          <button title="关闭（Esc）" onClick={() => void source.boardClose()}>
+          <button
+            title={
+              boardTop
+                ? t("board.top_on_tip")
+                : t("board.top_off_tip")
+            }
+            className={boardTop ? "on" : ""}
+            onClick={toggleTop}
+          >
+            {boardTop ? (
+              <Pin size={13} strokeWidth={1.8} />
+            ) : (
+              <PinOff size={13} strokeWidth={1.8} />
+            )}
+          </button>
+          <button title={t("board.close_tip")} onClick={() => void source.boardClose()}>
             <X size={13} strokeWidth={1.8} />
           </button>
         </div>

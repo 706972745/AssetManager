@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { motion } from "motion/react";
 import type { AutoRule, TagGroup } from "../types";
 import { COLOR_LABEL, TAG_COLORS, colorClass } from "../lib/tags";
+import { useT } from "../lib/i18n";
 import { BlinkCaretInput, Icon } from "./ui";
 import { springSoft } from "../design/springs";
 
@@ -56,6 +57,7 @@ export function TagEdit({
   /** 卡片底部的额外动作（只看这个标签 / 灵感板 / 快照 …） */
   extra?: ReactNode;
 }) {
+  const t = useT();
   const [draft, setDraft] = useState(name);
   /* 自动规则的草稿：扩展名用逗号串编辑（用户心智是"写一串扩展名"，不是点标签） */
   const [r, setR] = useState<AutoRule>(
@@ -72,8 +74,8 @@ export function TagEdit({
   useEffect(() => setDraft(name), [name]);
   useEffect(() => {
     if (!creating) return;
-    const t = window.setTimeout(() => newRef.current?.querySelector("input")?.focus(), 30);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => newRef.current?.querySelector("input")?.focus(), 30);
+    return () => window.clearTimeout(timer);
   }, [creating]);
 
   /* 点外面关（浮层没有遮罩，这是唯一的"取消"手势之一） */
@@ -133,17 +135,17 @@ export function TagEdit({
       className="tag-edit"
       style={pos}
       role="dialog"
-      aria-label={isTag ? `编辑标签 ${name}` : `编辑分组 ${name}`}
+      aria-label={isTag ? t("dock.tags.edit_aria", { name }) : t("dock.group_edit_aria", { name })}
       initial={{ opacity: 0, y: -4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={springSoft}
     >
       <div className="tag-edit-head">
         <Icon name={isTag ? "tag" : "folder"} size={12} stroke={1.6} />
-        <span>{isTag ? "编辑标签" : "编辑分组"}</span>
+        <span>{isTag ? t("tag.edit_tag") : t("tag.edit_group")}</span>
       </div>
 
-      <div className="tag-edit-label">名称</div>
+      <div className="tag-edit-label">{t("tag.name")}</div>
       {readOnly ? (
         <div className="tag-edit-ro">{name}</div>
       ) : (
@@ -151,9 +153,9 @@ export function TagEdit({
         autoFocus
         value={draft}
         onChange={setDraft}
-        placeholder={isTag ? "标签名" : "分组名"}
+        placeholder={isTag ? t("chrome.tag_name_aria") : t("tag.group_name")}
         inputClassName="tag-edit-input"
-        ariaLabel={isTag ? "标签名" : "分组名"}
+        ariaLabel={isTag ? t("chrome.tag_name_aria") : t("tag.group_name")}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
@@ -164,13 +166,13 @@ export function TagEdit({
       />
       )}
 
-      <div className="tag-edit-label">颜色</div>
+      <div className="tag-edit-label">{t("tag.color")}</div>
       <div className={`tag-swatches ${readOnly ? "ro" : ""}`}>
         <button
           className={`tag-swatch tc-gray ${!color || color === "gray" ? "on" : ""}`}
           onClick={() => onColor(null)}
-          title="默认（灰）"
-          aria-label="默认颜色"
+          title={t("tag.default_gray")}
+          aria-label={t("tag.default_color")}
         />
         {TAG_COLORS.filter((c) => c !== "gray").map((c) => (
           <button
@@ -185,10 +187,10 @@ export function TagEdit({
 
       {isTag && (
         <>
-          <div className="tag-edit-label">分组</div>
+          <div className="tag-edit-label">{t("app.common.group")}</div>
           <div className="tag-edit-groups">
             <button className={`tag-chip pick ${!group ? "on" : ""}`} onClick={() => onGroup(null)}>
-              未分组
+              {t("dock.tags.ungrouped")}
             </button>
             {groups.map((g) => (
               <button
@@ -206,7 +208,7 @@ export function TagEdit({
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setCreating(true)}
               >
-                + 新建分组
+                + {t("tag.new_group")}
               </button>
             )}
           </div>
@@ -216,9 +218,9 @@ export function TagEdit({
                 autoFocus
                 value={newGroup}
                 onChange={setNewGroup}
-                placeholder="新分组名，回车加入"
+                placeholder={t("tag.new_group_ph")}
                 inputClassName="tag-edit-input"
-                ariaLabel="新分组名"
+                ariaLabel={t("tag.new_group_aria")}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") commitNewGroup();
                   else if (e.key === "Escape") {
@@ -238,22 +240,23 @@ export function TagEdit({
             aria-expanded={showRule}
           >
             <Icon name="chevron" size={9} stroke={2} />
-            自动规则{rule ? "（已启用）" : ""}
+            {t("tag.auto_rule")}
+            {rule ? t("tag.auto_rule_on") : ""}
           </button>
           {showRule && (
           <div className="tag-rule">
             <div className="tag-rule-grid">
               <label>
-                <span>目录包含</span>
+                <span>{t("tag.rule_dir")}</span>
                 <input
                   className="mono"
                   value={r.dir}
-                  placeholder="如 客户/2026"
+                  placeholder={t("tag.rule_dir_ph")}
                   onChange={(e) => setR({ ...r, dir: e.target.value })}
                 />
               </label>
               <label>
-                <span>扩展名</span>
+                <span>{t("tag.rule_ext")}</span>
                 <input
                   className="mono"
                   value={extText}
@@ -262,7 +265,7 @@ export function TagEdit({
                 />
               </label>
               <label>
-                <span>最小体积 MB</span>
+                <span>{t("tag.rule_mb")}</span>
                 <input
                   type="number"
                   min={0}
@@ -272,7 +275,7 @@ export function TagEdit({
                 />
               </label>
               <label>
-                <span>最小长边 px</span>
+                <span>{t("tag.rule_px")}</span>
                 <input
                   type="number"
                   min={0}
@@ -297,11 +300,11 @@ export function TagEdit({
                   });
                 }}
               >
-                保存规则
+                {t("tag.rule_save")}
               </button>
               {rule && (
                 <button className="btn btn-tiny" onClick={() => onRule(null)}>
-                  清除规则
+                  {t("tag.rule_clear")}
                 </button>
               )}
             </div>
@@ -314,18 +317,18 @@ export function TagEdit({
 
       <p className="tag-edit-hint">
         {readOnly
-          ? "这是自动标签（按格式 / 类型 / 像素 / 比例算出来的），不能改名、改色或删除。"
+          ? t("tag.hint_auto")
           : isTag
-            ? "颜色和分组只改显示，不动文件名、不动磁盘。"
-            : "解散分组不会删标签：组里的标签回到「未分组」，素材上的标签一条都不会少。"}
+            ? t("tag.hint_tag")
+            : t("tag.hint_group")}
       </p>
 
       <div className="tag-edit-foot">
         <button className="tag-edit-danger" onClick={onDelete} disabled={readOnly}>
-          {isTag ? "删除标签" : "解散分组"}
+          {isTag ? t("tag.delete_tag") : t("tag.delete_group")}
         </button>
         <button className="tag-edit-done" onClick={onClose}>
-          完成
+          {t("common.done")}
         </button>
       </div>
     </motion.div>

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { CollRow } from "../types";
 import { DOCK_LEAVE_DELAY, getActiveDock, setActiveDock, useDockHover } from "../lib/dockHover";
 import { setDockOpen, useDockOpen } from "../lib/dockOpen";
 import { BlinkCaretInput, Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 /**
  * 侧栏「分组」停靠面板。**壳与行逐项照 FontManager**（owner 2026-11-18：
@@ -25,7 +26,7 @@ const DOCK_ID = "collections";
      换键只是把脏值藏起来，不如干脆不持久化。
    想要一直展开就点一下头部，鼠标离开会收，重启也回到收起。 */
 
-export function CollDock({
+function CollDockImpl({
   items,
   activeId,
   onPick,
@@ -52,6 +53,7 @@ export function CollDock({
   /** @deprecated 由 dockOpen 自动判定两块是否同开，调用点不用再传 */
   half?: boolean;
 }) {
+  const t = useT();
   const [pinned, setPinned] = useState(false);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
@@ -170,8 +172,8 @@ export function CollDock({
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        aria-label={showingPinned ? "取消固定并收起分组面板" : "固定展开分组面板"}
-        title={showingPinned ? "已固定：点一下取消固定" : "点一下固定展开（不点则随鼠标离开自动收起）"}
+        aria-label={showingPinned ? t("dock.head_aria_unpin", { panel: t("dock.coll.panel") }) : t("dock.head_aria_pin", { panel: t("dock.coll.panel") })}
+        title={showingPinned ? t("dock.head_title_pinned") : t("dock.head_title")}
         /* 拖放到**头部** = 投到当前筛选的分组（没有就投第一个）。头部不接落点的话，
            拖到「分组」这条上松手就是毫无反应（owner 2026-11-20 复测）。 */
         data-drop-head="collections"
@@ -184,23 +186,23 @@ export function CollDock({
         }}
       >
         <Icon name="folder-open" size={15} stroke={1.5} className="tag-dock-icon" />
-        <span className="tag-dock-title">分组</span>
+        <span className="tag-dock-title">{t("dock.coll.panel")}</span>
         {/* 0.4.24：点分组不再切库，只在**当前素材库**里看这一撮。这个标记就是让用户
             一眼知道范围 —— 不然"为什么只有 8 张"永远要猜（owner 2026-11-21）。 */}
-        <span className="tag-dock-scope" title="只在当前素材库里生效；当前库里没有时才临时放宽到全部库">
-          仅当前库
+        <span className="tag-dock-scope" title={t("dock.scope_tip")}>
+          {t("dock.scope")}
         </span>
         {activeId !== null ? (
           <span className="tag-dock-filter">
             <span className="tag-dock-filter-name">
-              {items.find((x) => x.id === activeId)?.name ?? "分组"}
+              {items.find((x) => x.id === activeId)?.name ?? t("dock.coll.panel")}
             </span>
             <span
               className="tag-dock-filter-x"
               role="button"
               tabIndex={0}
-              aria-label="清除分组筛选"
-              title="清除筛选"
+              aria-label={t("dock.coll.clear_filter_aria")}
+              title={t("dock.clear_filter")}
               onClick={(e) => {
                 e.stopPropagation();
                 onPick(null);
@@ -222,44 +224,44 @@ export function CollDock({
           <BlinkCaretInput
             value={q}
             onChange={setQ}
-            placeholder="过滤分组…"
+            placeholder={t("dock.coll.filter_placeholder")}
             fieldClassName="tag-dock-search"
-            ariaLabel="过滤分组"
+            ariaLabel={t("dock.coll.filter_aria")}
             onFocus={() => setFocusHold(true)}
             onBlur={() => setFocusHold(false)}
           />
           <button
             className={`tag-tool-btn ${showingPinned ? "on" : ""}`}
-            title={showingPinned ? "取消固定（收起后随鼠标离开自动收起）" : "固定展开（鼠标离开也不收）"}
+            title={showingPinned ? t("dock.pin_tip_on") : t("dock.pin_tip_off")}
             aria-pressed={showingPinned}
             onClick={togglePin}
           >
             <span className="tag-pin-dot" aria-hidden />
-            <span>{showingPinned ? "已固定" : "固定"}</span>
+            <span>{showingPinned ? t("dock.pinned") : t("dock.pin")}</span>
           </button>
           <button
             className="tag-tool-btn"
-            title="新建分组"
-            aria-label="新建分组"
+            title={t("dock.coll.new")}
+            aria-label={t("dock.coll.new")}
             onClick={() => {
               setAdding(true);
               setDraft("");
             }}
           >
             <Icon name="plus" size={11} stroke={1.8} />
-            <span>分组</span>
+            <span>{t("dock.coll.new_short")}</span>
           </button>
         </div>
 
-        <div className="tag-dock-scroll scroll-hot" role="listbox" aria-label="分组">
+        <div className="tag-dock-scroll scroll-hot" role="listbox" aria-label={t("dock.coll.panel")}>
           {adding && (
             <div className="collection-input" ref={addRef}>
               <Icon name="folder" size={15} stroke={1.5} />
               <BlinkCaretInput
                 value={draft}
                 onChange={setDraft}
-                placeholder="新分组名，回车建立"
-                ariaLabel="新分组名"
+                placeholder={t("dock.coll.new_placeholder")}
+                ariaLabel={t("dock.coll.new_aria")}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") commitCreate();
                   else if (e.key === "Escape") {
@@ -280,7 +282,7 @@ export function CollDock({
                 <BlinkCaretInput
                   value={renaming.name}
                   onChange={(v) => setRenaming({ id: c.id, name: v })}
-                  ariaLabel="分组名"
+                  ariaLabel={t("dock.coll.name_aria")}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") commitRename();
                     else if (e.key === "Escape") {
@@ -319,7 +321,7 @@ export function CollDock({
                   e.stopPropagation();
                   onMenu(c, e.clientX, e.clientY);
                 }}
-                title={`${c.name}｜${c.count} 项；双击改名，右键更多`}
+                title={t("dock.coll.row_tip", { name: c.name, n: c.count })}
               >
                 <span className="coll-icon">
                   <Icon name="folder-open" size={13} stroke={1.6} />
@@ -333,14 +335,18 @@ export function CollDock({
 
           {items.length === 0 && !adding && (
             <div className="tag-dock-empty">
-              还没有分组。选中素材后「加入分组」，或者点上面的 <b>+ 分组</b> 先建一个。
+              {t("dock.coll.empty_lead")} <b>+ {t("dock.coll.new_short")}</b>{" "}
+              {t("dock.coll.empty_tail")}
             </div>
           )}
           {needle && shown.length === 0 && items.length > 0 && (
-            <div className="tag-dock-empty">没有匹配「{q.trim()}」的分组</div>
+            <div className="tag-dock-empty">{t("dock.coll.no_match", { q: q.trim() })}</div>
           )}
         </div>
       </div>
     </div>
   );
 }
+
+/* memo 边界：见 TagDock 同款说明 —— 回调稳定化在 App（`useEvent`）做。 */
+export const CollDock = memo(CollDockImpl);

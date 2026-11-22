@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { SnapshotRow } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
 import { useDockHover } from "../lib/dockHover";
+import { useT } from "../lib/i18n";
 
 /** 拖拽经过时临时展开用的 id（和 TagDock / CollDock 同一套全局单值） */
 const DOCK_ID = "snapshots";
@@ -98,7 +99,7 @@ function SnapshotInput({
   );
 }
 
-export function SnapshotDock({
+function SnapshotDockImpl({
   items,
   creating,
   renamingId,
@@ -132,6 +133,7 @@ export function SnapshotDock({
   onCancelRename: () => void;
   onImport: () => void;
 }) {
+  const t = useT();
   const [closed, setClosed] = useState(loadClosed);
   /* 拖拽经过时**临时展开**（不改用户的折叠偏好）：
      收起的快照段不渲染清单行，拖上去就没有落点、松手什么都不会发生。
@@ -167,25 +169,25 @@ export function SnapshotDock({
           aria-expanded={expanded}
           /* 悬停气泡照 FontManager 的 hint.snapshotsSection：说清"这是什么 + 点标题干什么"。
              不再用原生 title（灰底黑字、延迟不定，两边的观感差得最明显）。 */
-          data-hint-text="快照：把一批图片记成一份清单，之后一键打开灵感板（只记图片，不搬文件）；点标题展开或收起"
+          data-hint-text={t("dock.snap.head_tip")}
         >
           <span className="snap-chevron">
             <Icon name="chevron" size={12} stroke={2} className={expanded ? "rot90" : ""} />
           </span>
-          <span>快照</span>
+          <span>{t("dock.snap.panel")}</span>
         </button>
         <button
           className="snap-add"
-          data-hint-text="导入快照清单（.S-AssetManager，只含图片编号，不含图片本身）"
-          aria-label="导入快照"
+          data-hint-text={t("dock.snap.import_tip")}
+          aria-label={t("dock.snap.import")}
           onClick={onImport}
         >
           <Icon name="import" size={13} stroke={1.8} />
         </button>
         <button
           className="snap-add"
-          data-hint-text="新建快照：给眼下这批图片起个名字（不复制、不移动文件）"
-          aria-label="新建快照"
+          data-hint-text={t("dock.snap.new_tip")}
+          aria-label={t("dock.snap.new")}
           onClick={onStartCreate}
         >
           <Icon name="plus" size={13} stroke={1.8} />
@@ -196,8 +198,8 @@ export function SnapshotDock({
         <div className="snap-list scroll-hot">
           {creating && (
             <SnapshotInput
-              placeholder="给这份快照起个名字，回车确定"
-              ariaLabel="新快照名"
+              placeholder={t("dock.snap.create_placeholder")}
+              ariaLabel={t("dock.snap.create_aria")}
               onCommit={onCreate}
               onCancel={onCancelCreate}
             />
@@ -208,8 +210,8 @@ export function SnapshotDock({
               <SnapshotInput
                 key={s.id}
                 initial={s.name}
-                placeholder="新的快照名"
-                ariaLabel="快照新名"
+                placeholder={t("dock.snap.rename_placeholder")}
+                ariaLabel={t("dock.snap.rename_aria")}
                 onCommit={(n) => onRename(s.id, n)}
                 onCancel={onCancelRename}
               />
@@ -219,7 +221,7 @@ export function SnapshotDock({
                 className={`tree-row snap-row${activeId === s.id ? " sel" : ""}`}
                 /* 拖放落点：拖到这里 = 记进这份快照（只记内容指纹，文件不动） */
                 data-drop-snap={s.id}
-                title={`${s.name}｜${s.count} 张｜单击只看这份快照，双击打开灵感板，右键更多`}
+                title={t("dock.snap.row_tip", { name: s.name, n: s.count })}
                 onClick={() => {
                   if (clickTimer.current) window.clearTimeout(clickTimer.current);
                   clickTimer.current = window.setTimeout(() => {
@@ -256,9 +258,9 @@ export function SnapshotDock({
             <button
               className="snap-empty"
               onClick={onStartCreate}
-              data-hint-text="快照只记图片，不搬文件；也可以右键任意「标签」→ 把标签下的图片加入快照"
+              data-hint-text={t("dock.snap.empty_tip")}
             >
-              创建第一个快照
+              {t("dock.snap.empty")}
             </button>
           )}
         </div>
@@ -266,3 +268,6 @@ export function SnapshotDock({
     </div>
   );
 }
+
+/* memo 边界：快照行只在 `items` / 新建改名态 / 选中项变化时重渲。 */
+export const SnapshotDock = memo(SnapshotDockImpl);

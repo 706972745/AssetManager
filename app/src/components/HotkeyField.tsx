@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { accelOf } from "../lib/hotkeys";
+import { useT } from "../lib/i18n";
 
 /**
  * 系统级快捷键的录制框。
@@ -11,12 +12,13 @@ import { accelOf } from "../lib/hotkeys";
 export function HotkeyField({
   value,
   onChange,
-  placeholder = "未设置",
+  placeholder,
 }: {
   value: string;
   onChange: (accel: string) => void;
   placeholder?: string;
 }) {
+  const t = useT();
   const [rec, setRec] = useState(false);
   const box = useRef<HTMLButtonElement>(null);
 
@@ -49,9 +51,9 @@ export function HotkeyField({
       ref={box}
       className={`hk-field mono ${rec ? "rec" : ""}`}
       onClick={() => setRec(true)}
-      title="点击后按下新的组合键；Esc 放弃，Backspace 清空"
+      title={t("hotkey.hint")}
     >
-      {rec ? "按下组合键…" : value || placeholder}
+      {rec ? t("hotkey.recording") : value || placeholder || t("hotkey.unset")}
     </button>
   );
 }
