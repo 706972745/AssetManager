@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import type { DirNode, Source } from "../types";
 import { BlinkCaretInput, Icon } from "./ui";
 import { useT } from "../lib/i18n";
+import { setActiveDock } from "../lib/dockHover";
 
 /** 侧栏行：图标 15 + 文字，与 FontManager .nav-row 同一套内距（行内 11 起、文字 35 起）。 */
 const ROW_PAD = 11;
@@ -10,6 +11,21 @@ const DEPTH_STEP = 14;
 /** 最多几个素材库（与 App 的 MAX_LIBS 同值；标题上的 x/3 用它）。
  *  **只算用户自己的库** —— 内置截图库不占名额（owner 2026-11-17）。 */
 const MAX_LIBS = 3;
+
+/**
+ * 侧栏自己的浮层（都 portal 到 body）：指针落在里面时不算「点了侧栏外面」。
+ * 和 `holdOpen`（App 传的 holdRef）同一个口径 —— 它们锚在侧栏上，
+ * 收掉侧栏等于把用户正在做的事抽走。
+ * （右键菜单 `.ctx-menu` **无条件**豁免，见下面的 pointerdown。）
+ */
+const SIDE_OVERLAYS = ".tag-edit, .tag-editor, .dlg-scrim";
+
+/**
+ * 指针离开侧栏后多久开始收起（owner 2026-11-23：「鼠标离开哪个面板就迅速消失」）。
+ * 240ms 时是"先把菜单/弹层让出来"的余量，现在这个余量交给 `holdRef`，
+ * 纯粹的"离开"没必要再等 —— 100ms 视觉上就等于跟着指针走（收起动画本身仍走 CSS 的 170ms）。
+ */
+const RAIL_LEAVE_MS = 100;
 
 /** 切库时"选中的那个挪到最上面"的动效：略带回弹的弹簧，跟 FontManager 同一手感。 */
 const LIB_SPRING = { type: "spring", stiffness: 460, damping: 36, mass: 0.7 } as const;
@@ -81,16 +97,31 @@ function saveActiveLib(path: string) {
  * （不能让品牌区抢走标题栏的拖动窗口手势），事件目标是背后的 `.titlebar`，
  * 结构上永远匹配不到。矩形每次现取：换语言、换字号、窗口宽度变化都会改它。
  */
-function hitBrand(e: PointerEvent): boolean {
+function hitBrand(x: number, y: number): boolean {
   const el = document.querySelector(".titlebar-brand");
   if (!el) return false;
   const r = el.getBoundingClientRect();
-  return (
-    e.clientY >= r.top - 4 &&
-    e.clientY <= r.bottom + 4 &&
-    e.clientX >= r.left &&
-    e.clientX <= r.right + 40
-  );
+  return y >= r.top - 4 && y <= r.bottom + 4 && x >= r.left && x <= r.right + 40;
+}
+
+/**
+ * 指针是不是在「侧栏 + 它展开的面板」这块地方。
+ * 滑出判定（pointermove）和「点外面就收」（pointerdown / 拖拽收尾）共用同一套口径，
+ * 两条路径不能各写一份 —— 否则会出现"鼠标还在这块里，点一下却把侧栏收了"。
+ *
+ * 三处都算里面：
+ * ① 视口左缘 10px（原始热区）；
+ * ② `.tree` 子树 —— 分组 / 标签 / 快照面板都是 `.tree` 的子节点，一并算进来；
+ * ③ **标题栏左边那块品牌区**（图标 + "AssetManager"）：鼠标往上飘到窗口左上角
+ *    是很自然的动作，那里离素材库最近，扫过去就该把侧栏带出来。
+ *    这里只能**按坐标判**：`.titlebar-brand` 是 `pointer-events: none`
+ *    （不能让品牌区抢走标题栏的拖窗口手势），事件目标是它背后的 `.titlebar`，
+ *    `closest('.titlebar-brand')` 永远匹配不到 —— 第一版就是这么白写的。
+ */
+function inRail(x: number, y: number, el: Element | null): boolean {
+  if (x <= 10) return true;
+  if (el && el.closest(".tree")) return true;
+  return y < 60 && x < 360 && hitBrand(x, y);
 }
 
 interface Props {
@@ -167,42 +198,83 @@ function TreeImpl({
   const holdRef = useRef(false);
   holdRef.current = holdOpen;
   useEffect(() => {
+    const stopTimer = () => {
+      if (railTimer.current !== null) {
+        window.clearTimeout(railTimer.current);
+        railTimer.current = null;
+      }
+    };
+    /** 立刻收：侧栏滑走 + 面板清空。
+     *  只动这两个 state —— 面板**自己的**展开条件里还有 pinned / 正在筛的选中项，
+     *  那些是用户的决定，不在这里擅自改（见 CollDock / TagDock 的 `open`）。 */
+    const closeNow = () => {
+      stopTimer();
+      setRailOpen(false);
+      setActiveDock(null);
+    };
+
     const onMove = (e: PointerEvent) => {
-      const t = e.target as HTMLElement | null;
-      /* 三处都算"想开侧栏"（owner 2026-11-21 逐条补的）：
-         ① 视口左缘 10px（原始热区）；
-         ② 已经滑出来的侧栏上（不然一进去就再也收不回去，见下面的注释）；
-         ③ **标题栏左边那块品牌区**（图标 + "AssetManager"）—— 鼠标往上飘到窗口左上角
-            是很自然的动作，那里离素材库最近，扫过去就该把侧栏带出来。
-            这里只能**按坐标判**：`.titlebar-brand` 是 `pointer-events: none`
-            （不能让品牌区抢走标题栏的拖窗口手势），事件目标是它背后的 `.titlebar`，
-            `closest('.titlebar-brand')` 永远匹配不到 —— 第一版就是这么白写的。 */
-      const keepOpen =
-        e.clientX <= 10 ||
-        (!!t && !!t.closest(".tree")) ||
-        (e.clientY < 60 && e.clientX < 360 && hitBrand(e));
-      if (keepOpen) {
-        if (railTimer.current !== null) {
-          window.clearTimeout(railTimer.current);
-          railTimer.current = null;
-        }
+      /* 三处算"想开侧栏"的判定在 `inRail` 里（口径与 pointerdown 共用）。
+         注意这里**不能只挂 onPointerEnter/Leave**：侧栏滑出后会盖住那条热区，
+         指针其实"从没进入侧栏"，离开时 leave 也不会来，
+         结果就是滑出来之后再也收不回去（2026-11-21 实测踩过）。 */
+      if (inRail(e.clientX, e.clientY, e.target as Element | null)) {
+        stopTimer();
         setRailOpen(true);
         return;
       }
+      /* 菜单/弹层开着时**不许收**（owner 2026-11-21）：
+         右键菜单是 portal 到 body 的，指针一进菜单就不在 `.tree` 里了，
+         以前 240ms 后整条侧栏滑走、菜单还悬在半空，"右击分组 → 去点菜单项"根本走不完。 */
       if (holdRef.current) {
-        if (railTimer.current !== null) {
-          window.clearTimeout(railTimer.current);
-          railTimer.current = null;
-        }
+        stopTimer();
         return;
       }
-      if (railTimer.current !== null) window.clearTimeout(railTimer.current);
-      railTimer.current = window.setTimeout(() => setRailOpen(false), 240);
+      stopTimer();
+      railTimer.current = window.setTimeout(() => {
+        railTimer.current = null;
+        /* 拖拽期间**不判**：面板展开/收起会让指针"离开"再"回来"，而拖着素材时鼠标是
+           停住的，不产生 pointermove —— 这一刀下去会把刚展开的落点面板收走，
+           表现就是"怎么也放不进去"（同 CollDock / TagDock 里那条注释）。
+           拖完由下面的 pointerup 兜底，不会一直挂着。 */
+        if (document.body.classList.contains("am-dragging")) return;
+        setRailOpen(false);
+      }, RAIL_LEAVE_MS);
     };
+
+    /* **点侧栏外面 → 当帧就收**（owner 2026-11-23 原话：「鼠标点击其他非左边的面板的地方，
+       就迅速消失」）。capture 阶段装、但 **不 preventDefault / 不 stopPropagation**：
+       这里只改侧栏自己那两个 state，素材格的选中与双击、顶栏按钮、灯箱/对话框自己的开合
+       都照原样走（`.tree` 是 absolute 覆盖层，它收起不会让网格重排，落点不会跑）。
+       点在右键菜单上不能收：否则"右键分组 → 点菜单项"又走不完。 */
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as Element | null;
+      if (el?.closest(".ctx-menu")) return;
+      if (holdRef.current && el?.closest(SIDE_OVERLAYS)) return;
+      if (inRail(e.clientX, e.clientY, el)) return;
+      closeNow();
+    };
+
+    /* 拖拽收尾：App 在 pointerup 里 clearDrag（清 `am-dragging`、清 activeDock），
+       等一拍再按**落点**判一次 —— 投到面板上的不收（用户刚放下东西），
+       扔到网格上的照常收（否则鼠标一停，侧栏就一直挂着）。 */
+    const onUp = (e: PointerEvent) => {
+      if (!document.body.classList.contains("am-dragging")) return;
+      const { clientX: x, clientY: y } = e;
+      window.setTimeout(() => {
+        if (document.body.classList.contains("am-dragging")) return;
+        if (inRail(x, y, document.elementFromPoint(x, y))) closeNow();
+      }, 60);
+    };
+
     document.addEventListener("pointermove", onMove, true);
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("pointerup", onUp, true);
     return () => {
       document.removeEventListener("pointermove", onMove, true);
-      if (railTimer.current !== null) window.clearTimeout(railTimer.current);
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("pointerup", onUp, true);
+      stopTimer();
     };
   }, []);
 

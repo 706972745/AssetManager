@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAppEvent, source } from "./data/source";
 import { setActiveDock, useDockHover } from "./lib/dockHover";
 import { setOwnDrag } from "./lib/ownDrag";
-import { loadHotkeys } from "./lib/hotkeys";
+import { hotkeyBindings, loadHotkeys } from "./lib/hotkeys";
 import { clearProgress, setProgress, useProgress } from "./lib/progressStore";
 import { useEvent } from "./lib/useEvent";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
@@ -30,6 +30,7 @@ import {
   type TagCount,
   type TagGroup,
   type SnapshotRow,
+  type SnapshotStats,
   type CollRow,
   type Query,
   type AutoRule,
@@ -41,7 +42,7 @@ import {
 import { AssetView, THUMB_PX, type ViewMode } from "./components/Views";
 import { Detail, TitleBar, TopBar } from "./components/Chrome";
 import { HoverHintHost } from "./components/HoverHint";
-import { TrashDetail, TrashView } from "./components/TrashView";
+import { TrashDetail, TrashMultiDetail, TrashView } from "./components/TrashView";
 import { AboutView } from "./components/AboutView";
 import { Settings, type SettingsKey } from "./components/Settings";
 import { Shortcuts } from "./components/Shortcuts";
@@ -74,6 +75,11 @@ const CONFIRM_MOVE_BYTES = 2 * 1024 ** 3;
 const CONFIRM_DELETE_COUNT = 20;
 /** 最多几个素材库（与 FontManager 的「多库最多 3 个」同一口径） */
 const MAX_LIBS = 3;
+/** 全局 id 的库号位移（与 `core/src/ids.rs` 的 LIB_SHIFT 一致）。
+ *  来源提示要从素材 id 反推"它属于哪个库"，用除法而不是位运算：
+ *  JS 的位运算会截成 32 位有符号，过 2^31 就错了。 */
+const LIB_SHIFT = 40;
+const libIdOf = (g: number) => Math.floor(g / 2 ** LIB_SHIFT);
 /** 批量操作的每片大小：一次丢几千个路径给 Shell，回收站 API 会卡住好几十秒 */
 const CHUNK = 200;
 /** `am://drag-move` push 通道的静默阈值：push 是 16ms 一拍，50ms 内来过就说明它活着，
@@ -201,6 +207,7 @@ export default function App() {
         closeToTray: prefs.closeToTray,
         startMinimized: prefs.startMinimized,
         uiScale: prefs.uiScale,
+        trashRetentionDays: prefs.trashRetentionDays,
       })
       .catch(() => {});
     void source.setUiScale(prefs.uiScale).catch(() => {});
@@ -237,8 +244,13 @@ export default function App() {
   /** 主内容区是哪个页面：素材列表 / 回收站 / 关于（侧栏底栏切换） */
   const [page, setPage] = useState<"assets" | "trash" | "about">("assets");
   const [trash, setTrash] = useState<TrashEntry[]>([]);
-  /* 回收站：选中哪一条 / id→预览地址 / 按扩展名筛（0.3.29） */
+  /* 回收站：选中哪一条 / id→预览地址 / 按扩展名筛（0.3.29）
+     `trashSel` 是详情面板盯的那条，`trashSelIds` 才是批量动作的集合 ——
+     和网格一样分开存，Ctrl 取消勾选时详情不至于跟着闪空。 */
   const [trashSel, setTrashSel] = useState<string | null>(null);
+  const [trashSelIds, setTrashSelIds] = useState<Set<string>>(new Set());
+  /** Shift 连选的锚点（上一次单击的那条） */
+  const trashAnchor = useRef<string | null>(null);
   const [trashThumbs, setTrashThumbs] = useState<Record<string, string>>({});
   const [trashFormat, setTrashFormat] = useState<string | null>(null);
   /** 多选集合（T11）：详情面板盯 `selected`，批量操作作用于这个集合 */
@@ -250,9 +262,9 @@ export default function App() {
   const lightNav = useRef<((dir: number) => void) | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   /* ---------- 标签（2026-11-16）：手动落库、自动运行时推导 ---------- */
-  /** 正在按哪个标签筛（null = 不筛）。0.4.24 起是「**当前库内**看这个标签」：
-     点标签不再清目录（清了就变成跨库，画面整个换掉，看着像文件库被切走）；
-     当前库里一张都没有时，`loadPage` 会放宽到全部库并提示一句。 */
+  /** 正在按哪个标签筛（null = 不筛）。0.5.7 起点标签 = **按名字跨所有库合并**
+      （同名标签每个库各建一份，id 不同；后端按库逐个换算后合并分页）。
+      普通浏览（目录/搜索/颜色/评分）仍然只查当前库。 */
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   /* 颜色筛选（T24）：色桶键；colorCounts 是侧栏口径的"每种颜色多少张" */
   const [colorFilter, setColorFilter] = useState<string | null>(null);
@@ -264,7 +276,7 @@ export default function App() {
   const [tags, setTags] = useState<TagCount[]>([]);
   const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
   /* 分组（0.2.x）：侧栏里紧贴标签面板上方那一段（位置/样式照 FontManager）。
-     筛选语义同标签：0.4.24 起在**当前库内**看这一撮素材（当前库没有才放宽）。 */
+     0.5.7 起点分组 = 查**分组所属的那个库**（与当前选中的库无关）；同名分组不合并。 */
   const [colls, setColls] = useState<CollRow[]>([]);
   const [collFilter, setCollFilter] = useState<number | null>(null);
   /* 快照（0.12.0）：侧栏一块，右上的 + / 右键头部可以新建、导入 */
@@ -272,6 +284,13 @@ export default function App() {
   /** 正按哪份快照筛（null = 不筛）。快照**仍跨库**：快照本身就是跨库收集的一批，
      这点和标签/分组不同，别顺手改成"当前库内" */
   const [snapFilter, setSnapFilter] = useState<number | null>(null);
+  /** 记了多少条 / 现在找得回几张（只在打开快照时拉一次，走 core 的哈希缓存） */
+  const [snapStats, setSnapStats] = useState<SnapshotStats | null>(null);
+  /** 库根清单：只用于两件事 —— 「来自哪个库」的来源提示、
+   *  以及判断当前筛选的分组/快照所属库是不是已经被移除（否则会误显示成"空的"）。 */
+  const [libRoots, setLibRoots] = useState<DirNode[]>([]);
+  /** 库清单至少拉成功过一次 —— 没拉回来之前不能断言"这个库被移除了" */
+  const [libsReady, setLibsReady] = useState(false);
   /* 新建 / 改名都是**侧栏就地输入**（照 FontManager，不弹窗）：状态放这里，
      因为「Ctrl+K → 新建快照」和快照右键「改名」都要能把它打开。 */
   const [snapCreating, setSnapCreating] = useState(false);
@@ -314,10 +333,6 @@ export default function App() {
   const reqRef = useRef(0);
   const dirRef = useRef<DirNode | null>(null);
   dirRef.current = dir;
-  /** 「当前库没有这批素材，已经放宽到全部库」——用 ref 不用 state：
-   *  它只影响**分页**要不要带 dirId，本身不需要触发重渲染（触发就是一次多余的查询）。
-   *  每换一次目录/标签/分组（查询 effect 开跑前）归零。 */
-  const crossLibRef = useRef(false);
   const dragPaths = useRef<string[] | null>(null);
   const dragPreview = useRef<number | null>(null);
   /** 拖动时"这一批是谁"（库内 id）。
@@ -568,7 +583,7 @@ export default function App() {
 
   const buildQuery = useCallback(
     (c: [number, number] | null): Query => ({
-      dirId: crossLibRef.current ? null : (dir?.id ?? null),
+      dirId: dir?.id ?? null,
       recursive: true,
       kinds: KINDS_OF[kindKey] ?? null,
       text: debounced,
@@ -606,24 +621,11 @@ export default function App() {
       const my = ++reqRef.current;
       setLoading(true);
       try {
-        let rows = await source.list(buildQuery(reset ? null : cursor));
-        /* 0.4.24：「当前库 AND 标签/分组」查出 0 条时才放宽到全部库。
-           为什么要有这一步：标签/分组是全局的，素材可能都在别的库里；
-           如果死守当前库，就会退回 2026-11-17 那个 P0（"标签有 400 张，点开空白"）。
-           为什么不再一律跨库：那会让"点一下标签，画面整个换成别的库的素材"，
-           看起来就是文件库被切走了（owner 2026-11-21 报的）。
-           放宽时**保持侧栏当前库不动**，只用一句提示说清楚这是放宽后的结果。 */
-        if (reset && rows.length === 0 && dir && (tagFilter !== null || collFilter !== null)) {
-          crossLibRef.current = true;
-          rows = await source.list({ ...buildQuery(null), dirId: null });
-          if (rows.length) {
-            toast(
-              t("app.toast.cross_lib_empty"),
-              false,
-              t("app.toast.cross_lib_empty_detail"),
-            );
-          }
-        }
+        const rows = await source.list(buildQuery(reset ? null : cursor));
+        /* 0.5.7：集合的跨库归属由**后端**算（分组查所属库、标签按名字查所有库、
+           快照按哈希命中库），前端不再"先查当前库、空了再放宽" ——
+           那条放宽路径在 0.4.24 之后其实仍然只查当前库，正是 owner 报的
+           「截图库的分组在导入库里点开是空的」。 */
         if (my !== reqRef.current) return; // 丢弃过期响应
         setItems((prev) => (reset ? rows : [...prev, ...rows]));
         setDone(rows.length < 200);
@@ -664,10 +666,47 @@ export default function App() {
   useEffect(() => {
     setCursor(null);
     setDone(false);
-    crossLibRef.current = false; // 每次换目录/筛选都重新从"当前库"开始
     void loadPage(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dir?.id, kindKey, debounced, sort, refreshKey, tagFilter, colorFilter, ratingFilter, collFilter, snapFilter]);
+
+  /* 库根清单（来源提示 / 判断分组所属库是否还在）。
+     跟 refreshKey 走：加库、移除库、重扫之后都要重新认一遍。 */
+  useEffect(() => {
+    let alive = true;
+    void source
+      .roots()
+      .then((rs) => {
+        if (!alive) return;
+        setLibRoots(rs);
+        setLibsReady(true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
+
+  /* 快照计数对账：侧栏写的是"记下来的条数"，列表只能显示找得到的；
+     差出来的那几张必须明说，否则用户会以为快照坏了。 */
+  useEffect(() => {
+    if (snapFilter === null) {
+      setSnapStats(null);
+      return;
+    }
+    let alive = true;
+    void source
+      .snapshotStats(snapFilter)
+      .then((s) => {
+        if (alive) setSnapStats(s);
+      })
+      .catch(() => {
+        if (alive) setSnapStats(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [snapFilter, refreshKey]);
 
   /* 颜色计数（顶栏色板菜单用）：只在"库里可能变了"的时候拉，不跟着滚动刷新 */
   useEffect(() => {
@@ -931,17 +970,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* 系统级快捷键（F1 截图 / F3 贴剪贴板 / Alt+F3 显示隐藏贴图）。
-     启动时按用户存的组合注册一次；设置里改完由设置面板自己再调一次。 */
+  /* 系统级快捷键（F1 截图 / F3 贴剪贴板 / Alt+F3 贴图+灵感板一起开关 / Shift+F3 交替）。
+     启动时按用户存的组合注册一次；设置里改完由设置面板自己再调一次。
+     绑定列表统一走 `hotkeyBindings`，保证两处顺序一致（见 hotkeys.ts 的注释）。 */
   useEffect(() => {
     const saved = loadHotkeys();
-    const list: [string, string][] = [
-      [saved.snip, "snip"],
-      [saved.clip, "clip_peek"],
-      [saved.toggle, "peek_toggle"],
-    ];
     void source
-      .hotkeysSet(list)
+      .hotkeysSet(hotkeyBindings(saved))
       .then((failed) => {
         if (failed.length)
           toast(
@@ -3109,6 +3144,14 @@ export default function App() {
     try {
       const list = await source.trashList();
       setTrash(list);
+      /* 勾选里可能留着已经不存在的 id（清空、或别处删掉），不清掉批量条会显示
+         一个点不动的数字 */
+      setTrashSelIds((cur) => {
+        if (!cur.size) return cur;
+        const alive = new Set(list.map((x) => x.id));
+        const next = new Set([...cur].filter((id) => alive.has(id)));
+        return next.size === cur.size ? cur : next;
+      });
       /* 预览地址按**账本 id**现开（`thumb://` 只认素材 id）。
          一次全拉：回收站通常几十条，令牌表后端自己会裁。 */
       const urls = await source.trashMedia(list.map((t) => t.id)).catch(() => []);
@@ -3127,6 +3170,8 @@ export default function App() {
     if (page === "trash") void loadTrash();
   }, [page, refreshKey, loadTrash]);
 
+  /* 还原/彻底删除成功后一律清空勾选：批次里的条目已经不在列表里了，
+     留着勾选只会让批量条上的数字骗人。 */
   const restoreTrash = async (ids: string[], to?: string) => {
     try {
       const n = await source.trashRestore(ids, to);
@@ -3136,6 +3181,7 @@ export default function App() {
           : t("app.toast.restored", { count: n })
       );
       if (trashSel && ids.includes(trashSel)) setTrashSel(null);
+      setTrashSelIds(new Set());
       await loadTrash();
       setRefreshKey((k) => k + 1);
     } catch (e) {
@@ -3143,11 +3189,24 @@ export default function App() {
     }
   };
 
+  /* 彻底删除**没有撤销**（只先进系统回收站），所以无论一条还是一批都要先问一次。
+     行尾按钮、详情面板、批量条三个入口都走这里 —— 确认框只在一个地方写。 */
   const purgeTrash = async (ids: string[]) => {
+    if (!ids.length) return;
+    const ok = await dlg.ask({
+      title: t("app.dialog.purge_trash_title", { count: ids.length }),
+      body: <p>{t("app.dialog.purge_trash_body")}</p>,
+      buttons: [
+        { label: t("app.common.cancel"), value: null as unknown as string },
+        { label: t("app.common.delete"), value: "ok", tone: "danger" },
+      ],
+    });
+    if (ok !== "ok") return;
     try {
       const n = await source.trashPurge(ids);
       toast(t("app.toast.purged", { count: n }));
       if (trashSel && ids.includes(trashSel)) setTrashSel(null);
+      setTrashSelIds(new Set());
       await loadTrash();
     } catch (e) {
       toast(String(e), true);
@@ -3212,10 +3271,57 @@ export default function App() {
      为什么要默认选：不选的话右侧是块空面板，用户得先点一下才知道里面有什么；
      而"回收站里有几张图"这件事本身就是进这个页面的目的。 */
   useEffect(() => {
-    if (page !== "trash") return;
+    /* 只要离开回收站就丢掉勾选：下次进来还挂着上次的批量集合，是"我没选它却在里面"的坑 */
+    if (page !== "trash") {
+      setTrashSelIds((cur) => (cur.size ? new Set() : cur));
+      return;
+    }
     if (trashSel && trashShown.some((x) => x.id === trashSel)) return;
     setTrashSel(trashShown[0]?.id ?? null);
   }, [page, trashShown, trashSel]);
+
+  /* 回收站的选择（Ctrl 加减 / Shift 连滑 / Ctrl+A 全选 / Esc 清空）。
+     手感刻意和网格一致，但**不共用 selectedIds**：那边存的是素材数字 id，
+     这边是账本字符串 id，混在一个 Set 里迟早出事。 */
+  const pickTrash = (id: string, mods: { ctrl: boolean; shift: boolean }) => {
+    setTrashSel(id);
+    if (mods.shift && trashAnchor.current) {
+      const from = trashShown.findIndex((x) => x.id === trashAnchor.current);
+      const to = trashShown.findIndex((x) => x.id === id);
+      if (from >= 0 && to >= 0) {
+        const [s, e] = from <= to ? [from, to] : [to, from];
+        setTrashSelIds(new Set(trashShown.slice(s, e + 1).map((x) => x.id)));
+        return;
+      }
+    }
+    if (mods.ctrl) {
+      setTrashSelIds((cur) => {
+        const n = new Set(cur);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
+      trashAnchor.current = id;
+      return;
+    }
+    setTrashSelIds(new Set([id]));
+    trashAnchor.current = id;
+  };
+
+  /* 复选框只改这一条，不动锚点：勾一堆之后还想 Shift 连选时，锚点应该还是上次单击那条 */
+  const toggleTrash = (id: string) => {
+    setTrashSel(id);
+    setTrashSelIds((cur) => {
+      const n = new Set(cur);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
+
+  const selectAllTrash = () => {
+    setTrashSelIds(new Set(trashShown.map((x) => x.id)));
+  };
 
   /* 开大图：网格双击、详情里的「看图」都走这一处。
      双击和空格是**同一个开关**（owner 2026-11-22）：已经在看这张 → 关掉；
@@ -3290,6 +3396,59 @@ export default function App() {
     return () => document.removeEventListener("mousedown", onDown, true);
   }, [items, openPeek]);
 
+  /* 右键菜单「所属标签 / 所属分组」（owner 2026-11-23，只读）。
+     截图库（内置库）的标签/分组元数据是跟当前库**合并显示**的（core/src/lib.rs:478），
+     从界面上看不出某张图到底挂在哪些标签、哪些分组里，所以在这里补一份只读清单。
+     约束：菜单先弹、数据后填；最多列 6 个，其余折成「还有 N 个」；失败就显示「无」。 */
+  const fmtBelongs = (xs: string[], ids: number[]) => {
+    if (!xs.length) return t("app.menu.belongs_none");
+    const lead =
+      ids.length > 1
+        ? `${t("app.menu.belongs_summary", { count: ids.length, n: xs.length })} · `
+        : "";
+    const head = xs.slice(0, 6).join(" · ");
+    const tail =
+      xs.length > 6 ? ` · ${t("app.menu.belongs_more", { count: xs.length - 6 })}` : "";
+    return `${lead}${head}${tail}`;
+  };
+
+  const loadTagsBelongs = async (ids: number[]) => {
+    try {
+      // 和 tagMap 一样分片：上千项时一条 SQL 会顶到 SQLite 的变量上限
+      const chunks: number[][] = [];
+      for (let i = 0; i < ids.length; i += 400) chunks.push(ids.slice(i, i + 400));
+      const parts = await Promise.all(
+        chunks.map((c) => source.assetTags(c).catch(() => [] as [number, string[]][]))
+      );
+      const set = new Set<string>();
+      for (const [, tags] of parts.flat()) for (const tg of tags) set.add(tg);
+      return fmtBelongs([...set].sort((a, b) => a.localeCompare(b, "zh")), ids);
+    } catch {
+      return t("app.menu.belongs_none");
+    }
+  };
+
+  const loadCollsBelongs = async (ids: number[]) => {
+    try {
+      const idSet = new Set(ids);
+      /* 没有「素材 → 分组」的反查命令，只能拿每个分组去比对。
+         并行发、单条失败当没命中 —— 不能因为一个分组读失败就整段空掉。 */
+      const hit = await Promise.all(
+        colls.map(async (c) => {
+          try {
+            const xs = await source.collOf(c.id);
+            return xs.some((x) => idSet.has(x)) ? c.name : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      return fmtBelongs(hit.filter((x): x is string => !!x), ids);
+    } catch {
+      return t("app.menu.belongs_none");
+    }
+  };
+
   /* ---------------- 右键菜单 ----------------
      一处接管全窗口：
      · 页面任意处右键都 preventDefault，WebView2 那套「返回/刷新/另存为/打印」不再出现；
@@ -3341,6 +3500,8 @@ export default function App() {
         }
         const paths = inSel ? selPaths : [a.path];
         const n = paths.length;
+        // 本次菜单作用的对象（多选就是整个选中集合），只读信息段也按这个集合汇总
+        const idsAll = inSel ? [...selectedIds] : [a.id];
         show([
           {
             label:
@@ -3411,6 +3572,22 @@ export default function App() {
             icon: "reveal",
             action: () => void onReveal(a),
           },
+          /* 只读信息段：靠下、夹在分隔线之间，避开上面的常用动作。
+             两行各自异步取数，菜单先出来，数据到了再填（失败显示「无」）。 */
+          { kind: "separator" },
+          {
+            kind: "info",
+            label: t("app.menu.belongs_tags"),
+            empty: t("app.menu.belongs_none"),
+            load: () => loadTagsBelongs(idsAll),
+          },
+          {
+            kind: "info",
+            label: t("app.menu.belongs_colls"),
+            empty: t("app.menu.belongs_none"),
+            load: () => loadCollsBelongs(idsAll),
+          },
+          { kind: "separator" },
           /* T38：单张才有"另存为 / 调整尺寸"（多选时"存到哪"没有意义） */
           {
             label: t("app.menu.save_as"),
@@ -3661,6 +3838,21 @@ export default function App() {
         if (e.key === "Escape") (e.target as HTMLElement).blur();
         return;
       }
+      /* 回收站：Ctrl+A 全选条目、Esc 清空勾选并退出页面。
+         必须排在素材列表的 Ctrl+A 前面 —— 否则回收站里按 Ctrl+A 会去全选素材。 */
+      if (page === "trash") {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+          e.preventDefault();
+          setTrashSelIds(new Set(trashShown.map((x) => x.id)));
+          return;
+        }
+        if (e.key === "Escape") {
+          setTrashSelIds(new Set());
+          setTrashSel(null);
+          setPage("assets");
+          return;
+        }
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === ",") {
         e.preventDefault();
         setSettingsOpen(true);
@@ -3764,7 +3956,7 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop]);
+  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop, page, trashShown]);
 
   /* Ctrl + 滚轮 = 缩略图大小（owner 2026-11-21）。
      顶栏那根滑杆（120 / 176 / 260）的另一种按法：手停在网格上就能调，不用去够滑杆。
@@ -4346,6 +4538,46 @@ export default function App() {
     ]
   );
 
+  /* ---- 集合视图的来源与失效状态（0.5.7） ----
+     分组属于某个库、快照属于某个库；点开它们时列表可能来自"当前库之外"。
+     这两块信息前端只能从库根清单里算：库根还在 → 正常；不在了 → 明确空态。 */
+  const libNameById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const r of libRoots) m.set(libIdOf(r.id), r.name);
+    return m;
+  }, [libRoots]);
+
+  const shelfOpen = tagFilter !== null || collFilter !== null || snapFilter !== null;
+  const collLibGone =
+    collFilter !== null && libsReady && !libNameById.has(libIdOf(collFilter));
+  const snapLibGone =
+    snapFilter !== null && libsReady && !libNameById.has(libIdOf(snapFilter));
+  const shelfGone = collLibGone || snapLibGone;
+
+  /** 这一页素材分别来自哪些库（例：`截图` / `截图、导入A`）。 */
+  const shelfSource = useMemo(() => {
+    if (!shelfOpen || items.length === 0) return "";
+    const ids: number[] = [];
+    for (const it of items) {
+      const lid = libIdOf(it.id);
+      if (!ids.includes(lid)) ids.push(lid);
+    }
+    const names = ids
+      .map((id) => libNameById.get(id))
+      .filter((n): n is string => !!n);
+    return names.join(locale.startsWith("zh") ? "、" : ", ");
+  }, [items, shelfOpen, libNameById, locale]);
+
+  const clearGoneShelf = useCallback(() => {
+    if (collFilter !== null) setCollFilter(null);
+    if (snapFilter !== null) setSnapFilter(null);
+    toast(
+      t("app.empty.shelf_gone_cleared"),
+      false,
+      t("app.empty.shelf_gone_cleared_detail"),
+    );
+  }, [collFilter, snapFilter, t, toast]);
+
   const current = lightbox !== null ? items[lightbox] ?? null : null;
 
   return (
@@ -4446,6 +4678,29 @@ export default function App() {
             </div>
           )}
 
+          {/* 集合的来源：点开分组/标签/快照时列表可能来自别的库，
+              一条小字说清"这批图属于哪个库"，避免用户以为文件被搬走了。
+              快照还要额外交代"有几张找不到"（侧栏写的是记录条数，不是能找到的张数）。 */}
+          {shelfOpen && !shelfGone && (shelfSource || (snapFilter !== null && (snapStats?.missing ?? 0) > 0)) && (
+            <div className="shelf-source">
+              <Icon
+                name={snapFilter !== null ? "camera" : collFilter !== null ? "folder-open" : "tag"}
+                size={12}
+                stroke={1.5}
+              />
+              {shelfSource && (
+                <span className="shelf-source-label">
+                  {t("app.shelf.source", { libs: shelfSource })}
+                </span>
+              )}
+              {snapFilter !== null && (snapStats?.missing ?? 0) > 0 && (
+                <span className="shelf-source-warn">
+                  {t("app.shelf.snap_missing", { n: snapStats?.missing ?? 0 })}
+                </span>
+              )}
+            </div>
+          )}
+
           <div className={`content ${prefs.showTileName ? "" : "no-tile-name"}`}>
             {/* 回收站 / 关于 是整页替换：铺在内容区上层，切回来时列表状态还在（不重挂载） */}
             {page !== "assets" && (
@@ -4454,14 +4709,19 @@ export default function App() {
                   <TrashView
                     items={trashShown}
                     thumbs={trashThumbs}
-                    selected={trashSel}
-                    onSelect={setTrashSel}
+                    checked={trashSelIds}
+                    active={trashSel}
+                    onPick={pickTrash}
+                    onToggle={toggleTrash}
+                    onSelectAll={selectAllTrash}
+                    onClearSel={() => setTrashSelIds(new Set())}
                     onRestore={(ids, to) => void restoreTrash(ids, to)}
                     onPurge={(ids) => void purgeTrash(ids)}
                     onEmpty={() => void emptyTrash()}
                     onClose={() => {
                       setPage("assets");
                       setTrashSel(null);
+                      setTrashSelIds(new Set());
                     }}
                   />
                 ) : (
@@ -4473,22 +4733,46 @@ export default function App() {
                 )}
               </div>
             )}
-            <AssetView
-              items={items}
-              view={view}
-              sizeIndex={sizeIndex}
-              selectedIds={selectedIds}
-              resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}|${collFilter ?? ""}|${snapFilter ?? ""}`}
-              onPick={pickOne}
-              onPickMany={pickMany}
-              onOpen={(a) => openLightbox(a)}
-              onBeginDrag={onBeginDrag}
-              onNearBottom={loadMore}
-              thumbSrc={thumbSrc}
-              onPrefetch={onPrefetchThumbs}
-              onImport={() => void importInto(null)}
-              onToast={(m, e) => toast(m, e)}
-            />
+            {/* 分组/快照所属库被移除：**不能**显示成"这个分组是空的"。
+                这里给一句明确原因 + 一个清理入口；数据本身不删（还在原文件夹的
+                `.AssetManager` 里，重新导入那个文件夹就回来）。 */}
+            {shelfGone ? (
+              <div className="viewport">
+                <div className="empty-state">
+                  <div className="empty-inner">
+                    <span className="empty-tile">
+                      <Icon name={collLibGone ? "folder-open" : "camera"} size={26} stroke={1.5} />
+                    </span>
+                    <h2>
+                      {t(collLibGone ? "app.empty.coll_gone_title" : "app.empty.snap_gone_title")}
+                    </h2>
+                    <p>
+                      {t(collLibGone ? "app.empty.coll_gone_body" : "app.empty.snap_gone_body")}
+                    </p>
+                    <button className="btn btn-accent" style={{ marginTop: 14 }} onClick={clearGoneShelf}>
+                      {t(collLibGone ? "app.empty.coll_gone_delete" : "app.empty.snap_gone_clear")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <AssetView
+                items={items}
+                view={view}
+                sizeIndex={sizeIndex}
+                selectedIds={selectedIds}
+                resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}|${collFilter ?? ""}|${snapFilter ?? ""}`}
+                onPick={pickOne}
+                onPickMany={pickMany}
+                onOpen={(a) => openLightbox(a)}
+                onBeginDrag={onBeginDrag}
+                onNearBottom={loadMore}
+                thumbSrc={thumbSrc}
+                onPrefetch={onPrefetchThumbs}
+                onImport={() => void importInto(null)}
+                onToast={(m, e) => toast(m, e)}
+              />
+            )}
 
             {/* 批量操作条（T11）：只在多选时出现，压在内容区底部中间 */}
             {selectedIds.size > 1 && (
@@ -4574,18 +4858,23 @@ export default function App() {
             回收站里选中一条时换成回收站自己的详情（0.3.29）—— 复用 `Detail` 会造出
             一堆假 Asset 字段（id / rating / 标签），不如给它一块干净的骨架。 */}
         {page === "trash" ? (
-          /* 有条目就一直显示；一条都没有时整块不渲染（空面板白占 348px） */
-          (() => {
-            const t = (trashSel ? trash.find((x) => x.id === trashSel) : null) ?? trashShown[0] ?? null;
-            return t ? (
-              <TrashDetail
-                entry={t}
-                src={trashThumbs[t.id]}
-                onRestore={(ids, to) => void restoreTrash(ids, to)}
-                onPurge={(ids) => void purgeTrash(ids)}
-              />
-            ) : null;
-          })()
+          /* 多选时换成「已选 n 项」——继续摆其中一条的大图，会让人以为动作只作用于它。
+             单条仍走 TrashDetail；一条都没有时整块不渲染（空面板白占 348px）。 */
+          trashSelIds.size > 1 ? (
+            <TrashMultiDetail count={trashSelIds.size} />
+          ) : (
+            (() => {
+              const t = (trashSel ? trash.find((x) => x.id === trashSel) : null) ?? trashShown[0] ?? null;
+              return t ? (
+                <TrashDetail
+                  entry={t}
+                  src={trashThumbs[t.id]}
+                  onRestore={(ids, to) => void restoreTrash(ids, to)}
+                  onPurge={(ids) => void purgeTrash(ids)}
+                />
+              ) : null;
+            })()
+          )
         ) : page === "about" ? null : (
         <Detail
           asset={selected}

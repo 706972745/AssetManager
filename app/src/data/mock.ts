@@ -284,10 +284,11 @@ export const mockSource: Source = {
     return { running: false, done: 0, total: 0 };
   },
   async dataRoot() {
-    // 浏览器预览里没有真实数据目录，给一组能展示布局的假值
+    // 浏览器预览里没有真实数据目录，给一组能展示布局的假值（0.5.7 起真实位置在
+    // 安装目录下的 data 文件夹，这里只是占位，不参与任何逻辑）
     return {
-      defaultDir: "%LOCALAPPDATA%\\AssetManager",
-      effectiveDir: "%LOCALAPPDATA%\\AssetManager",
+      defaultDir: "<安装目录>\\data",
+      effectiveDir: "<安装目录>\\data",
       enabled: false,
       current: null,
       dirs: [],
@@ -540,6 +541,9 @@ export const mockSource: Source = {
   },
   async snapshotList() {
     return [{ id: 1, name: "初选", count: 1, createdAt: 1700000000000, updatedAt: 1700000000000 }];
+  },
+  async snapshotStats() {
+    return { total: 1, found: 1, missing: 0 };
   },
   async snapshotCreate() {
     throw new Error(t("mock.snapshot"));

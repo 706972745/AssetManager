@@ -393,6 +393,11 @@
   box-shadow: 10px 0 28px rgba(0, 0, 0, 0.1);
   transform: translateX(-100%);
   transition: transform 170ms var(--t-base, ease);
+  /* 收起只做 transform，但里面的分组/标签/快照面板各自还跑着 110ms 的高度过渡，
+     窗口矮的时候它们的总高也会超过侧栏盒子 —— 越出盒子就会在滑出/收起的中途
+     "露出半截"。这里统一裁掉（提示气泡 / 右键菜单 / 拖拽浮层都是 portal 到 body 的，
+     不会被这层 overflow 切到）。 */
+  overflow: hidden;
   /* 10：**必须高于 `.page-view`（z-index 6）**。关于 / 工具这些整页视图是同一层里的
      后一个兄弟节点，同层级时 DOM 靠后就赢 —— 抽屉滑出来会被整页的白底盖掉，
      只剩顶上一条（owner 2026-11-21 截图：关于页把侧栏压住了）。
@@ -2422,6 +2427,39 @@
   text-transform: uppercase;
   color: var(--text-3);
 }
+/* 只读信息段（所属标签 / 所属分组）：不是按钮，没有 hover、点了也不关菜单。
+   字阶只用现有的 9/11，颜色走 --text-3 / --text-2，深浅两套主题自然跟着变。 */
+.ctx-info {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 10px;
+  line-height: 1.45;
+  user-select: text;
+}
+.ctx-info-k {
+  font-size: var(--fs-9);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.ctx-info-v {
+  min-width: 0;
+  font-size: var(--fs-11);
+  color: var(--text-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* 两行封顶：两条信息行加起来最多 4 行，不把下面的「另存为」挤出视野。
+     真有多到看不全的，悬停 title 里是完整清单。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ctx-info-v.pending {
+  color: var(--text-3);
+}
 
 /* ---------------------------------------------------------------- 一句话对话框 */
 /* 「同名三选 / 阈值确认 / 删文件夹」都用它。不用 window.confirm：它是系统模态，
@@ -2648,6 +2686,29 @@ body[data-dragging] .batch-bar * {
 }
 .filter-strip .btn {
   margin-left: auto;
+}
+
+/* 集合来源提示（0.5.7）：点开分组 / 标签 / 快照时，列表可能来自当前库之外。
+   一条低调的小字条说明"这批图属于哪个库"，比 toast 安静，也不会挡住网格。
+   照 filter-strip 的 30px 行高，但不用强调色底 —— 它不是筛选条件，是说明。 */
+.shelf-source {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text-3);
+  font-size: var(--fs-11);
+}
+.shelf-source-label {
+  color: var(--text-2);
+}
+.shelf-source-warn {
+  margin-left: auto;
+  color: var(--danger);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 详情面板：标签块 */
@@ -2916,7 +2977,7 @@ body[data-dragging] .batch-bar * {
 
    **展开只认 `.open`，不用 CSS `:hover`**：分组与标签上下相邻，各自 :hover 时
    从标签移到分组会让标签先收起、把分组整体推走，指针脱靶，分组永远展不开。
-   悬停由 `lib/dockHover.ts` 的全局单值驱动（离开延迟 200ms，两个面板同一帧交接）。 */
+   悬停由 `lib/dockHover.ts` 的全局单值驱动（离开延迟 90ms，两个面板同一帧交接）。 */
 .tag-dock {
   flex: 0 0 auto;
   display: flex;
@@ -4456,6 +4517,13 @@ body.peek-body #root {
   transform-origin: center center;
   transition: transform var(--t-quick, 120ms) ease-out;
 }
+/* 拖图（`view.s > 1` 时左键/中键平移）期间**必须关掉 transform 过渡**：
+   每个 pointermove 都在改 transform，120ms 缓动会把连续位移搓成"果冻"，
+   鼠标和图之间永远差一截、停下来才追上 —— 手感上就是"拖不动"。
+   松手后类名摘掉，过渡恢复（此时 transform 值不变，不会跳）。 */
+.peek-img-drag {
+  transition: none;
+}
 .peek-err {
   position: absolute;
   inset: 0;
@@ -4496,16 +4564,16 @@ body.peek-body #root {
 .peek-framed::after {
   content: "";
   position: absolute;
-  /* 只圈住"图"那一块，外发光落到 padding 里向外扩散 */
+  /* 只圈住"图"那一块（`--peek-glow` 已经是 0，`inset: 0` 就是图的边缘） */
   inset: var(--peek-glow);
   pointer-events: none;
-  /* 1px 实边 + 两圈短扩散（0.2.2 收窄：原来 4/12/26px 三层，
-     在浅色桌面上像一盏蓝灯）。现在最远只到 6px，仍然是"由边框向外渐变"，
-     但只起勾边的用，不再抢图片本身。 */
-  box-shadow:
-    inset 0 0 0 1px rgba(108, 63, 209, 0.8),
-    0 0 2px 1px rgba(108, 63, 209, 0.45),
-    0 0 6px 2px rgba(108, 63, 209, 0.2);
+  /* **只有 1px 实线，没有任何外发光 / 投影**（owner 2026-11-23：「打开蓝色边框就有一圈阴影」）。
+     以前是 1px 实边 + 2px/6px 两圈扩散：在深色桌面上几乎看不出来，贴到白底网页/文档上
+     就变成一圈明显的蓝雾，看上去像"贴图自带了投影"，而不是一条边界线。
+     而且贴图窗是"窗就是图"（`--peek-glow: 0`），任何向外的光只能画在窗口**里面**、
+     盖住图最外那几个像素 —— 越想"发光"越糊住内容，所以这里只留勾边这一层。
+     要做外发光必须先把外圈透明边（后端 `PEEK_GLOW`）加回来，那是另一件事，别顺手改。 */
+  box-shadow: inset 0 0 0 1px rgba(108, 63, 209, 0.8);
   z-index: 5;
 }
 
@@ -7690,6 +7758,22 @@ html[data-theme="light"] .board-empty-hint kbd {
 .trash-bar .grow {
   flex: 1;
 }
+/* 批量条：有勾选时压在顶栏下方。动作作用于**整批**，所以不挤进行尾那排按钮，
+   否则一排里同时有「这条」和「这些」，点错一次就是一批没了。 */
+.trash-batch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.trash-batch .grow {
+  flex: 1;
+}
+.trash-batch-count {
+  font-size: var(--fs-11);
+  color: var(--accent);
+}
 .trash-list {
   flex: 1;
   min-height: 0;
@@ -7727,6 +7811,21 @@ html[data-theme="light"] .board-empty-hint kbd {
   width: 2px;
   border-radius: 1px;
   background: var(--accent);
+}
+/* 详情面板正在看的那条：Ctrl 取消勾选后它仍留在右侧（不然面板会闪空），
+   所以给一层和 hover 同色的底，表示「这条在看，但没勾」 */
+.trash-row.active:not(.sel) {
+  background: var(--e1);
+}
+/* 行首复选框：批量动作的开关。用系统控件的 accent 上色，
+   比自己画一个假方块少写一堆状态样式，也和设置页的 .chk 一致 */
+.trash-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 /* 行首缩略图：40×40 方框，图铺满（`cover`），加载不到就退回图标。
    贴图默认进回收站之后，一屏全是同名截图，没有缩略图等于让人猜。 */
@@ -7805,6 +7904,19 @@ html[data-theme="light"] .board-empty-hint kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 多选时的详情：没有「主角」可预览，只报数量 —— 动作都在顶栏批量条上 */
+.trash-multi-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 24px 20px;
+  font-size: var(--fs-11); /* AM 字阶只有 9/11/13，--fs-12 未定义 */
+  color: var(--text-2);
+}
+.trash-multi-count {
+  font-size: var(--fs-13);
+  color: var(--text-1);
 }
 
 /* ===== 关于（照 FontManager 的 AboutView） ===== */
@@ -9110,4 +9222,293 @@ html[data-theme="light"] .set-card {
   box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--accent-soft);
   color: var(--text-1);
+}
+
+/* ---------------- 灵感板标注工具条（board.ann） ----------------
+   截图界面那套工具搬进板里：一笔 = 一层。配色走纸墨令牌（--e1 / --e2 /
+   --hairline / --accent），圆角 8px、控件 4px —— 和主界面是同一套语言。
+   工具条是 fixed 的：画布平移缩放时它纹丝不动，永远点得到。 */
+
+.board-anntools {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--e1);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-ambient, 0 12px 32px rgba(0, 0, 0, 0.34));
+  color: var(--text-secondary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.board-anntools-sep {
+  flex: 0 0 1px;
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--hairline);
+}
+
+.board-anntool {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  /* 必须显式给色：按钮的默认 color 是 buttontext（黑），深色条上看不见 */
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--t-quick, 120ms) ease, color var(--t-quick, 120ms) ease;
+}
+.board-anntool svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  pointer-events: none;
+}
+.board-anntool:hover {
+  background: var(--e2);
+  color: var(--text-primary);
+}
+.board-anntool.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-glow-soft);
+}
+.board-anntool:disabled {
+  opacity: 0.32;
+  cursor: default;
+  background: transparent;
+}
+
+/* 颜色：色块按钮 + 上方弹出的 21 色板（和截图同一套色，7×3） */
+.board-ann-anchor {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+}
+.board-ann-swatch {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 2px rgba(0, 0, 0, 0.25) inset;
+}
+.board-ann-palette {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: 214px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--e2);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-ambient, 0 12px 32px rgba(0, 0, 0, 0.34));
+  z-index: 21;
+}
+.board-ann-palette-title {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 0 2px 6px;
+}
+.board-ann-swatches {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.board-ann-sw {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28) inset;
+}
+.board-ann-sw.on {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* 粗细 / 字号：− 读数 +，数字等宽（拖动时不抖） */
+.board-ann-weight {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 30px;
+  padding: 0 2px;
+  border-radius: 4px;
+  background: var(--e2);
+}
+.board-ann-weightv {
+  min-width: 26px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.board-ann-step {
+  width: 20px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.board-ann-step:hover {
+  background: var(--e1);
+  color: var(--text-primary);
+}
+
+.board-ann-done {
+  width: auto;
+  gap: 5px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-glow-soft);
+}
+.board-ann-done:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.board-ann-donetext {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* ---------------- 画布上的标注层 ----------------
+   插在图片与便签的 DOM 之间，z-index 与「置顶图」同为 3：同 z 时后出现的在上，
+   所以标注恒压图片；便签是 4，恒在标注之上。
+   只有选择 / 橡皮工具开着时加 `.hit` 才吃鼠标 —— 画图时指针要能穿过这些层。 */
+.board-ann {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+.board-ann.hit {
+  pointer-events: auto;
+  cursor: move;
+}
+.board-ann.on {
+  /* 选中圈：1px 强调色。画布缩放会把它一起放大，和图片那圈发丝线同一种表现 */
+  box-shadow: 0 0 0 1px var(--accent);
+  background: rgba(167, 139, 250, 0.06);
+}
+.board-ann-cv {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.board-ann-live {
+  display: none;
+  pointer-events: none;
+}
+/* 马赛克：**对底图做 backdrop-filter 模糊 + 网格叠色**（近似，不是真像素块）。
+   为什么不在 canvas 上做真像素化：板上的底图是 DOM `<img>`（`object-fit: cover`，
+   而且**只有视口内的图才挂 DOM**）。要"像素化那一块屏幕"，就得把该区域内所有图片
+   按画布坐标重新合成进一张离屏 canvas —— 视口外的图根本没有节点可画，动图层更不可能；
+   更麻烦的是任何一张图被拖动、改大小，马赛克就会过期，必须跟着重画。
+   `backdrop-filter` 由合成器实时采样，底下怎么变都对，也不占主线程 —— 稳定优先。
+   代价：出来的是"糊"而不是"方块"，这一点如实写在交付说明里。 */
+.board-ann-mosaic {
+  width: 100%;
+  height: 100%;
+  border-radius: 2px;
+  background-image: repeating-linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.05) 0 1px,
+      transparent 1px 11px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.05) 0 1px,
+      transparent 1px 11px
+    ),
+    rgba(20, 22, 28, 0.16);
+}
+
+/* 文字工具的输入框：贴在画布上，跟着缩放走（字号是画布单位） */
+.board-ann-input {
+  position: absolute;
+  z-index: 3;
+  min-width: 2em;
+  min-height: 1.3em;
+  padding: 0 2px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-weight: 600;
+  font-family: "Microsoft YaHei", "Inter Variable", sans-serif;
+  line-height: 1.3;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.55);
+  caret-color: var(--accent);
+  white-space: pre;
+}
+
+/* ---------------- 图层面板里的标注行 ---------------- */
+.board-layers-sep {
+  padding: 8px 10px 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  text-transform: none;
+}
+.board-layer-annico {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-glow-soft);
+}
+.board-layer-annico svg {
+  width: 15px;
+  height: 15px;
+}
+/* 上移 / 下移 / 删除：平时不占视觉，悬停或选中那一行才出来 */
+.board-layer-annops {
+  flex: 0 0 auto;
+  display: none;
+  align-items: center;
+  gap: 1px;
+}
+.board-layer-ann:hover .board-layer-annops,
+.board-layer-ann.on .board-layer-annops {
+  display: flex;
+}
+.board-layer-annops button {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.board-layer-annops button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 标注模式下的指针：画图工具一律十字（"落下就是画"），和平移/框选的手感分开 */
+.board-root.annotating {
+  cursor: crosshair;
 }

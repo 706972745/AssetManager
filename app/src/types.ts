@@ -192,6 +192,13 @@ export interface SnapshotResolve {
   missing: number;
 }
 
+/** 快照计数概况：`total` = 记下来的条数，`found` = 现在按哈希找得回的张数 */
+export interface SnapshotStats {
+  total: number;
+  found: number;
+  missing: number;
+}
+
 export interface SnapshotZip {
   path: string;
   ok: number;
@@ -299,6 +306,21 @@ export interface BoardNote {
   vert: boolean;
   /** 所属组（0 = 没打组；同一块板上相同的非零值 = 同一组） */
   grp: number;
+}
+
+/** 灵感板上的一层标注（截图工具条画上去的那一笔）。
+ *  几何在 `payload` 里（前端自己的 JSON，坐标相对本层原点），这里只有摆放与层级。 */
+export interface BoardAnnRow {
+  aid: number;
+  /** 层级：小的先画（在下），大的后画（在上） */
+  z: number;
+  /** 工具名（rect / ellipse / line / arrow / pen / marker / text / badge / mosaic） */
+  kind: string;
+  payload: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /** 灵感板里粘贴进来的一张（后端已落盘 + 入库 + 打标签，这里只是它的显示信息） */
@@ -644,6 +666,8 @@ export interface Source {
      快照记的是**图片的内容指纹**（不是 id、不是路径），所以图片改名、换目录、
      换到另一个素材库之后，导回来照样能对上同一张图。导出的是清单，不含图片字节。 */
   snapshotList(): Promise<SnapshotRow[]>;
+  /** 记了多少条 / 现在找得回几张（侧栏计数与网格列表口径不一致时提示用） */
+  snapshotStats(id: number): Promise<SnapshotStats>;
   /** 新建（同名直接返回已有的那个）。返回 id */
   snapshotCreate(name: string): Promise<number>;
   snapshotRename(id: number, name: string): Promise<void>;
@@ -788,8 +812,13 @@ export interface Source {
   /* ---- 界面偏好 / 缩放 / 自启（0.3.30） ----
      缩放和托盘这几项必须让**后端也存一份**：启动时最小化、关闭拦截都发生在
      webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs 注释）。 */
-  /** 把「关闭到托盘 / 启动时最小化 / 缩放」同步给后端 */
-  uiPrefsSet(p: { closeToTray: boolean; startMinimized: boolean; uiScale: number | null }): Promise<void>;
+  /** 把「关闭到托盘 / 启动时最小化 / 缩放 / 回收站保留天数」同步给后端 */
+  uiPrefsSet(p: {
+    closeToTray: boolean;
+    startMinimized: boolean;
+    uiScale: number | null;
+    trashRetentionDays: number;
+  }): Promise<void>;
   /** 设缩放；传 null = 自动。返回**实际生效**的倍率（前端拿它显示"当前 100%"） */
   setUiScale(scale: number | null): Promise<number>;
   setAutostart(on: boolean): Promise<void>;
@@ -861,6 +890,12 @@ export interface Prefs {
   /** 启动后直接收进托盘 */
   startMinimized: boolean;
   /**
+   * 应用回收站自动清理天数（0.5.7）：默认 7，`0` = 永不自动清理。
+   * 同时存一份到后端 `ui-prefs.json` —— 启动清理发生在 webview 起来之前，
+   * 那时只能读后端那份（见 main.rs 的 UiPrefs）。
+   */
+  trashRetentionDays: number;
+  /**
    * 界面语言：`system` = 跟随系统（默认）；其余是具体语言代码。
    * 类型放宽成 string 是为了**老数据/新语言**都不炸：真正的白名单校验在 i18n 里。
    */
@@ -884,6 +919,8 @@ export const DEFAULT_PREFS: Prefs = {
      默认开启会让人以为"关不掉软件"（FontManager 也是默认关）。 */
   closeToTray: false,
   startMinimized: false,
+  /* 应用回收站里的东西留 7 天，启动时后台清一次；0 = 永不自动清理 */
+  trashRetentionDays: 7,
   locale: "system",
 };
 
@@ -959,6 +996,14 @@ export function loadPrefs(): Prefs {
           : null,
       closeToTray: p.closeToTray === true,
       startMinimized: p.startMinimized === true,
+      /* 0 = 永不清理是合法值；负数 / NaN / 字符串都退回默认 7 天，
+         不能让一个坏值把自动清理悄悄关掉或变成"删光" */
+      trashRetentionDays:
+        typeof p.trashRetentionDays === "number" &&
+        Number.isFinite(p.trashRetentionDays) &&
+        p.trashRetentionDays >= 0
+          ? Math.round(p.trashRetentionDays)
+          : DEFAULT_PREFS.trashRetentionDays,
       locale: typeof p.locale === "string" && p.locale ? p.locale : "system",
     };
   } catch {

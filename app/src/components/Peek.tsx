@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "react";
 import { onAppEvent, source } from "../data/source";
 import { loadPrefs } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
@@ -15,7 +15,10 @@ import { useT } from "../lib/i18n";
  * - `滚轮`：连窗口一起缩放（锚定窗口中心）
  * - `Shift+滚轮`：**图内**缩放，锚定鼠标位置（看细节用，窗口不动）
  * - `Ctrl+滚轮`：整张贴图的不透明度
- * - 左键拖：移动窗口；中键拖：图内平移（放大后才有意义）
+ * - 左键拖：`view.s === 1` 时移动**窗口**（老手感）；`view.s > 1` 时改成**图内平移** ——
+ *   放大后用户要的显然是"看别处"，而不是"整扇窗跟着跑"（owner 2026-11-23：
+ *   「长图放很大后拖拽这个长图有bug，拖不动」）。放大状态下想挪窗口先 Esc/0 复位。
+ * - 中键拖：图内平移（放大后才有意义，和左键同一套 clamp）
  * - 双击：撕掉这张贴图
  *
  * **窗口里除了图什么都没有**（owner 2026-11-17：右上角 X、底部信息条全撤掉）——
@@ -43,6 +46,57 @@ interface PeekBoot {
 
 const ZOOM_STEP = 1.09; // 和果核看图同一个步长（实测每格 ×1.09）
 const OPACITY_STEP = 0.08;
+const MAX_SCALE = 12;
+
+type PeekView = { s: number; x: number; y: number };
+const ORIGIN_VIEW: PeekView = { s: 1, x: 0, y: 0 };
+
+/** 窗口的内容盒（= `img` 的布局盒，**不受 transform 影响**）。 */
+function peekBox(root: HTMLElement | null, img: HTMLImageElement | null) {
+  const r = root?.getBoundingClientRect();
+  if (r && r.width > 0 && r.height > 0) return { w: r.width, h: r.height };
+  return { w: img?.clientWidth ?? 0, h: img?.clientHeight ?? 0 };
+}
+
+/**
+ * 把图内缩放/位移钳在"图永远盖满窗口"的范围里。
+ *
+ * 为什么必须有它（owner 2026-11-23「长图放很大后拖不动」）：原来 `view.x/y` 是**无界**的，
+ * Shift+滚轮按鼠标锚点缩放时 x/y 会被推到几千像素外，图整个滑出窗口 —— 窗口里只剩
+ * 透明区，没有任何东西可以抓住，看上去就是"图丢了/拖不动"。
+ *
+ * 坐标系：`img` 是 `transform-origin: 0 0`，`transform: translate(x,y) scale(s) rotate(rot)`。
+ * 缩放前的元素盒是 `winW × winH`（`width/height: 100%`），所以屏幕足迹就是
+ * `(旋转时换过长短边的尺寸) × s`；绕左上角转 90/270/180 会把足迹甩到负轴一侧，
+ * 这一段 `ox/oy` 就是在补这个偏移。镜像只翻符号、不改尺寸，所以不参与计算。
+ *
+ * 某一维放大后仍然装不满窗口（旋转 + 极端比例才会遇到）→ 该维**居中锁死**，
+ * 宁可不动，也不给"拖出留白"的机会。
+ */
+function clampView(v: PeekView, rot: number, winW: number, winH: number): PeekView {
+  const s = Math.min(MAX_SCALE, Math.max(1, v.s));
+  /* s === 1 时**一个像素都不偏**：不挂 transform，和 0.5.x 之前完全一样
+     （`object-fit: contain` 自己居中，我们别去插一脚）。 */
+  if (s <= 1) return ORIGIN_VIEW;
+  if (!winW || !winH) return v;
+
+  const swap = rot === 90 || rot === 270;
+  const fw = (swap ? winH : winW) * s; // 足迹宽
+  const fh = (swap ? winW : winH) * s; // 足迹高
+  const ox = rot === 90 ? -winH * s : rot === 180 ? -winW * s : 0;
+  const oy = rot === 270 ? -winW * s : rot === 180 ? -winH * s : 0;
+
+  /* 足迹在屏幕上的左边 = ox + t，要满足 winW - fw <= 左边 <= 0 */
+  const axis = (t: number, origin: number, foot: number, win: number) => {
+    if (foot <= win) return (win - foot) / 2 - origin;
+    return Math.min(-origin, Math.max(win - foot - origin, t));
+  };
+  return {
+    s,
+    x: axis(v.x, ox, fw, winW),
+    y: axis(v.y, oy, fh, winH),
+  };
+}
 
 function bootData(): {
   items: PeekItem[];
@@ -86,8 +140,11 @@ export function Peek() {
   const [pinned, setPinned] = useState(true); // 默认置顶（owner 要求）
   const [err] = useState("");
   const [opac, setOpac] = useState(boot.opacity);
-  /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点 */
-  const [view, setView] = useState({ s: 1, x: 0, y: 0 });
+  /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点。
+     `x/y` 一律经过 `clampView`，永远落在"图盖满窗口"的范围里。 */
+  const [view, setView] = useState<PeekView>(ORIGIN_VIEW);
+  /* 正在拖图（只用来切 cursor 和关掉 transform 过渡） */
+  const [panning, setPanning] = useState(false);
   /* 旋转 / 镜像（0.1.18，P2.7）：只影响"看"，不动文件、不改存档 ——
      贴图是临时视图，关掉再开回来还是原样。 */
   const [rot, setRot] = useState(0);
@@ -128,7 +185,11 @@ export function Peek() {
   const root = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const busy = useRef(false);
-  const pan = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  /* 拖图会话：`id` 是 pointerId，抓不到指针对应关系就不知道该不该跟手 */
+  const pan = useRef<{ id: number; x: number; y: number; ox: number; oy: number } | null>(null);
+  /* `rot` 的镜像 ref：滚轮 / resize 那些只挂一次的监听里要读旋转（不能进依赖，
+     否则每转一次就要重挂一遍监听）。 */
+  const rotRef = useRef(rot);
   /* 窗口建出来是**不可见**的（后端 `.visible(false)`），首帧真画上去了才让它露面 ——
      否则 WebView2 会先闪一下自己的默认底色，中键贴图时那一闪特别难看。 */
   const shown = useRef(false);
@@ -207,6 +268,14 @@ export function Peek() {
     [boot.items]
   );
 
+  /* 按**当前**窗口尺寸重新钳一次位移。
+     用在：窗口缩放（滚轮）/ 换图 / 旋转 之后 —— 盒子变了，旧的 x/y 可能已经越界，
+     不重算就会留下"图被顶出窗口"的残留状态。 */
+  const reclamp = useCallback(() => {
+    const b = peekBox(root.current, imgRef.current);
+    setView((v) => (v.s > 1 ? clampView(v, rotRef.current, b.w, b.h) : v));
+  }, []);
+
   /* 滚轮三分支：Shift=图内、Ctrl=不透明度、其余=连窗口一起缩放 */
   useEffect(() => {
     const el = root.current;
@@ -216,17 +285,25 @@ export function Peek() {
       const up = e.deltaY < 0;
 
       if (e.shiftKey) {
-        // 锚定鼠标：让指针底下那个像素在缩放前后**不动**。
-        // 用 **img 的** rect，不是 root 的 —— root 里有 16px 的发光的边距，
-        // 拿 root 算会让锚点整体偏 16px。
-        const rect = (imgRef.current ?? el).getBoundingClientRect();
-        const px = e.clientX - rect.left;
-        const py = e.clientY - rect.top;
+        /* 锚定鼠标：让指针底下那个像素在缩放前后**不动**。
+           算式直接在**屏幕坐标**里写 —— `translate(x,y) scale(s)`、origin `0 0` 下，
+           屏幕点 u 对应内容点 (u - x) / s；缩放后要满足 x2 + 内容点 * s2 = u，
+           解出 `x2 = u - (u - x) * k`（k = s2 / s）。
+           以前用的是"img 的 rect 再减 x"的写法，x = 0 时等价，一旦平移过就会差
+           `x * (1 - k)`，越缩越偏；现在平移可用了，这个偏差必须修掉。 */
+        const b = peekBox(el, imgRef.current);
+        const ux = e.clientX;
+        const uy = e.clientY;
         setView((v) => {
-          const s2 = Math.min(12, Math.max(1, v.s * (up ? ZOOM_STEP : 1 / ZOOM_STEP)));
-          if (s2 === 1) return { s: 1, x: 0, y: 0 };
+          const s2 = Math.min(MAX_SCALE, Math.max(1, v.s * (up ? ZOOM_STEP : 1 / ZOOM_STEP)));
+          if (s2 === 1) return ORIGIN_VIEW;
           const k = s2 / v.s;
-          return { s: s2, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
+          return clampView(
+            { s: s2, x: ux - (ux - v.x) * k, y: uy - (uy - v.y) * k },
+            rotRef.current,
+            b.w,
+            b.h
+          );
         });
         return;
       }
@@ -247,12 +324,15 @@ export function Peek() {
         .catch(() => {})
         .finally(() => {
           busy.current = false;
+          /* 窗口刚改完尺寸，`resize` 事件不一定这一帧就到 —— 下一帧主动再钳一次，
+             保证"缩完窗口图仍然盖满窗口" */
+          requestAnimationFrame(() => reclamp());
         });
     };
     // 原生 passive:false（React 的 onWheel 在 WebView2 上可能是 passive，preventDefault 会失效）
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [reclamp]);
 
   /* 键盘 */
   useEffect(() => {
@@ -311,30 +391,20 @@ export function Peek() {
     return () => window.removeEventListener("keydown", onKey);
   }, [close, cur, goto, idx, menu, view.s, rot, applyRot]);
 
-  /* 中键拖动 = 图内平移（放大后才有意义）。左键留给"拖窗口"（drag region）。 */
+  /* 窗口尺寸变了（滚轮缩放窗口 / 换图 / 旋转换比例）→ 位移必须**重新 clamp**。
+     残留的 x/y 会把图顶到窗口外，用户看到的就是"图没了、还拖不回来"。 */
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (e.button !== 1 || view.s <= 1) return;
-      e.preventDefault();
-      pan.current = { x: e.clientX, y: e.clientY, ox: view.x, oy: view.y };
-    };
-    const onMove = (e: MouseEvent) => {
-      const p = pan.current;
-      if (!p) return;
-      setView((v) => ({ ...v, x: p.ox + (e.clientX - p.x), y: p.oy + (e.clientY - p.y) }));
-    };
-    const onUp = () => {
-      pan.current = null;
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [view.s]);
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [reclamp]);
+
+  /* 旋转 90/270 会把足迹的长短边换掉 → 旋转后也要按新足迹再算一次
+     （窗口比例是异步改的，那次 resize 还会再算一遍，重复算无害、结果一致） */
+  useEffect(() => {
+    rotRef.current = rot;
+    const b = peekBox(root.current, imgRef.current);
+    setView((v) => (v.s > 1 ? clampView(v, rot, b.w, b.h) : v));
+  }, [rot]);
 
   /* 右键菜单 */
   const menuItems: CtxItem[] = [
@@ -425,6 +495,42 @@ export function Peek() {
 
   const px = cur?.src ?? "";
 
+  /* 图内平移（`view.s > 1`）。左键 + 中键都走这一套 ——
+     左键为什么得抢回来：`img` 上有 `data-tauri-drag-region`，Tauri 是**在 document 上**
+     听 `mousedown`（tauri `window/scripts/drag.js`），按下去就把整扇窗拖走了。图跟着窗一起动，
+     相对窗口没位移，用户看到的就是"长图放很大后拖不动"。所以放大时把属性换成 `"false"`：
+     Tauri 认这个值，并且会连祖先一起否决，左键这才轮得到我们。
+     另外用 pointer capture 而不是 window 上的 mousemove：贴图窗只有 342px 宽，
+     指针一滑出窗口就再也收不到 move，拖到一半会断（这也是"拖不动"的一部分）。 */
+  const endPan = (e: RPointerEvent<HTMLImageElement>) => {
+    if (pan.current?.id !== e.pointerId) return;
+    pan.current = null;
+    setPanning(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const onPanDown = (e: RPointerEvent<HTMLImageElement>) => {
+    /* s === 1：一个字节都不拦，原样交给 drag region 拖窗口（老手感不能变） */
+    if (view.s <= 1) return;
+    if (e.button !== 0 && e.button !== 1) return; // 右键留给菜单
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pan.current = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: view.x, oy: view.y };
+    setPanning(true);
+  };
+
+  const onPanMove = (e: RPointerEvent<HTMLImageElement>) => {
+    const p = pan.current;
+    if (!p || p.id !== e.pointerId) return;
+    const nx = p.ox + (e.clientX - p.x);
+    const ny = p.oy + (e.clientY - p.y);
+    const b = peekBox(root.current, imgRef.current);
+    setView((v) => clampView({ s: v.s, x: nx, y: ny }, rotRef.current, b.w, b.h));
+  };
+
   return (
     <div
       ref={root}
@@ -439,11 +545,21 @@ export function Peek() {
       {cur && !err && (
         <img
           ref={imgRef}
-          className="peek-img"
+          className={panning ? "peek-img peek-img-drag" : "peek-img"}
           src={px}
           alt=""
           draggable={false}
-          data-tauri-drag-region
+          /* 放大后要自己接管左键 → 显式 `false`（Tauri 认这个值，且否决祖先的 drag region）；
+             没放大时保持老行为：按在图上就是拖窗口。 */
+          data-tauri-drag-region={view.s > 1 ? "false" : ""}
+          onPointerDown={onPanDown}
+          onPointerMove={onPanMove}
+          onPointerUp={endPan}
+          onPointerCancel={endPan}
+          onLostPointerCapture={() => {
+            pan.current = null;
+            setPanning(false);
+          }}
           onLoad={(e) => {
             /* **比例校正**（owner 2026-11-19：「长图转贴图被压扁了」）。
                窗口尺寸是后端按长边算的，只要实际比例和窗口比例差一点（DPI 取整、
@@ -479,7 +595,7 @@ export function Peek() {
               return parts.length ? parts.join(" ") : undefined;
             })(),
             transformOrigin: "0 0",
-            cursor: view.s > 1 ? "grab" : undefined,
+            cursor: view.s > 1 ? (panning ? "grabbing" : "grab") : undefined,
           }}
         />
       )}

@@ -263,6 +263,31 @@ pub fn empty(data_dir: &Path) -> Res<usize> {
     Ok(n)
 }
 
+/// 自动清理：删掉进回收站超过 `days` 天的条目（0.5.7，默认 7 天）。
+///
+/// 判据只用账本里的 `deleted_at`（现有字段，不改存储格式）——文件的 mtime 可能被
+/// 复制/解压改过，而"什么时候被删的"是账本独有的信息。
+/// `days == 0` = 永不自动清理（owner 语义：给用户一个明确的"别动我的回收站"）。
+///
+/// 走 `purge()` 而不是直接 `fs::remove_file`：和手动「彻底删除 / 清空」同一条路，
+/// 先进 Windows 回收站兜一层 —— 自动清理误伤时还有一次捞回来的机会。
+/// 只吃 `data_dir/trash` 下的账本条目，绝不碰素材库和 `screenshots`。
+pub fn purge_older_than(data_dir: &Path, days: u64) -> Res<usize> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now().saturating_sub(days.saturating_mul(24 * 60 * 60));
+    let ids: Vec<String> = list(data_dir)
+        .into_iter()
+        .filter(|t| t.deleted_at < cutoff)
+        .map(|t| t.id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    purge(data_dir, &ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +377,51 @@ mod tests {
         // 有人手动把回收站里的文件删了（账本还在）
         fs::remove_file(&entries[0].trashed_path).unwrap();
         assert!(list(&data).is_empty(), "文件不在的记录不该出现在列表里");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 造一条"`age_days` 天前被删"的回收站记录（文件 + 账本直接摆好，
+    /// 不走 `put`：`put` 的 `deleted_at` 永远是"现在"，没法测时间判断）。
+    fn plant(data: &Path, name: &str, age_days: u64) -> PathBuf {
+        let root = dir(data);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join(name);
+        fs::write(&file, b"x").unwrap();
+        let entry = TrashEntry {
+            id: file.to_string_lossy().into_owned(),
+            original_path: file.to_string_lossy().into_owned(),
+            trashed_path: file.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            size: 1,
+            deleted_at: now().saturating_sub(age_days * 24 * 60 * 60),
+        };
+        fs::write(ledger(&file), serde_json::to_vec(&entry).unwrap()).unwrap();
+        file
+    }
+
+    #[test]
+    fn purge_older_than_deletes_only_expired() {
+        let root = tmp("retention");
+        let data = root.join("data");
+        let old = plant(&data, "old.png", 8); // 8 天前：超过 7 天，该删
+        let recent = plant(&data, "recent.png", 6); // 6 天前：还没到期，该留
+        let n = purge_older_than(&data, 7).expect("purge_older_than");
+        assert_eq!(n, 1, "只该删掉过期的这一条");
+        assert!(!old.exists(), "过期条目应被清理");
+        assert!(recent.exists(), "未到期条目不能被碰");
+        assert_eq!(list(&data).len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn purge_older_than_zero_keeps_everything() {
+        let root = tmp("retention-zero");
+        let data = root.join("data");
+        let old = plant(&data, "old.png", 365);
+        let n = purge_older_than(&data, 0).expect("purge_older_than");
+        assert_eq!(n, 0, "0 = 永不自动清理");
+        assert!(old.exists());
+        assert_eq!(list(&data).len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 }

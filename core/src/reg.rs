@@ -122,6 +122,28 @@ CREATE TABLE IF NOT EXISTS board_items (
   PRIMARY KEY (board, gid)
 ) WITHOUT ROWID;
 
+/* 灵感板上的**标注图层**：一笔 = 一行 = 图层面板里的一个独立层。
+   `payload` 是这一笔的向量 JSON，坐标**相对本层原点**（x / y）—— 所以拖位置只改
+   x / y，payload 一辈子不用重写；`w / h` 是包围盒尺寸，给"视口居中 / 命中"用。
+   `z` 小的在下、大的在上，只决定标注之间的先后（图片恒在标注下、便签恒在标注上，
+   见 `Board.tsx` 里的分层说明）。和 board_items / board_notes 同性质：视图记忆，
+   删掉不丢任何素材。aid 一板内唯一（后端发号 MAX+1）。 */
+CREATE TABLE IF NOT EXISTS board_ann (
+  board TEXT NOT NULL,
+  aid INTEGER NOT NULL,
+  z INTEGER NOT NULL DEFAULT 0,
+  /* 工具名（rect / ellipse / line / arrow / pen / marker / text / badge / mosaic），
+     只用来在图层面板里起名和选图标 — 真正的几何全在 payload 里 */
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  x REAL NOT NULL DEFAULT 0,
+  y REAL NOT NULL DEFAULT 0,
+  w REAL NOT NULL DEFAULT 0,
+  h REAL NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (board, aid)
+) WITHOUT ROWID;
+
 /* 灵感板上的**文字便签**（0.4.14）：板上随手写的注释，位置/尺寸/文字都在这里。
    和 board_items 一样只是视图记忆，删掉不丢任何素材；
    `nid` 在一板内唯一（后端按 MAX(nid)+1 发号），前端用负数当 key 与图片 gid 区分。 */
@@ -1170,6 +1192,111 @@ pub fn board_note_del(c: &Connection, board: &str, nid: i64) -> Res<usize> {
     .map_err(e2s)
 }
 
+/* ------ 灵感板标注图层 ------ */
+
+/// 一层标注。`payload` 原样交给前端解析（后端不认识任何几何）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoardAnnRow {
+    pub aid: i64,
+    /// 层级：小的先画（在下），大的后画（在上）
+    pub z: i64,
+    pub kind: String,
+    /// 向量 JSON，坐标**相对本层原点**
+    pub payload: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// 一块板上的全部标注，按绘制顺序（z 升序、同 z 按创建顺序）返回 ——
+/// 前端拿到就是这个顺序，直接按数组顺序渲染，不用再排一遍。
+pub fn board_ann(c: &Connection, board: &str) -> Res<Vec<BoardAnnRow>> {
+    let mut st = c
+        .prepare(
+            "SELECT aid, z, kind, payload, x, y, w, h
+             FROM board_ann WHERE board = ?1 ORDER BY z, aid",
+        )
+        .map_err(e2s)?;
+    let rows = st
+        .query_map(params![board], |r| {
+            Ok(BoardAnnRow {
+                aid: r.get(0)?,
+                z: r.get(1)?,
+                kind: r.get(2)?,
+                payload: r.get(3)?,
+                x: r.get(4)?,
+                y: r.get(5)?,
+                w: r.get(6)?,
+                h: r.get(7)?,
+            })
+        })
+        .map_err(e2s)?;
+    Ok(rows.flatten().collect())
+}
+
+/// 落一层新标注，返回发号后的 aid。
+#[allow(clippy::too_many_arguments)]
+pub fn board_ann_add(
+    c: &Connection,
+    board: &str,
+    z: i64,
+    kind: &str,
+    payload: &str,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Res<i64> {
+    let aid: i64 = c
+        .query_row(
+            "SELECT COALESCE(MAX(aid), 0) FROM board_ann WHERE board = ?1",
+            params![board],
+            |r| r.get(0),
+        )
+        .map_err(e2s)?;
+    let aid = aid + 1;
+    c.execute(
+        "INSERT INTO board_ann (board, aid, z, kind, payload, x, y, w, h, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![board, aid, z, kind, payload, x, y, w, h, db::now_ts()],
+    )
+    .map_err(e2s)?;
+    Ok(aid)
+}
+
+/// 挪位置 / 换层级。**不碰 payload**：坐标是相对本层的，所以拖动只改 x / y。
+pub fn board_ann_update(
+    c: &Connection,
+    board: &str,
+    aid: i64,
+    x: f64,
+    y: f64,
+    z: i64,
+) -> Res<usize> {
+    c.execute(
+        "UPDATE board_ann SET x = ?3, y = ?4, z = ?5, updated_at = ?6
+         WHERE board = ?1 AND aid = ?2",
+        params![board, aid, x, y, z, db::now_ts()],
+    )
+    .map_err(e2s)
+}
+
+/// 删一层（橡皮擦 / 图层行删除）。
+pub fn board_ann_del(c: &Connection, board: &str, aid: i64) -> Res<usize> {
+    c.execute(
+        "DELETE FROM board_ann WHERE board = ?1 AND aid = ?2",
+        params![board, aid],
+    )
+    .map_err(e2s)
+}
+
+/// 清空**这一块板**的全部标注（别的板不受影响）。
+pub fn board_ann_clear(c: &Connection, board: &str) -> Res<usize> {
+    c.execute("DELETE FROM board_ann WHERE board = ?1", params![board])
+        .map_err(e2s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,6 +1425,47 @@ mod tests {
         assert_eq!(board_note_del(&c, "tag:参考", a).unwrap(), 1);
         assert_eq!(board_notes(&c, "tag:参考").unwrap().len(), 1);
         assert_eq!(board_note_del(&c, "tag:参考", a).unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 标注图层：发号、按 z 排序、挪位置、换层级、删、清空、**板之间互不串**
+    #[test]
+    fn board_ann_roundtrip() {
+        let d = tmp("ann");
+        let c = open(&d.join("index.db")).unwrap();
+
+        let a = board_ann_add(&c, "tag:参考", 1, "rect", r#"{"t":"rect"}"#, 10.0, 20.0, 100.0, 50.0)
+            .unwrap();
+        let b = board_ann_add(&c, "tag:参考", 2, "text", r#"{"t":"text"}"#, 0.0, 0.0, 40.0, 20.0)
+            .unwrap();
+        assert!(b > a, "新标注要拿到更大的 aid");
+
+        let rows = board_ann(&c, "tag:参考").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, "rect");
+        assert_eq!(rows[0].payload, r#"{"t":"rect"}"#);
+        assert_eq!(rows[0].x, 10.0);
+        assert_eq!(rows[1].z, 2, "读回来按 z 升序（先画的在前）");
+
+        // 挪位置 + 换层级：payload 保持原样，排序跟着 z 走
+        assert_eq!(board_ann_update(&c, "tag:参考", a, 30.0, 40.0, 9).unwrap(), 1);
+        let rows = board_ann(&c, "tag:参考").unwrap();
+        assert_eq!(rows[1].aid, a, "z 变大就排到后面（画在上层）");
+        assert_eq!(rows[1].x, 30.0);
+        assert_eq!(rows[1].payload, r#"{"t":"rect"}"#, "换层级不许动几何");
+
+        // 别的板看不到、发号各自从 1 开始
+        assert!(board_ann(&c, "snap:1").unwrap().is_empty());
+        let o = board_ann_add(&c, "snap:1", 1, "pen", "{}", 0.0, 0.0, 1.0, 1.0).unwrap();
+        assert_eq!(o, 1);
+
+        // 删一层；清空只清这块板
+        assert_eq!(board_ann_del(&c, "tag:参考", a).unwrap(), 1);
+        assert_eq!(board_ann_del(&c, "tag:参考", a).unwrap(), 0);
+        assert_eq!(board_ann_clear(&c, "tag:参考").unwrap(), 1);
+        assert!(board_ann(&c, "tag:参考").unwrap().is_empty());
+        assert_eq!(board_ann(&c, "snap:1").unwrap().len(), 1, "清空不许碰到别的板");
 
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -599,9 +599,11 @@ const Tile = memo(function Tile({
     }
 
     const onWheel = (e: WheelEvent) => {
-      /* 没按 Ctrl = 用户在滚列表，这里一个字节都不拦 */
-      if (!e.ctrlKey && !e.metaKey) return;
-      /* 按了 Ctrl 就整段吃掉（连到顶/到底也吃）：否则界面会在边界处跟着抖一下。
+      /* 没按 Shift = 用户在滚列表，这里一个字节都不拦。
+         为什么从 Ctrl 改成 Shift（owner 2026-11-23）：Ctrl+滚轮 是全站的「改网格大小」
+         （App.tsx 那条全局监听），停在长图上想滚图，手指一偏就把整屏格子放大了。 */
+      if (!e.shiftKey) return;
+      /* 按了 Shift 就整段吃掉（连到顶/到底也吃）：否则界面会在边界处跟着抖一下。
          触控板捏合会送来很大的 deltaY，钳到 ±120 免得一下跳到图尾。 */
       e.preventDefault();
       const dy = Math.max(-120, Math.min(120, e.deltaY));
@@ -666,12 +668,12 @@ const Tile = memo(function Tile({
               }}
             />
           )}
-          {/* 能滚的长图：一条细指示条 + 悬停时一句「Ctrl+滚轮」——
-              不标出来的话，用户猜不到"这张能滚"，更猜不到要按 Ctrl */}
+          {/* 能滚的长图：一条细指示条 + 悬停时一句「Shift+滚轮」——
+              不标出来的话，用户猜不到"这张能滚"，更猜不到要按 Shift */}
           {scrollable && (
             <>
               <span className="tile-scrollbar" ref={barRef} aria-hidden="true" />
-              <span className="tile-scroll-hint">Ctrl + 滚轮</span>
+              <span className="tile-scroll-hint">Shift + 滚轮</span>
             </>
           )}
           {!loadedSrc && !failed && <div className="tile-skel" />}

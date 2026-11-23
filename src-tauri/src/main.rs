@@ -2030,11 +2030,10 @@ fn am_probe_dir(dir: String) -> am_core::dataroot::DirProbe {
 }
 
 #[tauri::command]
-fn am_data_root(app: AppHandle, state: State<AppState>) -> Result<DataRootInfo, String> {
-    let default_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| format!("拿不到默认数据目录：{e}"))?;
+fn am_data_root(_app: AppHandle, state: State<AppState>) -> Result<DataRootInfo, String> {
+    // 0.5.7 起默认目录是 `<exe>\data`（写不进去才回退 %LOCALAPPDATA%），
+    // 一律问 core，别在这里另算一份 —— 两份路径一旦不一致，界面显示的就是假地址。
+    let default_dir = am_core::default_data_dir();
     let cfg = am_core::dataroot::load(&default_dir);
     let effective = lock(&state).data_dir.to_string_lossy().to_string();
     Ok(DataRootInfo {
@@ -2053,7 +2052,7 @@ fn am_data_root(app: AppHandle, state: State<AppState>) -> Result<DataRootInfo, 
 /// 这样重启后打开就是同一套库，不用重扫 3 万个文件。缩略图缓存不复制。
 #[tauri::command]
 fn am_set_data_root(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<AppState>,
     enabled: bool,
     current: Option<String>,
@@ -2062,10 +2061,9 @@ fn am_set_data_root(
     // 用户已经看过「这看起来是素材目录」的提示、仍要用它当索引位置
     force: Option<bool>,
 ) -> Result<String, String> {
-    let default_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| format!("拿不到默认数据目录：{e}"))?;
+    // 指针文件永远落在**默认目录**（0.5.7 = `<exe>\data`），所以这里必须和启动时
+    // 用的是同一个目录 —— 一律问 core。
+    let default_dir = am_core::default_data_dir();
 
     let mut cfg = am_core::dataroot::DataRootConfig {
         enabled,
@@ -2322,9 +2320,98 @@ fn serve_thumb(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> Response
 
 const PEEK_LONG_EDGE: f64 = 342.0;
 
-/// 当前 UI 主题（0=未知 1=浅 2=深）。主窗在主题变化时推上来，
+/// 当前 UI 主题（0=主窗还没推过 1=浅 2=深）。主窗在主题变化时推上来，
 /// 建贴图窗口时注入 boot —— 贴图是独立 webview，读不到主窗那侧的偏好。
+///
+/// **0 不再等于"深色"**：主窗首帧之前就建出来的窗口（贴图还原 / 灵感板 / 截图覆盖层）
+/// 现在拿的是系统深浅（`ui_theme()`），不再是"先黑一下再变白"。
+/// （托盘菜单与启动页自己走 CSS `prefers-color-scheme`，不经过这里。）
 static UI_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 系统深浅的惰性缓存：第一次有人问的时候才读注册表（之后不再读）。
+static SYSTEM_THEME: OnceLock<u8> = OnceLock::new();
+
+/// 系统「应用模式」的深浅（1=浅 2=深）。
+///
+/// 读 `HKCU\...\Themes\Personalize\AppsUseLightTheme`（DWORD，1=浅 0=深）——
+/// 这正是前端 `prefers-color-scheme` 对应的那个开关；任务栏/开始菜单看的是
+/// `SystemUsesLightTheme`，别拿错（用户完全可以应用浅色、任务栏深色）。
+///
+/// 读不到（老系统 / 值被删 / API 失败）按深色 —— 本软件 `:root` 就是深色，
+/// 兜底成深色不会出现"浅底上白字看不见"的闪一下。
+#[cfg(windows)]
+fn system_theme_code() -> u8 {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(hkey: isize, sub: *const u16, opt: u32, sam: u32, out: *mut isize) -> i32;
+        fn RegQueryValueExW(
+            hkey: isize,
+            name: *const u16,
+            reserved: *mut u32,
+            ty: *mut u32,
+            data: *mut u8,
+            len: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(hkey: isize) -> i32;
+    }
+    // 见 `file_assoc.rs` 同一处注释：预定义 HKEY 要先按 32 位有符号取负再符号扩展，
+    // 直接写 0x80000001 在 64 位下会是个非法句柄。
+    const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+    const KEY_READ: u32 = 0x0002_0019;
+    const REG_DWORD: u32 = 4;
+    const ERROR_SUCCESS: i32 = 0;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let sub = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("AppsUseLightTheme");
+    let mut hkey: isize = 0;
+    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut hkey) };
+    if rc != ERROR_SUCCESS {
+        return 2;
+    }
+    let mut data: u32 = 0;
+    let mut len: u32 = 4;
+    let mut kind: u32 = 0;
+    let rc = unsafe {
+        RegQueryValueExW(
+            hkey,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            &mut data as *mut u32 as *mut u8,
+            &mut len,
+        )
+    };
+    unsafe { RegCloseKey(hkey) };
+    if rc != ERROR_SUCCESS || kind != REG_DWORD || len < 4 {
+        return 2;
+    }
+    if data != 0 {
+        1
+    } else {
+        2
+    }
+}
+
+#[cfg(not(windows))]
+fn system_theme_code() -> u8 {
+    2
+}
+
+/// 读当前该用的主题代码：主窗推过就用推的，没推过就用系统深浅（只解析一次）。
+///
+/// 惰性而不是在 `main()` 里预先读：只有真的建附属窗 / 开截图覆盖层时才需要它，
+/// 也别让注册表调用挡在启动路径上。
+fn ui_theme() -> u8 {
+    let v = UI_THEME.load(Ordering::SeqCst);
+    if v != 0 {
+        return v;
+    }
+    *SYSTEM_THEME.get_or_init(system_theme_code)
+}
 
 /// 贴图「蓝色边框」的全局开关，**默认开**（owner 2026-11-19：白底网页/文档上贴图
 /// 需要一圈轮廓才看得出边界）。右键菜单里随时可关，关掉后连那 10px 发光 padding
@@ -2435,6 +2522,35 @@ fn exe_dir() -> PathBuf {
 
 fn shot_dir() -> PathBuf {
     exe_dir().join("screenshots")
+}
+
+/// WebView2 的用户数据目录：`<exe 同级>\data\webview`（0.5.7）。
+///
+/// 为什么也要收进安装目录：WebView2 默认把 localStorage / IndexedDB / 几十 MB 缓存
+/// 写在 `%LOCALAPPDATA%\<identifier>\EBWebView`，是"C 盘里最肥的一块"。
+/// 写不进去（Program Files / 只读介质）就返回 `None`，让 WebView2 用默认位置 ——
+/// 设了一个建不出来的目录会直接建窗失败，等于软件打不开。
+fn webview_data_dir() -> Option<PathBuf> {
+    // 每个 WebView 窗口建之前都会问一次（主窗 / 启动页 / 贴图 / 灵感板 / 托盘菜单），
+    // 探针只写一次就够 —— 运行中这个答案也不该变（同一个 profile 才能共享 localStorage）。
+    static CACHED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let d = exe_dir().join("data").join("webview");
+            if std::fs::create_dir_all(&d).is_err() {
+                return None;
+            }
+            // 只读目录上 `create_dir_all` 也会"成功"，必须真写一次才知道
+            let probe = d.join(".am-write-probe");
+            match std::fs::write(&probe, b"1") {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe);
+                    Some(d)
+                }
+                Err(_) => None,
+            }
+        })
+        .clone()
 }
 
 /// 路径比较口径（与 core 的 `norm_path` 一致）：反斜杠、去尾分隔符、小写。
@@ -2573,6 +2689,9 @@ static PEEK_SEQ: AtomicU64 = AtomicU64::new(1);
 static LAST_PERSIST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// 正在退出：这时候贴图窗口被销毁**不删存档**（下次开机要还原）
 static QUITTING: AtomicBool = AtomicBool::new(false);
+/// 正在**重启**（换数据文件夹后 `am_relaunch`）：`RunEvent::Exit` 里不能再替 Tauri
+/// 退出 —— 它还要在同一个回调之后 `process::restart`，抢在前面 exit 就是"关了不再起来"。
+static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 fn peeks() -> &'static Mutex<Vec<PeekRecall>> {
     PEEKS.get_or_init(|| Mutex::new(Vec::new()))
@@ -2782,7 +2901,7 @@ async fn spawn_peek(
         "items": [item],
         "i": 0,
         "opacity": rec.opacity,
-        "theme": match UI_THEME.load(std::sync::atomic::Ordering::SeqCst) {
+        "theme": match ui_theme() {
             1 => "light",
             _ => "dark",
         },
@@ -3182,6 +3301,15 @@ const CDP_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProt
 fn cdp_win<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
     b: tauri::WebviewWindowBuilder<'a, R, M>,
 ) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    /* 0.5.7：WebView2 用户数据目录挂到 `data\webview`（和主窗同一个）。
+       为什么**每个**窗口都要挂：profile 不同 = localStorage 不同分区 ——
+       贴图窗就再也读不到主窗记的 `am.peek.longEdge`，贴图会从"上次的长边"退回默认值。
+       主窗先建、这里跟着走，同一个目录在 WebView2 里就是同一个环境，不会多开浏览器进程。
+       探针失败（目录被占 / 只读）时返回 None → 走 WebView2 默认位置，窗口照常建。 */
+    let b = match webview_data_dir() {
+        Some(d) => b.data_directory(d),
+        None => b,
+    };
     if std::env::var("AM_CDP").as_deref() == Ok("1") {
         b.additional_browser_args(CDP_ARGS)
     } else {
@@ -3220,6 +3348,46 @@ fn close_aux_windows(app: &AppHandle) {
             let _ = w.close();
         }
     }
+}
+
+/* ---------------- 退出（0.5.7） ----------------
+
+   以前的问题：主窗关掉以后托盘图标还在、`tray-menu` 这个隐藏窗口也活着，
+   Tauri 的退出条件是"最后一个窗口关闭"，于是进程永远留着 —— 用户看到的是
+   「关掉了但任务管理器里还有一个 assetmanager.exe」。
+
+   现在三个入口（主窗叉号 / 托盘「退出软件」/ 更新重启）统一走 `exit_app()`。
+
+   0.5.7 起**叉号不再弹「退出？」确认框**（owner 2026-11-23：「默认时直接退出程序，
+   设置页面可以设置是否关闭到托盘」）：托盘「退出软件」= 直接退；叉号看偏好
+   `close_to_tray` —— 开 = 收进托盘，关（默认）= 直接退。 */
+
+/// **唯一**的真退出出口。
+///
+/// 为什么不能只 `app.exit(0)`：托盘图标、隐藏的 `tray-menu`、启动页、截图覆盖层
+/// 只要还有一个活着，进程就可能被吊住（托盘图标尤其：通知区会残留一个点不动的空图标）。
+/// 这里显式收干净，`RunEvent::Exit` 里再补一层 `process::exit` 兜底。
+pub(crate) fn exit_app(app: &AppHandle) {
+    // 先立旗：贴图窗被销毁时**不许**把存档删掉（下次启动要还原）
+    QUITTING.store(true, Ordering::SeqCst);
+    log_runtime_opt("quit: exit_app");
+    close_aux_windows(app);
+    // 托盘图标不摘掉，通知区会留一个空壳图标，直到鼠标扫过才消失
+    let _ = app.remove_tray_by_id("am-tray");
+    // 其余窗口（启动页 / 托盘菜单 / 截图覆盖层）一起关：留着任何一个都够吊住进程
+    for (label, w) in app.webview_windows() {
+        if label != "main" {
+            let _ = w.close();
+        }
+    }
+    app.exit(0);
+    /* 最后一道保险：极少数情况下（WebView2 子进程没收干净 / 某个窗口拒绝销毁）
+       事件循环可能迟迟不吐 `RunEvent::Exit`，进程就一直挂着。3 秒后无条件退 ——
+       用户已经点了叉号 / 托盘「退出软件」，没有任何理由让他在任务管理器里再手动结束一次。 */
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::process::exit(0);
+    });
 }
 
 #[derive(Clone, Serialize)]
@@ -3352,7 +3520,7 @@ fn spawn_board(
     if let Some(obj) = boot.as_object_mut() {
         obj.insert(
             "theme".into(),
-            serde_json::json!(match UI_THEME.load(Ordering::SeqCst) {
+            serde_json::json!(match ui_theme() {
                 1 => "light",
                 _ => "dark",
             }),
@@ -3600,6 +3768,58 @@ fn am_board_group(
     lock(&state).board_group_set(&board, &keys, grp)
 }
 
+/// 灵感板标注：读这块板上所有标注图层（按 z 升序 = 绘制顺序）
+#[tauri::command]
+fn am_board_ann(
+    state: State<'_, AppState>,
+    board: String,
+) -> Result<Vec<am_core::reg::BoardAnnRow>, String> {
+    lock(&state).board_ann(&board)
+}
+
+/// 灵感板标注：落一层新的，返回 aid。
+/// `payload` 是前端自己的向量 JSON，坐标相对本层原点 —— 后端只存不解析。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn am_board_ann_add(
+    state: State<'_, AppState>,
+    board: String,
+    z: i64,
+    kind: String,
+    payload: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<i64, String> {
+    lock(&state).board_ann_add(&board, z, &kind, &payload, x, y, w, h)
+}
+
+/// 灵感板标注：挪位置 / 换层级（payload 不动）
+#[tauri::command]
+fn am_board_ann_update(
+    state: State<'_, AppState>,
+    board: String,
+    aid: i64,
+    x: f64,
+    y: f64,
+    z: i64,
+) -> Result<usize, String> {
+    lock(&state).board_ann_update(&board, aid, x, y, z)
+}
+
+/// 灵感板标注：删一层
+#[tauri::command]
+fn am_board_ann_del(state: State<'_, AppState>, board: String, aid: i64) -> Result<usize, String> {
+    lock(&state).board_ann_del(&board, aid)
+}
+
+/// 灵感板标注：清空这块板的全部标注
+#[tauri::command]
+fn am_board_ann_clear(state: State<'_, AppState>, board: String) -> Result<usize, String> {
+    lock(&state).board_ann_clear(&board)
+}
+
 /// 本机已安装的字体族（灵感板文本框的字体下拉用）。枚举一次后缓存。
 #[tauri::command]
 fn am_system_fonts() -> Vec<String> {
@@ -3708,15 +3928,17 @@ fn today_day() -> String {
 /// - 标签是这块板的标签（一块板 = 一个标签），所以粘进来的图下次打开同一块板还在。
 ///
 /// 返回的是**新入库那张素材**的信息，前端拿它直接贴到视口中心。
-/// 剪贴板图片 → `程序目录\screenshots\粘贴 <时间戳>.png`。
-/// 标签板和快照板的 Ctrl+V 共用这一条（先落盘，再入库，最后挂到板上）。
-fn save_clip_png() -> Result<(PathBuf, u32, u32), String> {
+/// 剪贴板图片 → `dir\粘贴 <时间戳>.png`。
+///
+/// `dir` 是**这块板所属库的根目录**（见 `paste_dir`），不再一律写截图目录：
+/// 分组只能装本库素材（`coll_add` 会把跨库 id 直接忽略）、标签板也按当前库查，
+/// 写进截图库等于"看着粘成功了，其实没进分组/重开板就没了"。
+fn save_clip_png(dir: &Path) -> Result<(PathBuf, u32, u32), String> {
     let (cw, ch, png) = clipimg::get_png()
         .map_err(|e| format!("{e}。Ctrl+V 只认剪贴板里的图片（复制文件请用右键菜单）"))?;
-    let dir = shot_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建不了截图目录 {}：{e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
     let (stamp, _) = screen::local_stamp();
-    let target = free_path(&dir, &format!("粘贴 {stamp}"));
+    let target = free_path(dir, &format!("粘贴 {stamp}"));
     std::fs::write(&target, &png).map_err(|e| format!("写图片失败 {}：{e}", target.display()))?;
     Ok((target, cw, ch))
 }
@@ -3751,23 +3973,71 @@ impl PasteSink {
     }
 }
 
-/// 板上 Ctrl+V 的共用实现：存进截图目录 → 入库 → 挂到 `sink` → 回传一条能上板的条目。
+/// 这块板的 Ctrl+V 该把图片落到哪个目录 = **板子所属的那个库根**。
+///
+/// 为什么不能一律落截图目录（旧行为）：分组是**库内资产**（`coll_add` 只收本库素材，
+/// 跨库的 id 被静默忽略、返回 0），标签板也是按**当前库**的标签查的（`App::list`
+/// 只遍历当前库）。图片写进"截图"内置库之后，两件事同时失效：
+/// 分组里没有它、重开板也查不回来 —— 用户看到的就是"粘进去了，下次开板没了"。
+///
+/// 快照例外：快照按**内容哈希**对账，天生跨库（`snapshot_open` 走 `snapshot_resolve`），
+/// 所以照旧落截图目录 —— 那儿本来就是"临时图"该待的地方。
+fn paste_dir(a: &App, sink: &PasteSink) -> Option<PathBuf> {
+    match sink {
+        PasteSink::Snapshot(_) => None,
+        /* 标签板是"当前库的标签"开出来的（`am_board_open` 就是按当前库的口径查的），
+           所以落到当前库根 */
+        PasteSink::Tag(_) => a.current_lib_id().and_then(|id| a.lib_root(id).ok()),
+        /* 分组板：分组自己带着库号（全局 id 的高位），落它自己的库 */
+        PasteSink::Coll(id) => {
+            let (lib_id, _) = am_core::ungid(*id);
+            a.lib_root(lib_id).ok()
+        }
+    }
+    .map(PathBuf::from)
+}
+
+/// 板上 Ctrl+V 的共用实现：存进板子所属的库 → 入库 → 挂到 `sink` → 回传一条能上板的条目。
 async fn paste_into(
     app: &AppHandle,
     state: &State<'_, AppState>,
     sink: PasteSink,
 ) -> Result<BoardItem, String> {
-    let (target, cw, ch) = save_clip_png()?;
+    /* 自动标签（`fmt:` / `kind:`…）不能往上挂东西，而且校验在后端最终会报错：
+       先在这里拦住，**在落盘之前**报出去 —— 否则图已经写进用户库了才失败，白留一个文件。 */
+    if let PasteSink::Tag(t) = &sink {
+        if am_core::autotag::is_reserved_name(t) {
+            return Err("自动标签是只读的：不能往里面粘新图".to_string());
+        }
+    }
+    let dir = {
+        let a = lock(state);
+        paste_dir(&a, &sink)
+    }
+    .unwrap_or_else(shot_dir);
+    let (target, cw, ch) = save_clip_png(&dir)?;
     let saved = target.to_string_lossy().to_string();
 
-    // 截图目录自动进库（库满 3 个就只存盘、不进库 —— 下面会明确告出来，不静默）
-    remember_shot_dir(app);
+    /* 新文件进库。
+       - 目录已经是某个库的根（分组 / 标签板）→ 只刷这一个目录，别重扫整个库；
+       - 还不是库（第一次往截图目录粘）→ `remember_shot_dir` 登记内置库（不占用户 3 个名额）。 */
+    {
+        let mut a = lock(state);
+        if a.lib_for_path(&dir.to_string_lossy()).is_some() {
+            let mut set = std::collections::HashSet::new();
+            set.insert(dir.clone());
+            refresh_dirs(&mut a, &set);
+        } else {
+            drop(a);
+            remember_shot_dir(app);
+        }
+    }
 
     let (lib_id, local) = {
         let a = lock(state);
         let lib_id = a.lib_for_path(&saved).ok_or_else(|| {
             format!(
-                "图片已存到 {saved}，但截图目录没能加入素材库（多半是素材库已满 3 个），所以这次{}",
+                "图片已存到 {saved}，但它所在的目录没能加入素材库，所以这次{}",
                 sink.describe()
             )
         })?;
@@ -3776,19 +4046,25 @@ async fn paste_into(
         (lib_id, local)
     };
     let g = am_core::gid(lib_id, local);
-    {
+    /* 挂载结果记一笔：分组那边**跨库会被静默丢掉并返回 0**（`coll_add` 的既有口径），
+       日志里有这个数就能直接看出"粘成功但一条没挂上"。 */
+    let bound = {
         let mut a = lock(state);
         match &sink {
-            PasteSink::Tag(t) => {
-                a.tag_assets(&[g], t)?;
-            }
-            PasteSink::Snapshot(id) => {
-                a.snapshot_add_assets(*id, &[g])?;
-            }
-            PasteSink::Coll(id) => {
-                a.coll_add(*id, &[g])?;
-            }
+            PasteSink::Tag(t) => a.tag_assets(&[g], t)?,
+            PasteSink::Snapshot(id) => a.snapshot_add_assets(*id, &[g])?.added as i64,
+            PasteSink::Coll(id) => a.coll_add(*id, &[g])? as i64,
         }
+    };
+    /* 刚入库的素材**不可能"本来就在集合里"**：标签/分组返回 0 只可能是被静默丢了
+       （`coll_add` 遇到跨库 id 就是直接忽略、返回 0）。这里必须报出来 ——
+       否则前端照常出卡片 + 提示成功，用户下次开板才发现图没了。
+       快照不在此列：它按内容哈希去重，同一张图重复粘返回 0 是正常结果。 */
+    if bound == 0 && !matches!(&sink, PasteSink::Snapshot(_)) {
+        return Err(format!(
+            "图片已存到 {saved}，但这次{} —— 它和这块板可能不在同一个素材库里",
+            sink.describe()
+        ));
     }
     let asset = {
         let a = lock(state);
@@ -3800,7 +4076,10 @@ async fn paste_into(
     if let Some(parent) = target.parent() {
         let _ = app.emit("fs://changed", vec![parent.to_string_lossy().to_string()]);
     }
-    log_runtime_opt(&format!("board paste {} -> {saved}", sink.log_key()));
+    log_runtime_opt(&format!(
+        "board paste {} -> {saved}（新增关联 {bound} 条）",
+        sink.log_key()
+    ));
 
     Ok(board_item(
         g,
@@ -3900,6 +4179,15 @@ fn am_coll_of(gid: i64, state: State<'_, AppState>) -> Result<Vec<i64>, String> 
 #[tauri::command]
 fn am_snapshot_list(state: State<'_, AppState>) -> Result<Vec<am_core::reg::SnapshotRow>, String> {
     lock(&state).snapshot_list()
+}
+
+/// 快照「记了多少条 / 现在找得回几张」：侧栏计数与网格列表口径不一致时，界面据此提示。
+#[tauri::command]
+fn am_snapshot_stats(
+    snapshot: i64,
+    state: State<'_, AppState>,
+) -> Result<am_core::model::SnapshotStats, String> {
+    lock(&state).snapshot_stats(snapshot)
 }
 #[tauri::command]
 fn am_snapshot_create(name: String, state: State<'_, AppState>) -> Result<i64, String> {
@@ -4521,8 +4809,12 @@ fn log_runtime_opt(msg: &str) {
 /// `screenshots`（与 assetmanager.exe 同级，也就是软件自己的截图库），
 /// **不缩放、不重编码**——owner 要的是原始尺寸的原件，重新编码会掉画质。
 /// 重名就加 ` (2)`，和资源管理器一个习惯。
-/// 主窗把「设置 → 外观 → 主题」推过来。贴图窗口建窗时读它，
+/// 主窗把「设置 → 外观 → 主题」**解析后**的值推过来（"跟随系统"时推的就是系统深浅，
+/// 系统一切换前端会重推）。贴图窗口建窗时读它，
 /// 这样浅色主题下贴图的右键菜单才是浅色的（owner 2026-11-18 第 6 条）。
+///
+/// 推过之后 `ui_theme()` 就不再去看系统值 —— 但如果前端一次都没推（比如主窗还没起来），
+/// 附属窗拿到的仍是 `system_theme_code()` 的结论。
 #[tauri::command]
 fn am_ui_theme(theme: String) {
     let v = if theme == "light" { 1 } else { 2 };
@@ -4641,7 +4933,7 @@ fn data_dir_of(app: &AppHandle) -> PathBuf {
    所以这里存一份"后端看得见的副本"，前端每次改动都同步过来（`am_ui_prefs_set`）。
    其余偏好仍只在前端，不重复存（一份数据一个地方，避免两边打架）。 */
 
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct UiPrefs {
     /// 关闭窗口 = 收进托盘（不退出程序）
     #[serde(default, rename = "closeToTray")]
@@ -4652,6 +4944,28 @@ struct UiPrefs {
     /// 界面缩放：`None` = 自动（按工作区尺寸挑一档）
     #[serde(default, rename = "uiScale")]
     ui_scale: Option<f64>,
+    /// 应用回收站自动清理天数：`0` = 永不自动清理（0.5.7，默认 7 天）
+    ///
+    /// 必须存在后端：启动清理发生在 webview 起来之前，localStorage 读不到。
+    #[serde(default = "default_trash_days", rename = "trashRetentionDays")]
+    trash_retention_days: u64,
+}
+
+/// `UiPrefs` 不能 derive `Default`：`u64` 的默认 0 会被读成「永不清理」，
+/// 而产品默认是 7 天。缺文件 / 老 json 没这个字段时都要落到 7。
+fn default_trash_days() -> u64 {
+    7
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            close_to_tray: false,
+            start_minimized: false,
+            ui_scale: None,
+            trash_retention_days: default_trash_days(),
+        }
+    }
 }
 
 fn ui_prefs_path(app: &AppHandle) -> PathBuf {
@@ -5181,13 +5495,11 @@ fn tray_open_settings(app: AppHandle) {
 /// **权威来源仍是 localStorage 的 `am.prefs.v1`**（主窗和托盘同源共享）；
 /// 这份文件只给 `tray_get_theme` 一个后端可读的兜底值，避免两个窗口的
 /// 存储读取时序不一致时托盘拿不到任何偏好。
-fn tray_prefs_path(app: &AppHandle) -> PathBuf {
+fn tray_prefs_path(_app: &AppHandle) -> PathBuf {
     // 不走 data_dir_of：那个要拿 AppState 的锁，启动扫描期间会把菜单数据请求卡住。
     // 数据目录的解析规则在 core 里（默认目录 + data-root.json），这里按同一份规则算。
-    let default_dir = app
-        .path()
-        .app_local_data_dir()
-        .unwrap_or_else(|_| am_core::default_data_dir());
+    // 0.5.7 起默认目录是 `<exe>\data`，仍然从 core 取 —— 别在这里另抄一份路径。
+    let default_dir = am_core::default_data_dir();
     am_core::dataroot::resolve(&default_dir).join("tray-prefs.json")
 }
 
@@ -5233,12 +5545,12 @@ async fn tray_check_update(force: bool) -> Result<update::UpdateInfo, String> {
     update::check(force).await
 }
 
-/// 托盘「退出软件」：复用主窗关闭分支的收尾（灵感板 / 贴图窗一起关），再退出。
+/// 托盘「退出软件」：**直接退出**，不弹确认框（owner 2026-11-23：用户点了菜单里的
+/// 「退出软件」，意思已经很明确，再问一遍只会挡路）。
 #[tauri::command]
 fn tray_quit(app: AppHandle) {
     hide_tray_menu(&app);
-    close_aux_windows(&app);
-    app.exit(0);
+    exit_app(&app);
 }
 
 /// Esc 收起菜单（tray.html 的键盘兜底；点别处由失焦 hide 兜）。
@@ -6530,7 +6842,7 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let theme = UI_THEME.load(std::sync::atomic::Ordering::SeqCst);
+            let theme = ui_theme();
             let out = snip_native::run(&shot, theme, &keep);
             match out {
                 Some(d) => {
@@ -6627,7 +6939,7 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         "scale": scale,
         "x": vx, "y": vy, "w": vw, "h": vh,
         /* 设计稿 v1.3：截图界面跟随软件主题（工具栏 / 提示条配色） */
-        "theme": match UI_THEME.load(Ordering::SeqCst) { 1 => "light", _ => "dark" },
+        "theme": match ui_theme() { 1 => "light", _ => "dark" },
     });
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("snip t thumb={}ms", t_all.elapsed().as_millis()));
@@ -6781,10 +7093,45 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 清掉**历史内置库**：换过安装目录（或换过 debug / release 构建）之后，库表里会
+/// 攒下好几个 `screenshots` —— 旧安装目录一个、当前 exe 一个。侧栏和设置页会把它们
+/// 都列成「截图（内置）」，用户看到两行，还会以为以后导入会跑到旧的那行去
+/// （实际导入一直走 `shot_dir()` = 当前 exe 同级）。
+///
+/// 只留当前 exe 那一个：摘掉的是**索引登记**，磁盘上的图片一张不动
+/// （`remove_lib` 不删素材文件），想找回直接去旧目录翻。
+fn prune_stale_builtin_libs(app: &mut App) -> Vec<String> {
+    let now = shot_dir().to_string_lossy().to_string();
+    let stale: Vec<String> = app
+        .lib_roots()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| is_builtin_root(r) && !same_path(r, &now))
+        .collect();
+    for r in &stale {
+        if let Err(e) = app.remove_lib(r) {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, &format!("清历史内置库失败 {r}：{e}"));
+            }
+        }
+    }
+    stale
+}
+
 fn remember_shot_dir(app: &AppHandle) {
     let dir = shot_dir().to_string_lossy().to_string();
     let st = app.state::<AppState>();
     let mut a = lock(&st);
+
+    /* 先清历史内置库（0.5.7）：必须在登记当前截图目录**之前** —— 否则旧那行会被
+       refresh 再刷一遍，界面上要等下一次 fs://changed 才消失。 */
+    let stale = prune_stale_builtin_libs(&mut a);
+    if !stale.is_empty() {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, &format!("清掉历史内置库 {} 个：{stale:?}", stale.len()));
+        }
+    }
+
     if a.lib_for_path(&dir).is_some() {
         let mut set = HashSet::new();
         set.insert(PathBuf::from(&dir));
@@ -7320,7 +7667,7 @@ async fn am_snip_start(app: AppHandle) -> Result<(), String> {
     snip_begin(app).await
 }
 
-/* ---------------- 系统级快捷键（F1 / F3 / Alt+F1） ---------------- */
+/* ---------------- 系统级快捷键（F1 截图 / F3 贴图 / Alt+F3 组合 / Shift+F3 交替 / F2 主窗） ---------------- */
 
 static HOTKEYS: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
 
@@ -7350,6 +7697,137 @@ fn toggle_peeks(app: &AppHandle) {
     PEEK_HIDDEN.store(hide, Ordering::SeqCst);
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("peek toggle hide={hide} n={n}"));
+    }
+}
+
+/* ---------------- 贴图 + 灵感板：组合键（0.5.7） ----------------
+
+   为什么单开两个动作而不是给 `peek_toggle` 加参数：系统热键表是
+   `(accelerator, action)` 的扁平结构，一个键一个动作最省事；两套语义
+   （一起开关 / 互斥交替）也没法用同一个状态位表达。
+
+   两类窗口的 label 前缀：贴图 `peek-N`，灵感板 `board-N`（与 `close_aux_windows`
+   同一口径）。这里刻意不复用 `close_aux_windows` 那个过滤器 —— 它只关心"退出时要关
+   谁"，和开关语义无关，将来加第三类附属窗不该被顺手带进来。 */
+
+/// 组合键（Alt+F3）记住的"整体是否被收起来了"。
+///
+/// 判据本身用窗口真实可见性（任一可见 = 想收起来），这个位只用来和
+/// `toggle_peeks` 的 `PEEK_HIDDEN` 对齐 —— 两套键都只动贴图时，状态位必须是同一个值，
+/// 否则先按 Alt+F3 收起、再按旧的 toggle 会走反方向（用户看到"按了没反应"）。
+static PEEK_BOARD_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// 交替键（Shift+F3）的轮次。初值 false = 第一次按「贴图隐藏、灵感板显示」。
+static PEEK_BOARD_SWAP: AtomicBool = AtomicBool::new(false);
+
+/// 收集所有附属窗口，分成贴图 / 灵感板两组。
+fn split_aux_windows(app: &AppHandle) -> (Vec<tauri::WebviewWindow>, Vec<tauri::WebviewWindow>) {
+    let mut peeks = Vec::new();
+    let mut boards = Vec::new();
+    for (label, w) in app.webview_windows() {
+        if label.starts_with("peek") {
+            peeks.push(w);
+        } else if label.starts_with("board") {
+            boards.push(w);
+        }
+    }
+    (peeks, boards)
+}
+
+fn any_visible(ws: &[tauri::WebviewWindow]) -> bool {
+    ws.iter().any(|w| w.is_visible().unwrap_or(false))
+}
+
+fn set_visible(ws: &[tauri::WebviewWindow], show: bool) -> usize {
+    let mut n = 0usize;
+    for w in ws {
+        let ok = if show { w.show().is_ok() } else { w.hide().is_ok() };
+        if ok {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Alt+F3（默认）：贴图与灵感板**一起**显示 / 隐藏。
+///
+/// 判据"任一可见 → 全部隐藏；全部不可见 → 全部显示"而不是记状态位：
+/// 用户可能单独关掉某块板、或刚按 F3 贴了新图，按真实可见性判断永远符合直觉。
+fn toggle_peeks_with_boards(app: &AppHandle) {
+    let (peeks, boards) = split_aux_windows(app);
+    if peeks.is_empty() && boards.is_empty() {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, "peek+board toggle: 没有贴图/灵感板窗口，忽略");
+        }
+        return;
+    }
+    let hide = any_visible(&peeks) || any_visible(&boards);
+    let n = set_visible(&peeks, !hide) + set_visible(&boards, !hide);
+    PEEK_BOARD_HIDDEN.store(hide, Ordering::SeqCst);
+    /* 只有真动过贴图才改 PEEK_HIDDEN：纯灵感板的场景不该影响 F3 的旧语义 */
+    if !peeks.is_empty() {
+        PEEK_HIDDEN.store(hide, Ordering::SeqCst);
+    }
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!(
+                "peek+board together hide={hide} peeks={} boards={} n={n}",
+                peeks.len(),
+                boards.len()
+            ),
+        );
+    }
+}
+
+/// Shift+F3（默认）：贴图 ⇄ 灵感板**互斥**切换。
+///
+/// 轮次：第一次按「贴图隐藏、灵感板显示」，再按「灵感板隐藏、贴图显示」，循环。
+/// 只有一类窗口时按可见性来回切（保证每次都真的有变化），两类都没有只写日志 ——
+/// 让用户按了键却什么都没发生时，runtime.log 里至少能看见原因。
+fn swap_peeks_boards(app: &AppHandle) {
+    let (peeks, boards) = split_aux_windows(app);
+    if peeks.is_empty() && boards.is_empty() {
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(d, "peek/board swap: 没有贴图/灵感板窗口，忽略");
+        }
+        return;
+    }
+    // 先翻轮次：旧值 false 的那一次 = 第一次按 = 灵感板显示
+    let round = PEEK_BOARD_SWAP.fetch_xor(true, Ordering::SeqCst);
+    let show_boards = !round;
+
+    if !peeks.is_empty() && !boards.is_empty() {
+        let n_peek = set_visible(&peeks, !show_boards);
+        let n_board = set_visible(&boards, show_boards);
+        PEEK_HIDDEN.store(show_boards, Ordering::SeqCst); // 贴图隐藏 == 灵感板显示
+        if let Some(d) = LOG_DIR.get() {
+            log_runtime(
+                d,
+                &format!(
+                    "peek/board swap showBoards={show_boards} peeks={n_peek} boards={n_board}"
+                ),
+            );
+        }
+        return;
+    }
+
+    /* 只剩一类：对它整体 show/hide 交替。可见 → 收，不可见 → 放，
+       不用轮次位判断，否则用户手动关过一块就又要多按一次才"有反应"。 */
+    let (ws, is_peek) = if !peeks.is_empty() { (&peeks, true) } else { (&boards, false) };
+    let hide = any_visible(ws);
+    let n = set_visible(ws, !hide);
+    if is_peek {
+        PEEK_HIDDEN.store(hide, Ordering::SeqCst);
+    }
+    if let Some(d) = LOG_DIR.get() {
+        log_runtime(
+            d,
+            &format!(
+                "peek/board swap single {} hide={hide} n={n}",
+                if is_peek { "peek" } else { "board" }
+            ),
+        );
     }
 }
 
@@ -7538,6 +8016,16 @@ fn dispatch_hotkey(app: &AppHandle, accel: &str) {
                 toggle_peeks(&app);
                 Ok(())
             }
+            /* 0.5.7：Alt+F3 默认改成"贴图 + 灵感板一起开关"，
+               Shift+F3 是两者的互斥交替（见上面的两个函数）。 */
+            "peek_board_together" => {
+                toggle_peeks_with_boards(&app);
+                Ok(())
+            }
+            "peek_board_swap" => {
+                swap_peeks_boards(&app);
+                Ok(())
+            }
             "window_toggle" => {
                 toggle_main_window(&app);
                 Ok(())
@@ -7579,7 +8067,8 @@ fn register_hotkeys(app: &AppHandle, list: Vec<(String, String)>) -> Result<Vec<
         .map(|(a, b)| (a.trim().to_string(), b.clone()))
         .filter(|(a, _)| !a.is_empty())
         .collect();
-    /* F2 = 主界面开关，**固定键**：设置面板只改截图 / 贴图那三个，所以在这里补进表。
+    /* F2 = 主界面开关，**固定键**：设置面板只改截图 / 贴图 / 组合 / 交替这五个，
+       所以在这里补进表。
        它和 F1/F3 共用同一套注册 / 分发（`dispatch_hotkey`），注销也一起走。
        用户如果已经把某个动作手动指到 F2，则以用户的为准，不抢。 */
     if !want.iter().any(|(a, _)| a.eq_ignore_ascii_case("F2")) {
@@ -7748,6 +8237,10 @@ fn build_splash(app: &AppHandle, cdp: bool) -> Result<(), String> {
     // 与主窗完全一致：CDP 调试是自动化验收的入口，启动页也必须能被检查
     if cdp {
         b = b.additional_browser_args(CDP_ARGS);
+    }
+    // 0.5.7：和主窗用同一个 WebView2 用户数据目录（否则会分裂出第二个 profile）
+    if let Some(d) = webview_data_dir() {
+        b = b.data_directory(d);
     }
     let w = b.build().map_err(|e| e.to_string())?;
     w.show().map_err(|e| e.to_string())?;
@@ -8018,18 +8511,43 @@ fn main() {
             None::<Vec<&str>>,
         ))
         .setup(move |app| {
-            /* 数据目录可配置（照 FontManager 的「字体库文件夹」）：
-               `%LOCALAPPDATA%\AssetManager\data-root.json` 记着自定义位置；
-               自定义目录不可用（盘拔了）时 resolve 会回退默认目录，不让软件打不开。 */
-            let default_dir = app
-                .path()
-                .app_local_data_dir()
-                .map_err(|e| format!("拿不到数据目录：{}", e))?;
-            let data = am_core::dataroot::resolve(&default_dir);
+            /* 数据目录（0.5.7）：默认跟着程序走 —— `<exe 同级>\data`；写不进去才回退
+               `%LOCALAPPDATA%\AssetManager`（见 `am_core::default_data_dir`）。
+               仍然可配置：`data\data-root.json` 记着自定义位置；自定义目录不可用
+               （盘拔了）时 resolve 会回退默认目录，不让软件打不开。 */
+            let default_dir = am_core::default_data_dir();
             /* 运行日志：这个 exe 没有 stdout，出问题只能靠它（见 log_runtime 的注释）。
                panic hook 只记「哪一行 panic 了」，不吞掉 panic —— 该崩还是崩，
-               但我们事后能知道崩在哪。 */
+               但我们事后能知道崩在哪。**必须早于迁移**：迁移本身也要留痕。 */
             let _ = LOG_DIR.set(default_dir.clone());
+
+            /* 一次性迁移（0.5.7）：老版本的数据在 `%LOCALAPPDATA%\com.assetmanager.desktop`
+               （Tauri 的 app_local_data_dir）和更早的 `%LOCALAPPDATA%\AssetManager`。
+               新目录里没有数据就**复制**过来（不删旧数据、幂等、失败不挡启动）。
+               判据和 core 内部一致：`index.db` 或 `data-root.json` 任一存在就算"有了"。 */
+            let has_data = default_dir.join("index.db").exists()
+                || default_dir.join("data-root.json").exists();
+            if !has_data {
+                log_runtime(
+                    &default_dir,
+                    &format!("migrate start: new={} 老位置={:?}", default_dir.display(), am_core::legacy_data_dirs()),
+                );
+            }
+            match am_core::migrate_legacy_data(&default_dir) {
+                Ok(Some(m)) => log_runtime(
+                    &default_dir,
+                    &format!(
+                        "migrate done: from={} files={} bytes={}（旧数据仍在原处，未删除）",
+                        m.from.display(),
+                        m.files,
+                        m.bytes
+                    ),
+                ),
+                Ok(None) => {}
+                Err(e) => log_runtime(&default_dir, &format!("migrate FAIL（不影响启动）：{e}")),
+            }
+
+            let data = am_core::dataroot::resolve(&default_dir);
             log_runtime(&default_dir, &format!("start v{} data={}", env!("CARGO_PKG_VERSION"), data.display()));
 
             /* 常驻键盘钩子（0.4.25）：主窗的 `Ctrl+C → 复制原文件` 要靠它分辨
@@ -8073,28 +8591,63 @@ fn main() {
                --remote-debugging-port=9222，供 CDP 真鼠标注入复现拖拽问题。
                不设则完全等同原来的配置窗口，发布行为不变。
                0.5.3 起**不可见**启动：等启动编排线程把当前库扫完再 show
-               （「启动时最小化」则保持隐藏，由托盘唤起）。 */
-            let mut main_b = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .title("AssetManager")
-            .inner_size(1280.0, 820.0)
-            .min_inner_size(900.0, 600.0)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .center()
-            .resizable(true)
-            .visible(false);
-            if cdp {
-                main_b = main_b.additional_browser_args(CDP_ARGS);
-            }
-            if let Err(e) = main_b.build() {
+               （「启动时最小化」则保持隐藏，由托盘唤起）。
+               0.5.7 起 WebView2 的用户数据目录也收进安装目录（`data\webview`）：
+               默认那个 `%LOCALAPPDATA%\<identifier>\EBWebView` 是 C 盘里最大的一块。
+               带这个参数建窗失败就**不带重试一次** —— 目录被上次的 msedgewebview2
+               占着时 first try 会失败，宁可退默认也不能白屏。 */
+            let build_main = |webview_dir: Option<PathBuf>| {
+                let mut b = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .title("AssetManager")
+                .inner_size(1280.0, 820.0)
+                .min_inner_size(900.0, 600.0)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .center()
+                .resizable(true)
+                .visible(false);
+                if cdp {
+                    b = b.additional_browser_args(CDP_ARGS);
+                }
+                if let Some(d) = webview_dir {
+                    b = b.data_directory(d);
+                }
+                b.build()
+            };
+            let mut webview_dir_used: Option<String> = None;
+            let main_win = match webview_data_dir() {
+                Some(d) => {
+                    webview_dir_used = Some(d.display().to_string());
+                    match build_main(Some(d.clone())) {
+                        Ok(w) => Ok(w),
+                        Err(e) => {
+                            log_runtime(
+                                &default_dir,
+                                &format!("main window data_directory={} FAIL ({e})，回退默认", d.display()),
+                            );
+                            webview_dir_used = None;
+                            build_main(None)
+                        }
+                    }
+                }
+                None => build_main(None),
+            };
+            if let Err(e) = main_win {
                 log_runtime(&default_dir, &format!("main window build FAIL (cdp={cdp}): {e}"));
                 return Err(Box::new(e));
             }
+            log_runtime(
+                &default_dir,
+                &format!(
+                    "main window webview={}",
+                    webview_dir_used.as_deref().unwrap_or("默认(%LOCALAPPDATA%\\EBWebView)")
+                ),
+            );
 
             std::panic::set_hook(Box::new(|info| {
                 let dir = LOG_DIR.get().cloned().unwrap_or_else(|| PathBuf::from("."));
@@ -8164,22 +8717,30 @@ fn main() {
                         let _ = w.hide();
                     }
                 }
-                /* 关闭窗口 → 收进托盘。`tray_ok` 是前提：托盘没建成就藏起来，
-                   用户既看不到窗口也找不到托盘图标，只能去任务管理器杀进程 —— 比"关不掉"更糟。 */
+                /* 关闭窗口（0.5.7）—— **不弹任何对话框**：
+                   · 开了「关闭到托盘」且托盘可用 → 直接收进托盘，不打扰；
+                   · 否则（默认）→ 直接退出。
+                   托盘没建成就不能把窗口藏起来（用户既看不到窗口也找不到托盘图标，
+                   只能去任务管理器杀进程），所以那种情况一律退出。 */
                 if let Some(w) = app.get_webview_window("main") {
                     let h2 = h.clone();
                     w.on_window_event(move |event| {
                         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            // 已经在退出（exit_app 决定的）：放行，别再做第二遍
+                            if QUITTING.load(Ordering::SeqCst) {
+                                return;
+                            }
                             if tray_ok && read_ui_prefs(&h2).close_to_tray {
                                 api.prevent_close();
                                 if let Some(w) = h2.get_webview_window("main") {
                                     let _ = w.hide();
                                 }
-                            } else {
-                                /* 真的退出：灵感板 / 贴图窗都是主窗口的附属窗口，一起关
-                                   （否则进程被它们吊着不退，见 close_aux_windows 注释）。 */
-                                close_aux_windows(&h2);
+                                return;
                             }
+                            // 先拦住这一下：exit_app 自己会把所有窗口收干净，
+                            // 半路放行会让"最后一个窗口关闭"和显式退出抢时序。
+                            api.prevent_close();
+                            exit_app(&h2);
                         }
                     });
                 }
@@ -8194,6 +8755,29 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(600));
                     remember_shot_dir(&h);
                     let _ = h.emit("fs://changed", Vec::<String>::new());
+
+                    /* 应用回收站自动清理（0.5.7）：放在登记截图库**之后** ——
+                       侧栏要立刻看到「截图」，清理几百个过期条目走系统回收站可能要几秒，
+                       不能让它挡在首屏前面。只清 <数据目录>/trash 里的账本条目，
+                       绝不碰素材库和 screenshots；days=0 时函数自己短路。
+                       失败只写 runtime.log（清理失败不影响用软件）。 */
+                    let days = read_ui_prefs(&h).trash_retention_days;
+                    match am_core::trash::purge_older_than(&data_dir_of(&h), days) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            if let Some(d) = LOG_DIR.get() {
+                                log_runtime(
+                                    d,
+                                    &format!("trash retention: 清理 {n} 项（超过 {days} 天）"),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(d) = LOG_DIR.get() {
+                                log_runtime(d, &format!("trash retention FAIL：{e}"));
+                            }
+                        }
+                    }
                 });
             }
 
@@ -8380,6 +8964,11 @@ fn main() {
             am_board_note_put,
             am_board_note_del,
             am_board_group,
+            am_board_ann,
+            am_board_ann_add,
+            am_board_ann_update,
+            am_board_ann_del,
+            am_board_ann_clear,
             am_system_fonts,
             am_board_add_paths,
             am_board_paste,
@@ -8394,6 +8983,7 @@ fn main() {
             am_coll_open,
             am_coll_paste,
             am_snapshot_list,
+            am_snapshot_stats,
             am_snapshot_create,
             am_snapshot_rename,
             am_snapshot_delete,
@@ -8454,13 +9044,28 @@ fn main() {
             let dir = LOG_DIR.get().cloned();
             if let Some(dir) = dir {
                 match &event {
-                    tauri::RunEvent::ExitRequested { .. } => {
+                    tauri::RunEvent::ExitRequested { code, .. } => {
                         // 先立旗：接下来贴图窗口被销毁是"关机/关软件"，**不能**从存档里删掉，
                         // 否则重启后一扇都不会回来
                         QUITTING.store(true, Ordering::SeqCst);
+                        // RESTART_EXIT_CODE = 重启（换数据文件夹）：Exit 里不许自己退
+                        if *code == Some(tauri::RESTART_EXIT_CODE) {
+                            RESTARTING.store(true, Ordering::SeqCst);
+                        }
                         log_runtime(&dir, "exit-requested")
                     }
-                    tauri::RunEvent::Exit => log_runtime(&dir, "exit"),
+                    tauri::RunEvent::Exit => {
+                        log_runtime(&dir, "exit");
+                        /* 兜底（0.5.7）：走到这里说明事件循环已经认定该退了，
+                           但 Tauri 的收尾（cleanup_before_exit + 退出）还会再做几件事。
+                           实测有一条路会卡住 —— WebView2 的 msedgewebview2.exe 子进程
+                           和还活着的隐藏窗口能让进程"该退不退"。这里显式退，
+                           保证任务管理器里不留 assetmanager.exe。
+                           重启那条**不能抢**：Tauri 在这个回调之后才 process::restart。 */
+                        if !RESTARTING.load(Ordering::SeqCst) {
+                            std::process::exit(0);
+                        }
+                    }
                     tauri::RunEvent::WindowEvent { event, .. } => {
                         if matches!(event, tauri::WindowEvent::Destroyed) {
                             log_runtime(&dir, "window-destroyed");

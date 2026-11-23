@@ -23,7 +23,20 @@ export type CtxItem =
       action: () => void;
     }
   | { kind: "separator" }
-  | { kind: "heading"; label: string };
+  | { kind: "heading"; label: string }
+  /**
+   * 只读信息行（「所属标签 / 所属分组」）。
+   *
+   * 数据是异步来的：菜单必须先弹出来，不能等 SQL。所以 `load` 由菜单挂载后
+   * 自己去跑，跑完只填文字；失败静默落成 `empty`，不弹错误框、也不关菜单。
+   * 渲染成 div 而不是 button —— 点上去没有动作，也不会触发 onClose。
+   */
+  | {
+      kind: "info";
+      label: string;
+      load: () => Promise<string>;
+      empty?: string;
+    };
 
 export interface CtxState {
   x: number;
@@ -39,6 +52,36 @@ export interface CtxState {
   source?: string;
 }
 
+/**
+ * 只读信息行。挂载后才取数，所以菜单不会被 SQL 卡住弹出。
+ * 加载中显示 `…`，失败显示 `empty`（调用方传「无」）。
+ */
+function CtxInfoRow({ item }: { item: Extract<CtxItem, { kind: "info" }> }) {
+  const [text, setText] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void item
+      .load()
+      .then((v) => {
+        if (alive) setText(v);
+      })
+      .catch(() => {
+        if (alive) setText(item.empty ?? "—");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [item]);
+
+  return (
+    <div className="ctx-info" role="note" title={text ?? undefined}>
+      <span className="ctx-info-k">{item.label}</span>
+      <span className={`ctx-info-v${text == null ? " pending" : ""}`}>{text ?? "…"}</span>
+    </div>
+  );
+}
+
 export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: state.x, y: state.y });
@@ -50,12 +93,20 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    setPos({
-      x: Math.max(6, Math.min(state.x, window.innerWidth - w - 6)),
-      y: Math.max(6, Math.min(state.y, window.innerHeight - h - 6)),
-    });
+    const place = () => {
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      setPos({
+        x: Math.max(6, Math.min(state.x, window.innerWidth - w - 6)),
+        y: Math.max(6, Math.min(state.y, window.innerHeight - h - 6)),
+      });
+    };
+    place();
+    /* 信息段（所属标签/分组）是异步填进来的，菜单会变高 —— 光在挂载时量一次，
+       贴到窗口下缘的菜单长高后会有一截跑到屏幕外。尺寸一变就重新贴边。 */
+    const ro = new ResizeObserver(place);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [state]);
 
   useEffect(() => {
@@ -108,6 +159,7 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
           {it.label}
         </div>
       );
+    if (it.kind === "info") return <CtxInfoRow key={`f-${i}`} item={it} />;
     return (
       <button
         key={`i-${i}`}

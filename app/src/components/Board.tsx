@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bold as BoldIcon,
   ChevronDown,
+  ChevronUp,
   ClipboardPaste,
   LayoutGrid,
   Layers,
@@ -10,15 +11,40 @@ import {
   Pin,
   PinOff,
   Plus,
+  Trash2,
   Type,
   X,
 } from "lucide-react";
-import { source } from "../data/source";
-import type { BoardNote } from "../types";
+import { boardAnnApi, source } from "../data/source";
+import type { BoardAnnRow, BoardNote } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 import { createShiftWheelPan } from "../lib/windowShiftPan";
 import { isOwnDrag } from "../lib/ownDrag";
 import { useT, type TKey } from "../lib/i18n";
+import {
+  ANN_COLORS,
+  ANN_FONT_MAX,
+  ANN_FONT_MIN,
+  ANN_ICONS,
+  ANN_TOOLS,
+  ANN_W_MAX,
+  ANN_W_MIN,
+  AnnWidthGlyph,
+  annBmpScale,
+  annBox,
+  annDecode,
+  annDraw,
+  annEncode,
+  annHit,
+  annKindKey,
+  annNewOp,
+  annToolKey,
+  annTooSmall,
+  type AnnLayer,
+  type AnnOp,
+  type AnnPt,
+  type AnnTool,
+} from "../lib/boardAnn";
 
 /**
  * 灵感板（照 PureRef）：把一个标签下的所有素材铺在一块**无边界画布**上。
@@ -101,6 +127,11 @@ const GAP = 18;
 const MARGIN = 600;
 const MIN_W = 40;
 const MAX_W = 2400;
+/** 缩略图取不到时的重试次数与间隔：`thumb://` 是现场生成缩略图的（刚粘贴入库的素材
+ *  第一次请求完全可能赶在后台扫描/解码配额还没腾出来），失败一次就永久画成占位卡
+ *  等于"这张图永远没有缩略图了"。重试 3 次（300/600/900ms）仍失败才认。 */
+const THUMB_RETRY = 3;
+const THUMB_RETRY_MS = 300;
 /** 新便签的初始落点尺寸（画布单位）。**渲染时不设宽高** —— 实框由文字撑开，
     这两个数只用来"放哪儿"，量一次就被真实尺寸覆盖 */
 const NOTE_W = 240;
@@ -243,20 +274,69 @@ export function Board() {
   const [zoom, setZoom] = useState(1);
   const [vis, setVis] = useState<Set<number>>(new Set());
   const [broken, setBroken] = useState<Set<number>>(new Set());
+  /** 缩略图已经重试过几次（`id → 次数`）：次数进 `src` 的查询串，让 WebView 重新发请求 */
+  const [thumbTry, setThumbTry] = useState<Map<number, number>>(new Map());
+  const thumbTries = useRef<Map<number, number>>(new Map());
+  const thumbTimers = useRef<Map<number, number>>(new Map());
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
     id: number | null;
     /** 右键落在便签上：nid */
     note?: number;
+    /** 右键落在标注上：aid（画布上的那层 或 图层面板里那一行） */
+    ann?: number;
   } | null>(null);
   const [active, setActive] = useState<number | null>(null); // 悬停/拖动中的那张：显示缩放手柄
   /* 操作反馈（粘贴成功/失败）：画布上没有 toast，横幅也不该常驻，就一条两秒半的提示 */
   const [hint, setHint] = useState<{ text: string; bad: boolean } | null>(null);
 
+  /* ---------------- 标注（截图工具条那一套，0.6.x） ----------------
+     一笔 = 一层：`annLayers` 就是画布上的绘制顺序（z 小的在前）。
+     几何存在 `op` 里（**相对本层原点**），所以拖动改的只是 x / y；
+     落库的 `payload` 和 `op` 是同一个东西 —— 位置变了 payload 不用重写。
+     工具的临时状态（颜色 / 粗细 / 填充）只是"下一笔的默认值"，不进库。 */
+  const [annOpen, setAnnOpen] = useState(false);
+  const [annTool, setAnnTool] = useState<AnnTool>("select");
+  const [annColor, setAnnColor] = useState(ANN_COLORS[7]);
+  /** 线宽（画布单位） */
+  const [annWeight, setAnnWeight] = useState(2);
+  /** 字号（文字 / 序号工具用）。和线宽分开：画线的 2px 当字号只有 8px，太离谱 */
+  const [annFont, setAnnFont] = useState(18);
+  const [annFill, setAnnFill] = useState(false);
+  const [annPalette, setAnnPalette] = useState(false);
+  const [annLayers, setAnnLayers] = useState<AnnLayer[]>([]);
+  const annLayersRef = useRef<AnnLayer[]>([]);
+  /** 选中的标注层（aid）；null = 没选 */
+  const [annSel, setAnnSel] = useState<number | null>(null);
+  const annSelRef = useRef<number | null>(null);
+  /** 序号工具的下一个号（同板递增，读回来时按已有最大号续上） */
+  const annNextRef = useRef(1);
+  /** 文字工具的落点（画布坐标）；null = 没在输入 */
+  const [annTextAt, setAnnTextAt] = useState<AnnPt | null>(null);
+  const annTextRef = useRef<HTMLInputElement>(null);
+  /** 输入框提交一次就锁住：Enter 提交后节点被卸载，个别情况下还会补一个 blur，
+   *  不加这道闸会同一段文字落两次层。 */
+  const annTextLock = useRef(false);
+  /** 撤销 / 重做：整份图层数组的快照栈（和截图那边的做法一致 —— 删除 / 换层级都能回退） */
+  const annUndo = useRef<AnnLayer[][]>([]);
+  const annRedo = useRef<AnnLayer[][]>([]);
+  /** 快照栈是 ref，改了不会重渲染；这个版本号只用来刷新撤销/重做按钮的可用态 */
+  const [annVer, setAnnVer] = useState(0);
+  /** 拖拽过程中的预览画布（直接改 DOM，不走 React） */
+  const annLiveRef = useRef<HTMLCanvasElement>(null);
+
   useEffect(() => {
     notesRef.current = notes;
   }, [notes]);
+
+  useEffect(() => {
+    annLayersRef.current = annLayers;
+  }, [annLayers]);
+
+  useEffect(() => {
+    annSelRef.current = annSel;
+  }, [annSel]);
 
   useEffect(() => {
     selRef.current = sel;
@@ -389,8 +469,9 @@ export function Board() {
     [applyVp, recompute, layersOpen]
   );
 
-  /** 内容包围盒：图片瀑布流 + 便签。
-   *  便签不参与「一键整理」，但**必须算进 fit** —— 否则 F / 自动适应之后便签会飞到视野外。 */
+  /** 内容包围盒：图片瀑布流 + 便签 + 标注。
+   *  便签不参与「一键整理」，但**必须算进 fit** —— 否则 F / 自动适应之后便签会飞到视野外；
+   *  标注同理（有人会把注释画在图的边角外面）。 */
   const fitSize = useMemo(() => {
     let w = cw;
     let h = ch;
@@ -399,8 +480,12 @@ export function Board() {
       w = Math.max(w, b.x + b.w);
       h = Math.max(h, b.y + b.h);
     }
+    for (const l of annLayers) {
+      w = Math.max(w, l.x + l.w);
+      h = Math.max(h, l.y + l.h);
+    }
     return { w, h };
-  }, [notes, cw, ch]);
+  }, [notes, annLayers, cw, ch]);
 
   /** 按内容包围盒 fit 进窗口并居中 */
   const fit = useCallback(() => fitTo(fitSize.w, fitSize.h), [fitTo, fitSize]);
@@ -462,6 +547,386 @@ export function Board() {
     [applyVp, recompute]
   );
 
+  /* ---------------- 标注：坐标 / 命中 / 落库 ----------------
+     一切几何都存**画布坐标**（层的 op 是相对本层原点），所以缩放/平移时标注
+     跟着图走，不需要任何补偿。屏幕坐标只在"按下/移动"这两个入口换算一次。 */
+
+  /** 新文案的 key 还没进 locales（由主控统一补）：缺翻译时 `t()` 会原样返回 key，
+   *  正好用来定位漏翻，所以这里只把 string 收窄成 TKey，不做别的。 */
+  const tr = (k: string, vars?: Record<string, string | number>) => t(k as TKey, vars);
+
+  /** 屏幕坐标 → 画布坐标 */
+  const annPoint = useCallback((e: { clientX: number; clientY: number }): AnnPt => {
+    const r = rootRef.current?.getBoundingClientRect();
+    const v = vp.current;
+    return {
+      x: (e.clientX - (r?.left ?? 0) - v.x) / v.k,
+      y: (e.clientY - (r?.top ?? 0) - v.y) / v.k,
+    };
+  }, []);
+
+  /** 位图倍率：跟着缩放走（放大后按新倍率重画一遍，标注不会糊成一片），
+   *  但给总像素数封顶 —— 整块板涂满荧光笔的层不压一下会吃掉几十 MB 显存。 */
+  const annScale = (w: number, h: number) => annBmpScale(w, h, vp.current.k);
+
+  const annSnap = () => annLayersRef.current.map((l) => ({ ...l }));
+
+  /** 动状态之前先存一份快照：撤销/重做就是"整份图层数组"的回放（和截图那边一致） */
+  const annCheckpoint = useCallback(() => {
+    annUndo.current.push(annSnap());
+    if (annUndo.current.length > 40) annUndo.current.shift();
+    annRedo.current = [];
+    setAnnVer((v) => v + 1);
+  }, []);
+
+  /** 把图层数组整体换成快照里的样子：多的删、少的补、位置/层级变了的更新。
+   *  补回来的层会拿到**新的 aid**（老 aid 已经被删了），前端自己认新的那个。 */
+  const annApplySnapshot = useCallback(
+    async (next: AnnLayer[]) => {
+      const board = boot?.board;
+      const cur = annLayersRef.current;
+      const curById = new Map(cur.map((l) => [l.aid, l]));
+      const ids = new Set(next.map((l) => l.aid));
+      for (const l of cur) {
+        if (!ids.has(l.aid) && board) void boardAnnApi.del(board, l.aid).catch(() => {});
+      }
+      const out: AnnLayer[] = [];
+      for (const l of next) {
+        const old = curById.get(l.aid);
+        if (old) {
+          out.push(l);
+          if (board && (old.x !== l.x || old.y !== l.y || old.z !== l.z)) {
+            void boardAnnApi.update(board, l.aid, l.x, l.y, l.z).catch(() => {});
+          }
+          continue;
+        }
+        let aid = l.aid;
+        if (board && l.aid > 0) {
+          aid = await boardAnnApi
+            .add(board, l.z, l.kind, JSON.stringify(l.op), l.x, l.y, l.w, l.h)
+            .catch(() => l.aid);
+        }
+        out.push({ ...l, aid });
+      }
+      annLayersRef.current = out;
+      setAnnLayers(out);
+      setAnnSel((s) => (s != null && out.some((l) => l.aid === s) ? s : null));
+    },
+    [boot?.board]
+  );
+
+  /** 提交一笔：先上屏（临时负数 aid，立刻能看见），后端发号回来再换成真 aid。
+   *  这样画的时候不用等 IPC，慢一点也只是"图层面板里的 aid 变一下"。 */
+  const annCommit = useCallback(
+    async (op: AnnOp) => {
+      const b = annBox(op);
+      const x = Math.floor(b.x);
+      const y = Math.floor(b.y);
+      const w = Math.max(1, Math.ceil(b.w) + 1);
+      const h = Math.max(1, Math.ceil(b.h) + 1);
+      const payload = annEncode(op, b);
+      const kind = op.t as AnnTool;
+      const z = annLayersRef.current.reduce((m, l) => Math.max(m, l.z), 0) + 1;
+      const local = JSON.parse(payload) as AnnOp;
+      const temp = -Date.now();
+      annLayersRef.current = [
+        ...annLayersRef.current,
+        { aid: temp, z, kind, x, y, w, h, op: local },
+      ];
+      setAnnLayers(annLayersRef.current);
+      setAnnSel(temp);
+      annSelRef.current = temp;
+      const board = boot?.board;
+      if (!board) return;
+      try {
+        const aid = await boardAnnApi.add(board, z, kind, payload, x, y, w, h);
+        /* 发号这段时间里这层可能已经被橡皮擦 / Delete 删掉了：那就在库里也删掉，
+           否则下次开板会冒出一层"幽灵标注" */
+        if (!annLayersRef.current.some((l) => l.aid === temp)) {
+          void boardAnnApi.del(board, aid).catch(() => {});
+          return;
+        }
+        annLayersRef.current = annLayersRef.current.map((l) =>
+          l.aid === temp ? { ...l, aid } : l
+        );
+        setAnnLayers(annLayersRef.current);
+        if (annSelRef.current === temp) {
+          annSelRef.current = aid;
+          setAnnSel(aid);
+        }
+      } catch (e) {
+        setHint({ text: String(e), bad: true });
+      }
+    },
+    [boot?.board]
+  );
+
+  const annRemove = useCallback(
+    (aid: number) => {
+      const board = boot?.board;
+      annCheckpoint();
+      annLayersRef.current = annLayersRef.current.filter((l) => l.aid !== aid);
+      setAnnLayers(annLayersRef.current);
+      if (annSelRef.current === aid) {
+        annSelRef.current = null;
+        setAnnSel(null);
+      }
+      if (board) void boardAnnApi.del(board, aid).catch(() => {});
+    },
+    [annCheckpoint, boot?.board]
+  );
+
+  /** 层级：`dir = +1` 上移一层（画得更晚）/ `-1` 下移一层。
+   *  整摞重排 z（1..n），只有真的变了的层才写库。 */
+  const annMoveZ = useCallback(
+    (aid: number, dir: number) => {
+      const sorted = [...annLayersRef.current].sort((a, b) => a.z - b.z || a.aid - b.aid);
+      const i = sorted.findIndex((l) => l.aid === aid);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= sorted.length) return;
+      annCheckpoint();
+      const swap = sorted[i];
+      sorted[i] = sorted[j];
+      sorted[j] = swap;
+      const board = boot?.board;
+      const next = sorted.map((l, idx) => {
+        const z = idx + 1;
+        if (z === l.z) return l;
+        if (board) void boardAnnApi.update(board, l.aid, l.x, l.y, z).catch(() => {});
+        return { ...l, z };
+      });
+      annLayersRef.current = next;
+      setAnnLayers(next);
+    },
+    [annCheckpoint, boot?.board]
+  );
+
+  const annUndoStep = useCallback(() => {
+    const prev = annUndo.current.pop();
+    if (!prev) return;
+    annRedo.current.push(annSnap());
+    setAnnVer((v) => v + 1);
+    void annApplySnapshot(prev);
+  }, [annApplySnapshot]);
+
+  const annRedoStep = useCallback(() => {
+    const next = annRedo.current.pop();
+    if (!next) return;
+    annUndo.current.push(annSnap());
+    setAnnVer((v) => v + 1);
+    void annApplySnapshot(next);
+  }, [annApplySnapshot]);
+
+  /** 拖拽中的预览：直接画到一块临时 canvas 上（每帧只改 DOM，不走 React）。
+   *  马赛克本身是 DOM 层，预览只能画个虚线框说明范围。 */
+  const annPaintLive = useCallback((op: AnnOp | null) => {
+    const cv = annLiveRef.current;
+    if (!cv) return;
+    if (!op) {
+      cv.style.display = "none";
+      cv.getContext("2d")?.clearRect(0, 0, cv.width, cv.height);
+      return;
+    }
+    const b = annBox(op);
+    const w = Math.max(1, b.w);
+    const h = Math.max(1, b.h);
+    const s = annScale(w, h);
+    cv.style.display = "block";
+    cv.style.left = `${b.x}px`;
+    cv.style.top = `${b.y}px`;
+    cv.style.width = `${w}px`;
+    cv.style.height = `${h}px`;
+    const bw = Math.max(1, Math.round(w * s));
+    const bh = Math.max(1, Math.round(h * s));
+    if (cv.width !== bw) cv.width = bw;
+    if (cv.height !== bh) cv.height = bh;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.scale(s, s);
+    ctx.translate(-b.x, -b.y);
+    if (op.t === "mosaic") {
+      ctx.fillStyle = "rgba(167,139,250,0.14)";
+      ctx.fillRect(b.x, b.y, w, h);
+      const lw = (1.5 * (window.devicePixelRatio || 1)) / s;
+      ctx.strokeStyle = "rgba(167,139,250,0.9)";
+      ctx.lineWidth = lw;
+      ctx.setLineDash([6 * lw, 4 * lw]);
+      ctx.strokeRect(b.x, b.y, w, h);
+      ctx.setLineDash([]);
+    } else {
+      annDraw(ctx, op);
+    }
+  }, []);
+
+  /** 画布点 → 最上面那一层（局部坐标做精确命中：细长的箭头不会在空处被"擦掉"） */
+  const annPick = (p: AnnPt): AnnLayer | null => {
+    const arr = [...annLayersRef.current].sort((a, b) => b.z - a.z || b.aid - a.aid);
+    for (const l of arr) if (annHit(l.op, p.x - l.x, p.y - l.y)) return l;
+    return null;
+  };
+
+  /** 起一笔。监听挂在自己身上（而不是并进画布那个大 effect）：
+   *  标注手势和拖图/框选/平移是互斥的，混在一起只会让 `settle` 越来越难读。 */
+  const annBegin = useCallback(
+    (e: React.MouseEvent) => {
+      const p = annPoint(e);
+      const tool = annTool;
+      /** 文字 / 序号用字号，其余用线宽 */
+      const texty = tool === "text" || tool === "badge";
+      if (tool === "text") {
+        annTextLock.current = false;
+        setAnnTextAt(p);
+        return;
+      }
+      const op = annNewOp(tool, p, {
+        color: annColor,
+        w: texty ? annFont : annWeight,
+        fill: annFill,
+        n: annNextRef.current,
+      });
+      if (!op) return;
+      /* 单击类（序号）：按下就落，没有拖拽阶段 */
+      if (op.t === "badge") {
+        annCheckpoint();
+        void annCommit(op);
+        annNextRef.current += 1;
+        return;
+      }
+      let cur: AnnOp = op;
+      let moved = false;
+      const down = { x: e.clientX, y: e.clientY };
+      annPaintLive(cur);
+      const onMove = (ev: MouseEvent) => {
+        if (!moved && Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 3) {
+          moved = true;
+        }
+        const q = annPoint(ev);
+        /* 从 `cur` 复制一份再收窄：闭包里改的可变变量，TS 不会保留类型收窄 */
+        const c = cur;
+        if (c.t === "pen" || c.t === "marker") {
+          /* 采样抽稀：同一两个像素内连发的点对观感没贡献，只是白占内存 */
+          const last = c.pts[c.pts.length - 1];
+          if (Math.hypot(q.x - last.x, q.y - last.y) * vp.current.k < 1.2) return;
+          cur = { ...c, pts: [...c.pts, q] };
+        } else if (
+          c.t === "rect" ||
+          c.t === "ellipse" ||
+          c.t === "line" ||
+          c.t === "arrow" ||
+          c.t === "mosaic"
+        ) {
+          cur = { ...c, b: q };
+        }
+        annPaintLive(cur);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onBlur);
+        annPaintLive(null);
+        /* 手抖点一下（没拖出框）不落层：否则画布上凭空多一层看不见的空标注 */
+        if (annTooSmall(cur)) return;
+        annCheckpoint();
+        void annCommit(cur);
+      };
+      /* 窗口失焦（Alt+Tab / 被系统抢走鼠标）：这一笔**丢掉**而不是硬提交 ——
+         用户没松手就离开，多半是不想要了；预览也不能留在画布上 */
+      const onBlur = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onBlur);
+        annPaintLive(null);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onBlur);
+    },
+    [annTool, annColor, annWeight, annFont, annFill, annPoint, annPaintLive, annCheckpoint, annCommit]
+  );
+
+  /** 文字工具：回车/失焦落一层。空文本直接丢掉 */
+  const annCommitText = useCallback(
+    (p: AnnPt, raw: string) => {
+      if (annTextLock.current) return;
+      annTextLock.current = true;
+      setAnnTextAt(null);
+      const s = raw.replace(/\s+$/, "");
+      if (!s.trim()) return;
+      const op = annNewOp("text", p, { color: annColor, w: annFont, fill: false });
+      if (!op || op.t !== "text") return;
+      annCheckpoint();
+      void annCommit({ ...op, s });
+    },
+    [annColor, annFont, annCheckpoint, annCommit]
+  );
+
+  /** 选择工具：按住一层拖位置。拖动期只改那一层的 style，松手才写 state + 落库 */
+  const annBeginMove = useCallback(
+    (e: React.MouseEvent, layer: AnnLayer) => {
+      const s = annPoint(e);
+      const el =
+        e.target instanceof Element ? e.target.closest<HTMLElement>("[data-ann]") : null;
+      let dx = 0;
+      let dy = 0;
+      let moved = false;
+      const onMove = (ev: MouseEvent) => {
+        const q = annPoint(ev);
+        dx = q.x - s.x;
+        dy = q.y - s.y;
+        if (!moved && Math.hypot(dx, dy) * vp.current.k < 2) return;
+        moved = true;
+        if (el) {
+          el.style.left = `${layer.x + dx}px`;
+          el.style.top = `${layer.y + dy}px`;
+        }
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
+        if (!moved) return;
+        annCheckpoint();
+        const nx = Math.round(layer.x + dx);
+        const ny = Math.round(layer.y + dy);
+        const next = annLayersRef.current.map((l) =>
+          l.aid === layer.aid ? { ...l, x: nx, y: ny } : l
+        );
+        annLayersRef.current = next;
+        setAnnLayers(next);
+        const board = boot?.board;
+        if (board) void boardAnnApi.update(board, layer.aid, nx, ny, layer.z).catch(() => {});
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      /* 失焦也当作松手：位置已经改到 DOM 上了，不落库就会"看着在 A、库里还是 B" */
+      window.addEventListener("blur", onUp);
+    },
+    [annPoint, annCheckpoint, boot?.board]
+  );
+
+  /** 图层行点一下：选中 + 视口居中（和图片/便签走同一种"点一行就跳过去"的手感） */
+  const focusBox = useCallback(
+    (b: Box) => {
+      const root = rootRef.current;
+      if (!root) return;
+      const pad = layersOpen ? LAYERS_W : 0;
+      const W = (root.clientWidth || 1200) - pad;
+      const H = root.clientHeight || 800;
+      const v = vp.current;
+      const need = Math.min(1, (W * 0.86) / Math.max(1, b.w), (H * 0.86) / Math.max(1, b.h));
+      const k = need < v.k ? Math.max(0.04, need) : v.k;
+      v.k = k;
+      v.x = pad + W / 2 - (b.x + b.w / 2) * k;
+      v.y = H / 2 - (b.y + b.h / 2) * k;
+      applyVp();
+      setZoom(k);
+      recompute();
+    },
+    [applyVp, recompute, layersOpen]
+  );
+
   useEffect(() => {
     document.body.classList.add("board-body");
     document.documentElement.classList.add("board-body");
@@ -489,7 +954,10 @@ export function Board() {
     void Promise.all([
       source.boardLayout(board).catch(() => [] as [number, number, number, number, number, number][]),
       source.boardNotes(board).catch(() => [] as BoardNote[]),
-    ]).then(([rows, ns]) => {
+      /* 标注读不回来（老注册库没有这张表 / JSON 坏了）就当这块板没有标注：
+         一层坏数据不该让整块板打不开 */
+      boardAnnApi.list(board).catch(() => [] as BoardAnnRow[]),
+    ]).then(([rows, ns, anns]) => {
       if (!alive) return;
       const groups = new Map<number, number>();
       for (const [g, x, y, w, h, grp] of rows) {
@@ -511,6 +979,16 @@ export function Board() {
         pos.current.set(-n.nid, { x: n.x, y: n.y, w: n.w, h: n.h });
         if (n.grp) groups.set(-n.nid, n.grp);
       }
+      /* 标注：坏行（解析不出几何）由 `annDecode` 丢掉，剩下的保持库里的 z 顺序 */
+      const layers = anns
+        .map((r) => annDecode(r))
+        .filter((l): l is AnnLayer => l !== null)
+        .sort((a, b) => a.z - b.z || a.aid - b.aid);
+      annLayersRef.current = layers;
+      setAnnLayers(layers);
+      /* 序号接着已有最大号往下发：重开板不该又从 1 开始，否则一圈里两个 1 */
+      const maxBadge = layers.reduce((m, l) => (l.op.t === "badge" ? Math.max(m, l.op.n) : m), 0);
+      annNextRef.current = maxBadge + 1;
       setGrpMap(groups);
       notesRef.current = list;
       setNotes(list);
@@ -808,6 +1286,34 @@ export function Board() {
     return () => window.clearTimeout(t);
   }, [hint]);
 
+  /* 缩略图失败重试（见 `THUMB_RETRY`）：`<img onError>` 走这里。
+     次数用 ref 记（`onError` 里读 state 会拿到挂载时那个旧闭包），次数进 `src` 的 `&rt=`
+     并给 `<img>` 换 `key` —— 只改 src 不换 key 时 WebView 可能仍用那条失败记录。 */
+  const retryThumb = useCallback((id: number) => {
+    const n = thumbTries.current.get(id) ?? 0;
+    if (n >= THUMB_RETRY) {
+      setBroken((old) => (old.has(id) ? old : new Set(old).add(id)));
+      return;
+    }
+    /* 同一张已经排着一次重试就别再排队（onError 可能连发） */
+    if (thumbTimers.current.has(id)) return;
+    const t = window.setTimeout(() => {
+      thumbTimers.current.delete(id);
+      thumbTries.current.set(id, n + 1);
+      setThumbTry((m) => new Map(m).set(id, n + 1));
+    }, THUMB_RETRY_MS * (n + 1));
+    thumbTimers.current.set(id, t);
+  }, []);
+
+  /* 关窗时把排着的重试都撤掉（不然定时器还会往一个已卸载的组件里 setState） */
+  useEffect(
+    () => () => {
+      for (const t of thumbTimers.current.values()) window.clearTimeout(t);
+      thumbTimers.current.clear();
+    },
+    []
+  );
+
   /* ---------------- 平移 / 拖图 / 缩放单张 ---------------- */
 
   /**
@@ -913,6 +1419,8 @@ export function Board() {
          字体弹层（0.4.24）踩过这个：一千多款字体，滚轮全被画布吃了。 */
       const tgt = e.target instanceof HTMLElement ? e.target : null;
       if (tgt?.closest(".board-layers") || tgt?.closest(".board-fontpop")) return;
+      /* 标注工具条上的滚轮留给它自己（粗细将来要能滚，至少也别把画布缩掉） */
+      if (tgt?.closest(".board-anntools")) return;
       e.preventDefault();
       /* Shift + 滚轮 = **把这个窗口挪到屏幕上别的位置**（owner 原话："按住 shift 滚轮
          不松，可以随意拖动窗口到任意位置"）。它既不是缩放画布、也不是平移画布内容，
@@ -1207,6 +1715,51 @@ export function Board() {
     const handle = t.closest<HTMLElement>("[data-handle]");
     const ghandle = t.closest<HTMLElement>("[data-group-handle]");
     const cell = t.closest<HTMLElement>("[data-img]");
+
+    /* ---------------- 标注模式 ----------------
+       必须在图片/便签判定**之前**截走这一下：工具选着「矩形」时，压在图上拖
+       也应该是画框，不是把那张图挪走。只有「选择」才落到原来的拖图/框选逻辑上。 */
+    if (annOpen && e.button === 0 && !t.closest(".board-anntools")) {
+      /* 文字输入框开着：这一下先把它提交掉（空文本自己会丢弃），别在新位置又开一个 */
+      if (annTextAt) {
+        annTextRef.current?.blur();
+        e.preventDefault();
+        return;
+      }
+      const p = annPoint(e);
+      if (annTool === "eraser") {
+        const hit = annPick(p);
+        if (hit) annRemove(hit.aid);
+        e.preventDefault();
+        return;
+      }
+      if (annTool === "select") {
+        const hit = annPick(p);
+        if (hit) {
+          annSelRef.current = hit.aid;
+          setAnnSel(hit.aid);
+          annBeginMove(e, hit);
+          e.preventDefault();
+          return;
+        }
+        /* 按在某一层的包围盒里、但没压到墨迹（例如空心矩形的中间）：
+           这一下算"点在标注上"，不许落到框选 —— 否则在大框中间拖会拉起选框，
+           看起来像"选中了框后面的图"。 */
+        if (t.closest("[data-ann]")) {
+          e.preventDefault();
+          return;
+        }
+        /* 点空白：只清标注的选中，框选 / 拖图照旧 */
+        if (annSelRef.current != null) {
+          annSelRef.current = null;
+          setAnnSel(null);
+        }
+      } else {
+        e.preventDefault();
+        annBegin(e);
+        return;
+      }
+    }
 
     /** 按 key 收集要一起动的成员。DOM 可能还没有（视口外的成员），照样进列表 */
     const buildMembers = (keys: number[]): DragMember[] => {
@@ -1509,9 +2062,37 @@ export function Board() {
         if (!e.repeat) void (e.shiftKey ? doUngroup() : doGroup());
         return;
       }
+      /* Ctrl+Z / Ctrl+Shift+Z = 标注的撤销 / 重做（只在工具条开着时接管：
+         板本身没有别的撤销语义，抢走 Ctrl+Z 不会影响别处）。 */
+      if (annOpen && mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (!e.repeat) (e.shiftKey ? annRedoStep : annUndoStep)();
+        return;
+      }
+      /* Delete / Backspace = 删掉选中的那层标注 */
+      if (annSelRef.current != null && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        if (!e.repeat) annRemove(annSelRef.current);
+        return;
+      }
       if (e.key === "Escape") {
         if (menu) {
           setMenu(null);
+          return;
+        }
+        /* 标注的三层退让：先退文字输入，再退图层选中，最后才关工具条 */
+        if (annTextAt) {
+          setAnnTextAt(null);
+          return;
+        }
+        if (annSelRef.current != null) {
+          annSelRef.current = null;
+          setAnnSel(null);
+          return;
+        }
+        if (annOpen) {
+          setAnnOpen(false);
+          setAnnPalette(false);
           return;
         }
         /* 有选区先清选区：Esc 的第一层语义是"取消选择"，第二层才是关板 */
@@ -1538,7 +2119,22 @@ export function Board() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fit, menu, reset100, active, items, paste, addNote, doGroup, doUngroup]);
+  }, [
+    fit,
+    menu,
+    reset100,
+    active,
+    items,
+    paste,
+    addNote,
+    doGroup,
+    doUngroup,
+    annOpen,
+    annTextAt,
+    annRedoStep,
+    annUndoStep,
+    annRemove,
+  ]);
 
   /* ---------------- 菜单 ---------------- */
 
@@ -1565,6 +2161,26 @@ export function Board() {
   };
 
   const menuItems: CtxItem[] = useMemo(() => {
+    /* 标注层的菜单：调层级 / 删掉（右键画布上那一层，或图层面板里那一行） */
+    if (menu?.ann != null) {
+      const aid = menu.ann;
+      const l = annLayers.find((x) => x.aid === aid);
+      return [
+        {
+          kind: "heading",
+          label: l ? tr(annKindKey(l.kind)) : tr("board.ann.section"),
+        },
+        { label: tr("board.ann.menu_up"), icon: "sort", action: () => annMoveZ(aid, 1) },
+        { label: tr("board.ann.menu_down"), icon: "sort", action: () => annMoveZ(aid, -1) },
+        { kind: "separator" },
+        {
+          label: tr("board.ann.menu_del"),
+          icon: "trash",
+          danger: true,
+          action: () => annRemove(aid),
+        },
+      ];
+    }
     /* 便签的菜单只有两件事：改字、删掉 */
     if (menu?.note != null) {
       const nid = menu.note;
@@ -1598,6 +2214,15 @@ export function Board() {
           label: t("board.menu_tidy"),
           icon: "grid",
           action: tidy,
+        },
+        /* 「标注工具」= owner 要的那条入口：右键打开截图那套工具条（再点一次收起） */
+        {
+          label: annOpen ? tr("board.ann.close") : tr("board.ann.open"),
+          icon: "sliders",
+          action: () => {
+            setAnnOpen((v) => !v);
+            setAnnPalette(false);
+          },
         },
         { kind: "separator" },
         {
@@ -1646,12 +2271,40 @@ export function Board() {
         action: () => void source.reveal(it.path).catch(() => {}),
       },
       { kind: "separator" },
+      /* 图上的右键也给这条入口：用户大多是先在图上点右键 */
+      {
+        label: annOpen ? tr("board.ann.close") : tr("board.ann.open"),
+        icon: "sliders",
+        action: () => {
+          setAnnOpen((v) => !v);
+          setAnnPalette(false);
+        },
+      },
+      { kind: "separator" },
       { label: t("board.menu_fit"), icon: "expand", shortcut: "F", action: fit },
       { label: t("board.menu_reset"), icon: "search", shortcut: "0", action: reset100 },
       { kind: "separator" },
       { label: t("board.menu_close"), icon: "close", shortcut: "Esc", danger: true, action: () => void source.boardClose() },
     ];
-  }, [menu, items, notes, fit, reset100, paste, addNote, tidy, delNote, sel, grpMap, doGroup, doUngroup]);
+  }, [
+    menu,
+    items,
+    notes,
+    fit,
+    reset100,
+    paste,
+    addNote,
+    tidy,
+    delNote,
+    sel,
+    grpMap,
+    doGroup,
+    doUngroup,
+    annOpen,
+    annLayers,
+    annMoveZ,
+    annRemove,
+  ]);
 
   if (!boot) {
     return <div className="board-miss">{t("board.missing_all")}</div>;
@@ -1675,6 +2328,23 @@ export function Board() {
     return rows;
     /* `layersOpen` 进依赖：重新打开面板时按当前位置重排一次 */
   }, [items, notes, boxById, layersOpen]);
+  /* 标注行：最上层排最前（PS 惯例），和画布的绘制顺序正好相反 */
+  const annRows = useMemo(
+    () => [...annLayers].sort((a, b) => b.z - a.z || b.aid - a.aid),
+    [annLayers]
+  );
+  /* 「矩形 1」「文字 2」：同类按**创建顺序**编号（只由 aid 决定，所以重开板编号不变） */
+  const annName = useMemo(() => {
+    const out = new Map<number, string>();
+    const cnt = new Map<string, number>();
+    for (const l of [...annLayers].sort((a, b) => a.aid - b.aid)) {
+      const n = (cnt.get(l.kind) ?? 0) + 1;
+      cnt.set(l.kind, n);
+      out.set(l.aid, `${tr(annKindKey(l.kind))} ${n}`);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annLayers]);
   /* 选区包围盒：只在"多选 / 选中了组"时显示。拖动中由 `syncSelBox` 直接改 DOM */
   const selBox = sel.size > 1 ? bboxOf(sel) : null;
   /* 底部字体工具条作用的那张便签：正在编辑的那张优先，否则选区里只有一张便签时 */
@@ -1712,16 +2382,38 @@ export function Board() {
     return { common: hitC, all: hitA };
   }, [fontQ, extraFonts]);
 
+  /* 快照栈住在 ref 里，改它不会重渲染；`annVer` 就是"栈变过"的信号，
+     拿它当缓存键算一次可用态（按钮的禁用样式靠这个） */
+  const annCanUndo = useMemo(() => annUndo.current.length > 0, [annVer]);
+  const annCanRedo = useMemo(() => annRedo.current.length > 0, [annVer]);
+
+  /** 粗细 / 字号步进。文字和序号工具下这个数就是字号（和截图工具条同一套语义） */
+  const annStepW = (dir: number, big: boolean) => {
+    if (annTool === "text" || annTool === "badge") {
+      setAnnFont((v) =>
+        Math.min(ANN_FONT_MAX, Math.max(ANN_FONT_MIN, Math.round(v + dir * (big ? 4 : 1))))
+      );
+    } else {
+      setAnnWeight((v) =>
+        Math.min(ANN_W_MAX, Math.max(ANN_W_MIN, Math.round((v + dir * (big ? 1 : 0.5)) * 10) / 10))
+      );
+    }
+  };
+  const annTexty = annTool === "text" || annTool === "badge";
+  /** 工具条上那个读数：线宽还是字号，看当前工具 */
+  const annValue = annTexty ? annFont : annWeight;
+
   return (
     <div
       ref={rootRef}
-      className="board-root"
+      className={`board-root ${annOpen && annTool !== "select" ? "annotating" : ""}`}
       onMouseDown={onDown}
       onDoubleClick={(e) => {
         const t = e.target as HTMLElement;
         /* 双击顶栏是「最大化/还原窗口」（Tauri 内置的 drag-region 行为），
-           不该顺带把画布 fit 一遍 —— 和 onMouseDown 用同一条排除规则。 */
-        if (t.closest("[data-tauri-drag-region]")) return;
+           不该顺带把画布 fit 一遍 —— 和 onMouseDown 用同一条排除规则。
+           标注工具条也一样：连点两下工具按钮不该把整块板重缩一遍。 */
+        if (t.closest("[data-tauri-drag-region]") || t.closest(".board-anntools")) return;
         const cell = t.closest<HTMLElement>("[data-img]");
         if (cell) {
           void source.peekOpen([Number(cell.dataset.img)], 0).catch(() => {});
@@ -1734,10 +2426,13 @@ export function Board() {
         const t = e.target as HTMLElement;
         const cell = t.closest<HTMLElement>("[data-img]");
         const note = t.closest<HTMLElement>("[data-note]");
+        /* 标注：画布上那一层（data-ann）或图层面板里那一行（data-ann-row） */
+        const annEl = t.closest<HTMLElement>("[data-ann]");
+        const annRow = t.closest<HTMLElement>("[data-ann-row]");
         /* 图层面板里的行也能右键：图片用"这张图"的菜单，文字行用便签菜单（改字/删掉） */
         const layer = t.closest<HTMLElement>("[data-layer]");
         const layerNote = t.closest<HTMLElement>("[data-layer-note]");
-        if (!cell && !note && t.closest(".board-layers") && !layer && !layerNote) {
+        if (!cell && !note && !annEl && !annRow && t.closest(".board-layers") && !layer && !layerNote) {
           // 面板空白处：没有可作用于的对象，直接不弹（否则会弹出"画布"菜单，语义是错的）
           setMenu(null);
           return;
@@ -1751,12 +2446,20 @@ export function Board() {
             : layerNote
               ? Number(layerNote.dataset.layerNote)
               : undefined,
+          ann: annEl
+            ? Number(annEl.dataset.ann)
+            : annRow
+              ? Number(annRow.dataset.annRow)
+              : undefined,
         });
       }}
     >
       <div ref={canvasRef} className="board-canvas">
         {shown.map((it) => {
           const b = pos.current.get(it.id) ?? boxById.get(it.id)!;
+          /* 第几次取这张缩略图：0 = 第一次。非 0 时给 URL 加个 `rt` 并把 `<img>` 换 key，
+             逼 WebView 重新发一次请求（只改 src 时它可能直接给缓存里那条失败记录）。 */
+          const tryNo = thumbTry.get(it.id) ?? 0;
           return (
             <div
               key={it.id}
@@ -1780,19 +2483,13 @@ export function Board() {
                 <>
                   {/* 静态层：永远是 1024 档缩略图（动图就是它的首帧）。板上不动 = 不解码整段动画 */}
                   <img
-                    src={it.src}
+                    key={`t${tryNo}`}
+                    src={tryNo ? `${it.src}&rt=${tryNo}` : it.src}
                     alt={it.name}
                     draggable={false}
                     decoding="async"
                     loading="lazy"
-                    onError={() =>
-                      setBroken((old) => {
-                        if (old.has(it.id)) return old;
-                        const n = new Set(old);
-                        n.add(it.id);
-                        return n;
-                      })
-                    }
+                    onError={() => retryThumb(it.id)}
                   />
                   {/* 动图：**只有指针停在这张上**才挂原文件那一层，离开立刻拆掉（卸载即停止解码）。
                       原图解码比缩略图慢，所以先透明、加载完再淡入，避免切换瞬间闪一下白。 */}
@@ -1818,6 +2515,58 @@ export function Board() {
             </div>
           );
         })}
+
+        {/* 标注层：一笔一层，各自一块位图，画在**本层自己的局部坐标**里。
+            插在图片和便签**之间**是有意的：图片 z≤3、标注 3、便签 4；同 z 时后者压前者，
+            所以标注恒在图片之上、恒在便签之下（和"便签是贴在最上面的注记"的语义一致）。
+            只有「选择 / 橡皮」开着时这些层才吃鼠标事件 —— 画图时指针必须能穿过它们。 */}
+        {annLayers.map((l) => (
+          <div
+            key={`a${l.aid}`}
+            data-ann={l.aid}
+            className={`board-ann ${annSel === l.aid ? "on" : ""} ${
+              annOpen && (annTool === "select" || annTool === "eraser") ? "hit" : ""
+            }`}
+            style={{ left: l.x, top: l.y, width: l.w, height: l.h }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <AnnLayerView layer={l} zoom={zoom} />
+          </div>
+        ))}
+
+        {/* 正在拖的那一笔：一块临时画布，每帧只改它的 style（不走 React） */}
+        <canvas ref={annLiveRef} className="board-ann board-ann-live" />
+
+        {/* 文字工具的输入框：跟着画布变换走，所以字号/位置都是画布单位。
+            **非受控**：每敲一个字就 setState 会让整块板（上千张图）重渲染。 */}
+        {annTextAt && (
+          <input
+            ref={annTextRef}
+            className="board-ann-input"
+            autoFocus
+            spellCheck={false}
+            defaultValue=""
+            placeholder={tr("board.ann.text_placeholder")}
+            style={{
+              left: annTextAt.x,
+              top: annTextAt.y,
+              fontSize: Math.max(ANN_FONT_MIN, Math.round(annFont)),
+              color: annColor,
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                annCommitText(annTextAt, e.currentTarget.value);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setAnnTextAt(null);
+              }
+            }}
+            onBlur={(e) => annCommitText(annTextAt, e.currentTarget.value)}
+          />
+        )}
 
         {/* 文字便签（0.4.17 起是"文本框"）：**框就是文字本身的尺寸** —— 不设 width/height，
             由内容撑开。所以没有"一个大框套着一行字"的观感，选中也只是文字底下淡淡一层。
@@ -1908,13 +2657,70 @@ export function Board() {
             <span className="mono board-layers-count" title={t("board.layers_count_tip")}>
               {items.length}
               {notes.length ? `+${notes.length}` : ""}
+              {annLayers.length ? `+${annLayers.length}` : ""}
             </span>
             <button title={t("board.layers_collapse")} onClick={() => setLayersOpen(false)}>
               <X size={12} strokeWidth={1.9} />
             </button>
           </div>
           <div className="board-layers-list">
-            {!layerRows.length && <div className="board-layers-empty">{t("board.layers_empty")}</div>}
+            {/* 标注层单独一段、排在最上面（最上层在前，和画布上的压盖关系**顺序相反**：
+                这是 PS 的惯例 —— 列表顶部 = 画布最上面）。上移/下移就是改 z。 */}
+            {annRows.length > 0 && (
+              <>
+                <div className="board-layers-sep">{tr("board.ann.section")}</div>
+                {annRows.map((l) => (
+                  <div
+                    key={`a${l.aid}`}
+                    data-ann-row={l.aid}
+                    className={`board-layer board-layer-ann ${annSel === l.aid ? "on" : ""}`}
+                    title={`${annName.get(l.aid) ?? ""}\n${tr("board.ann.layer_tip")}`}
+                    onClick={() => {
+                      annSelRef.current = l.aid;
+                      setAnnSel(l.aid);
+                      focusBox({ x: l.x, y: l.y, w: l.w, h: l.h });
+                    }}
+                  >
+                    <span className="board-layer-ph board-layer-annico">
+                      {ANN_ICONS[l.kind] ?? ANN_ICONS.rect}
+                    </span>
+                    <span className="board-layer-name">{annName.get(l.aid)}</span>
+                    <span className="board-layer-annops">
+                      <button
+                        title={tr("board.ann.menu_up")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          annMoveZ(l.aid, 1);
+                        }}
+                      >
+                        <ChevronUp size={11} strokeWidth={2} />
+                      </button>
+                      <button
+                        title={tr("board.ann.menu_down")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          annMoveZ(l.aid, -1);
+                        }}
+                      >
+                        <ChevronDown size={11} strokeWidth={2} />
+                      </button>
+                      <button
+                        title={tr("board.ann.menu_del")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          annRemove(l.aid);
+                        }}
+                      >
+                        <Trash2 size={11} strokeWidth={1.9} />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
+            {!layerRows.length && !annRows.length && (
+              <div className="board-layers-empty">{t("board.layers_empty")}</div>
+            )}
             {layerRows.map((r) => {
               if (r.img) {
                 const it = r.img;
@@ -1975,8 +2781,9 @@ export function Board() {
         </div>
       )}
 
-      {/* 空板：唯一的正经动作就是「粘一张进来」，所以直接把这句话写在画布中央 */}
-      {!items.length && !notes.length && (
+      {/* 空板：唯一的正经动作就是「粘一张进来」，所以直接把这句话写在画布中央。
+          画过标注就不算空板了 —— 不然这句提示会一直压在刚画的东西上面。 */}
+      {!items.length && !notes.length && !annLayers.length && (
         <div className="board-empty">
           <span className="board-empty-title">
             {boot.snapshot ? t("board.empty_snapshot") : t("board.empty_board")}
@@ -2156,6 +2963,132 @@ export function Board() {
         </div>
       )}
 
+      {/* ---------------- 标注工具条 ----------------
+          截图那套工具，悬浮在板底居中（不跟画布平移缩放走，所以永远点得到）。
+          样式和主界面同一套纸墨令牌；分组顺序照 owner 给的清单：
+          选择 / 矩形 / 椭圆 / 直线 / 箭头 / 画笔 / 荧光笔 / 文字 / 序号 / 马赛克 / 橡皮
+          + 颜色 + 粗细 + 撤销 / 重做 / 完成。 */}
+      {annOpen && (
+        <div
+          className="board-anntools"
+          role="toolbar"
+          aria-label={tr("board.ann.toolbar")}
+          /* 便签的字体工具条也在底部中央：两条同时出现时往上让一格，别叠在一起 */
+          style={{ bottom: lookNote ? 58 : 16 }}
+          /* 工具条自己吃掉按下与滚轮：既不能把画布拖走，也不能把画布缩放掉 */
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+          }}
+        >
+          {ANN_TOOLS.map((tool) => (
+            <button
+              key={tool}
+              className={`board-anntool ${annTool === tool ? "on" : ""}`}
+              title={tr(annToolKey(tool))}
+              aria-pressed={annTool === tool}
+              onClick={() => {
+                setAnnTool(tool);
+                setAnnPalette(false);
+              }}
+            >
+              {ANN_ICONS[tool]}
+            </button>
+          ))}
+
+          <span className="board-anntools-sep" />
+
+          <div className="board-ann-anchor">
+            <button
+              className={`board-anntool board-ann-colorbtn ${annPalette ? "on" : ""}`}
+              title={tr("board.ann.color")}
+              onClick={() => setAnnPalette((v) => !v)}
+            >
+              <i className="board-ann-swatch" style={{ background: annColor }} />
+            </button>
+            {annPalette && (
+              <div className="board-ann-palette" onMouseDown={(e) => e.stopPropagation()}>
+                <div className="board-ann-palette-title">{tr("board.ann.color")}</div>
+                <div className="board-ann-swatches">
+                  {ANN_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className={`board-ann-sw ${
+                        c.toUpperCase() === annColor.toUpperCase() ? "on" : ""
+                      }`}
+                      style={{ background: c }}
+                      title={c}
+                      onClick={() => {
+                        setAnnColor(c);
+                        setAnnPalette(false);
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 粗细（文字 / 序号工具下是字号）*/}
+          <div className="board-ann-weight" title={tr("board.ann.weight")}>
+            <button className="board-ann-step" onClick={() => annStepW(-1, false)}>
+              <Minus size={11} strokeWidth={2} />
+            </button>
+            <span className="mono board-ann-weightv">
+              {annTexty ? Math.round(annValue) : annValue.toFixed(1)}
+            </span>
+            <button className="board-ann-step" onClick={() => annStepW(1, false)}>
+              <Plus size={11} strokeWidth={2} />
+            </button>
+          </div>
+
+          {/* 填充只对矩形 / 椭圆有意义：和截图一样按当前工具出现，不占常驻位置 */}
+          {(annTool === "rect" || annTool === "ellipse") && (
+            <button
+              className={`board-anntool ${annFill ? "on" : ""}`}
+              title={tr("board.ann.fill")}
+              aria-pressed={annFill}
+              onClick={() => setAnnFill((v) => !v)}
+            >
+              {ANN_ICONS.fill}
+            </button>
+          )}
+
+          <span className="board-anntools-sep" />
+
+          <button
+            className="board-anntool"
+            disabled={!annCanUndo}
+            title={tr("board.ann.undo")}
+            onClick={annUndoStep}
+          >
+            {ANN_ICONS.undo}
+          </button>
+          <button
+            className="board-anntool"
+            disabled={!annCanRedo}
+            title={tr("board.ann.redo")}
+            onClick={annRedoStep}
+          >
+            {ANN_ICONS.redo}
+          </button>
+
+          <span className="board-anntools-sep" />
+
+          <button
+            className="board-anntool board-ann-done"
+            title={tr("board.ann.done")}
+            onClick={() => {
+              setAnnOpen(false);
+              setAnnPalette(false);
+            }}
+          >
+            {ANN_ICONS.done}
+            <span className="board-ann-donetext">{tr("board.ann.done")}</span>
+          </button>
+        </div>
+      )}
+
       {/* 左下角缩放条：固定在这一角（画布怎么平移缩放都不动它）。
           图层面板展开时往右让出它的宽度，否则会浮在列表上面。 */}
       <div
@@ -2249,4 +3182,51 @@ export function Board() {
       )}
     </div>
   );
+}
+
+/**
+ * 一层标注的显示体。
+ *
+ * 位图倍率**跟当前缩放走**：放大之后按新倍率重画一遍，线框和文字才保持锐利；
+ * 不重画的话就是一张被 CSS 拉大的旧图，放大到 200% 就糊了。
+ * 重画的触发点是 `zoom`（画布缩放状态，wheel 里已经 rAF 节流过），
+ * 所以滚轮缩放时最多每帧重画一次，代价是"当前可见的标注层数"级别，不是整块板。
+ *
+ * 马赛克例外：它不是画出来的，是盖在底图上的一层 `backdrop-filter`。
+ * 选它而不是"把底图抓成像素再打块"，理由见 `.board-ann-mosaic` 的样式注释。
+ */
+function AnnLayerView({ layer, zoom }: { layer: AnnLayer; zoom: number }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const mosaic = layer.op.t === "mosaic";
+
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv || layer.op.t === "mosaic") return;
+    const s = annBmpScale(layer.w, layer.h, zoom);
+    const bw = Math.max(1, Math.round(layer.w * s));
+    const bh = Math.max(1, Math.round(layer.h * s));
+    if (cv.width !== bw) cv.width = bw;
+    if (cv.height !== bh) cv.height = bh;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.scale(s, s);
+    annDraw(ctx, layer.op);
+  }, [layer, zoom]);
+
+  if (layer.op.t === "mosaic") {
+    /* 像素块靠 CSS 的网格叠色暗示；不用真像素化的原因见 `.board-ann-mosaic` 的注释
+       （底图是视口懒挂载的 DOM <img>，重合成一遍既不可靠也会随图移动而过期） */
+    return (
+      <div
+        className="board-ann-mosaic"
+        style={{
+          backdropFilter: `blur(${layer.op.blur}px)`,
+          WebkitBackdropFilter: `blur(${layer.op.blur}px)`,
+        }}
+      />
+    );
+  }
+  return <canvas className="board-ann-cv" ref={ref} />;
 }

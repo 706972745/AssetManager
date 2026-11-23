@@ -48,8 +48,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub use ids::{gid, lib_of, ungid};
 pub use model::*;
 
-/// 应用数据目录（Windows：`%LOCALAPPDATA%\AssetManager`）。
+/// 程序所在目录（`assetmanager.exe` 旁边）。截图库、`cache\`、还有 0.5.7 起的
+/// `data\` 都按它定位 —— 壳层（`src-tauri`）里也有一份同义的 `exe_dir()`。
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// 应用数据目录：**默认跟着程序走** —— `<exe 同级>\data`。
+///
+/// 0.5.7 改动（owner：「所有持久化数据放安装目录，C 盘只留必须项」）：
+/// 索引 `index.db`、指针文件 `data-root.json`、`runtime.log`、`ui-prefs.json`、
+/// `trash-libs\` 全部收进安装目录下的 `data\` —— 「删目录」和「换盘」这才是一件事。
+///
+/// 写不进去才回退老的 `%LOCALAPPDATA%\AssetManager`：装到 `Program Files`、
+/// 只读介质、被 ACL 挡住时，宁可数据在别处，也不能让软件打不开。
+/// 判定用 `writable()`（真的写一个探针再删）—— 只读目录上 `create_dir_all`
+/// 常常"成功"而写文件失败，只看它就会误判。
 pub fn default_data_dir() -> PathBuf {
+    // 只算一次：`writable()` 要真的写探针，托盘菜单 / 设置面板每开一次都算一遍太浪费；
+    // 而且运行中答案不该变（装到一半目录变只读时，前面打开的索引和后面的日志必须同一个地方）。
+    static CACHED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let beside_exe = exe_dir().join("data");
+            if writable(&beside_exe) {
+                return beside_exe;
+            }
+            legacy_default_data_dir()
+        })
+        .clone()
+}
+
+/// 老版本（≤0.5.6）的默认数据目录：`%LOCALAPPDATA%\AssetManager`。
+///
+/// 现在只有两个用途：① `default_data_dir()` 的回退；② 一次性迁移的来源
+/// （见 `migrate_legacy_data`）。
+pub fn legacy_default_data_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -57,6 +94,151 @@ pub fn default_data_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("AssetManager")
+}
+
+/// 老版本可能写过数据的默认目录，按"更可能有真数据"排序（迁移来源）。
+///
+/// 第一个是 0.2–0.5.6 真正在用的那个：Tauri 的 `app_local_data_dir()` =
+/// `%LOCALAPPDATA%\<identifier>`，identifier 见 `src-tauri/tauri.conf.json`
+/// （`com.assetmanager.desktop`）——**改 identifier 必须同步这里**，否则老数据找不到。
+/// 第二个是 core 自己的老默认值（CLI / 更早的版本）。
+pub fn legacy_data_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        out.push(local.join("com.assetmanager.desktop"));
+        out.push(local.join("AssetManager"));
+    }
+    out
+}
+
+/// 一次性迁移的结果（调用方拿它写 `runtime.log`：从哪搬的、搬了多少）。
+pub struct Migration {
+    pub from: PathBuf,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// 新默认目录里**还没有数据**时，把老默认目录的数据**复制**过来。
+///
+/// 三条纪律：
+/// 1. **幂等**：新目录里已有 `index.db` 或 `data-root.json` 就什么都不做；单个文件
+///    已存在也不覆盖，所以中途失败下次启动会接着补齐（`index.db` 放最后搬）。
+/// 2. **只复制、不删**：老目录原样留着。迁移出错时用户的原始数据必须还在。
+/// 3. **失败不挡启动**：返回 `Err` 只用于写日志，调用方照常往下走 —— 数据搬不过去
+///    顶多是"重新扫一遍"，软件打不开才是灾难。
+pub fn migrate_legacy_data(new_dir: &Path) -> Result<Option<Migration>, String> {
+    migrate_from(new_dir, &legacy_data_dirs())
+}
+
+/// 只搬**用户数据**这几样。为什么不是"整目录复制"：
+/// · 老的 `%LOCALAPPDATA%\AssetManager` 同时是**安装目录**（里面有 exe / dll /
+///   `screenshots\`），整份复制等于把程序和素材库搬进数据目录；
+/// · `EBWebView\` / `webview\` 是 WebView2 用户数据目录（几百 MB），
+///   `cache\` 是可以重建的缓存 —— 都不该跟着走。
+/// 清单之外的文件不搬：宁可少搬一个没人认识的文件，也不要把几百 MB 的垃圾塞进安装目录。
+const MIGRATE_FILES: &[&str] = &[
+    "data-root.json",
+    "ui-prefs.json",
+    "peeks.json",
+    "tray-prefs.json",
+    "index.db",
+    "index.db-wal",
+    "index.db-shm",
+];
+/// 目录：老版本的库文件、回收站、被移除库的回收站。
+const MIGRATE_DIRS: &[&str] = &["libs", "trash", "trash-libs"];
+
+fn migrate_from(new_dir: &Path, legacy: &[PathBuf]) -> Result<Option<Migration>, String> {
+    /* 迁移的"已完成"标记：索引或指针文件之一在新目录里，就说明搬过了 / 本来就是新的。
+       为什么不能只看 `index.db`：**用了自定义数据文件夹**的用户，索引在 D 盘那份目录里，
+       老默认目录下没有 `index.db`、只有 `data-root.json`。只看索引会漏掉指针文件，
+       升级后软件在 `<exe>\data` 找不到指针 → 自定义目录"消失" → 用户看到空库。 */
+    let done = |d: &Path| d.join("index.db").exists() || d.join("data-root.json").exists();
+    if done(new_dir) {
+        return Ok(None);
+    }
+    let Some(src) = legacy
+        .iter()
+        .find(|d| d.join("index.db").is_file() || d.join("data-root.json").is_file())
+    else {
+        return Ok(None);
+    };
+    // 新目录落在老目录里面（`%LOCALAPPDATA%\AssetManager\data` 就是这种）没问题：
+    // 只搬白名单里的名字，永远不会把 `data` 自己复制进自己。
+    // 反过来（老目录在新目录里面）必须拦：那才是真的自嵌套。
+    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let (n, s) = (norm(new_dir), norm(src));
+    if n == s || s.starts_with(&format!("{n}\\")) {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(new_dir).map_err(|e| format!("建数据目录失败：{e}"))?;
+    let mut m = Migration { from: src.clone(), files: 0, bytes: 0 };
+    let mut err: Option<String> = None;
+
+    for name in MIGRATE_FILES {
+        // index.db 最后搬：它存在就等于"迁移完成"，先搬它会让失败后的重试短路
+        if *name == "index.db" {
+            continue;
+        }
+        let from = src.join(name);
+        let to = new_dir.join(name);
+        if from.is_file() && !to.exists() {
+            match std::fs::copy(&from, &to) {
+                Ok(n) => {
+                    m.files += 1;
+                    m.bytes += n;
+                }
+                Err(e) => err = Some(format!("复制 {} 失败：{e}", from.display())),
+            }
+        }
+    }
+    for name in MIGRATE_DIRS {
+        let from = src.join(name);
+        if from.is_dir() {
+            if let Err(e) = copy_tree(&from, &new_dir.join(name), &mut m) {
+                err = Some(format!("复制 {} 失败：{e}", from.display()));
+            }
+        }
+    }
+    if src.join("index.db").is_file() {
+        let to = new_dir.join("index.db");
+        if !to.exists() {
+            match std::fs::copy(src.join("index.db"), &to) {
+                Ok(n) => {
+                    m.files += 1;
+                    m.bytes += n;
+                }
+                Err(e) => err = Some(format!("复制 index.db 失败：{e}")),
+            }
+        }
+    }
+
+    if let Some(e) = err {
+        return Err(format!("{}（已复制 {} 个文件，下次启动会补齐）", e, m.files));
+    }
+    Ok(Some(m))
+}
+
+/// 递归复制，**已存在的目标文件一律跳过**（幂等 + 不许覆盖用户后来改过的东西）。
+/// 符号链接不跟（`file_type()` 不解析链接，既不是 dir 也不是 file，直接跳过）。
+fn copy_tree(src: &Path, dst: &Path, m: &mut Migration) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for ent in std::fs::read_dir(src)? {
+        let ent = ent?;
+        let ft = ent.file_type()?;
+        let to = dst.join(ent.file_name());
+        if ft.is_dir() {
+            copy_tree(&ent.path(), &to, m)?;
+        } else if ft.is_file() && !to.exists() {
+            let n = std::fs::copy(ent.path(), &to)?;
+            m.files += 1;
+            m.bytes += n;
+        }
+    }
+    Ok(())
 }
 
 /// 一个已打开的素材库。
@@ -307,16 +489,22 @@ impl App {
         out
     }
 
-    /// 读标签体系要扫的连接：正常是「当前库 + 内置库」，
-    /// **一个库都没有**时才退注册库（那里只有 0.3.9 之前的老标签，用来兜底显示）。
+    /// 读标签体系要扫的连接：**所有库**，当前库排第一。
+    ///
+    /// 为什么不再只扫「当前库 + 内置库」：标签的互通口径是"同名合并"（0.5.7），
+    /// 点开标签时列表会查所有库；计数如果只算两个库，三库场景下就会出现
+    /// "侧栏写 3、点开只有 1"的旧毛病。当前库排第一是为了同名标签的颜色 / 分组
+    /// 以当前库为准 —— 否则切库时标签颜色会跳。
+    /// 一个库都没有时才退注册库（老版本升级的中间态 / 单测里还没有库）。
     /// bool = 这个连接是不是真实素材库（假的就没有使用数可算）。
     fn tag_sources(&self) -> Vec<(&rusqlite::Connection, bool)> {
-        let libs = self.view_libs();
-        if libs.is_empty() {
-            vec![(&self.reg, false)]
-        } else {
-            libs.into_iter().map(|l| (&l.conn, true)).collect()
+        if self.libs.is_empty() {
+            return vec![(&self.reg, false)];
         }
+        let cur = self.cur_lib().map(|l| l.id);
+        let mut libs: Vec<&Lib> = self.libs.iter().filter(|l| Some(l.id) == cur).collect();
+        libs.extend(self.libs.iter().filter(|l| Some(l.id) != cur));
+        libs.into_iter().map(|l| (&l.conn, true)).collect()
     }
 
     /// 全局 id → 所在库的连接（写元数据 / 出缩略图都走这一句，
@@ -376,6 +564,15 @@ impl App {
     /// 当前选中的库（启动时对齐持久化的活动库；都没有就是 `None`）。
     pub fn current_lib_id(&self) -> Option<i64> {
         self.current
+    }
+
+    /// 某个库的根目录。
+    ///
+    /// 灵感板的 Ctrl+V 要落在**这块板所属的库**里（分组是库内资产、标签板按当前库查），
+    /// 壳层需要拿到库根才能把剪贴板图片写对地方 —— 所以把这个只读入口暴露出来，
+    /// 别让上层自己去 `libs.iter().find(...)`。
+    pub fn lib_root(&self, id: i64) -> Result<String, String> {
+        Ok(self.lib(id)?.root.clone())
     }
 
     /// 库的显示名 = 库根最后一段目录名。导出文件名要靠它区分不同库
@@ -956,6 +1153,20 @@ impl App {
         q.tag_ids = None;
         q.tag_rule = None;
 
+        /* 点开某个「集合」（标签 / 分组 / 快照）= 换一个视图看东西，不是在当前目录上叠条件。
+           所以这三种筛选一旦出现，目录就不再参与查询 —— 否则「截图库的标签」会被
+           当前导入库的 dir_id 锁死，点开就是空的（owner 2026-11-23 报的）。 */
+        let tag_open = q
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        let collection_open = q.collection.is_some();
+        let snapshot_open = q.snapshot.is_some();
+        if tag_open || collection_open || snapshot_open {
+            q.dir_id = None;
+        }
+
         // 搜索词里的标签名，同理按库换算
         let text = q.text.clone().unwrap_or_default();
         let needle = text.trim().trim_start_matches('#').trim().to_string();
@@ -986,7 +1197,10 @@ impl App {
            再走与分组完全相同的拆库路径 —— 跨库快照也能一次查对。 */
         let snap_ids: Option<std::collections::HashMap<i64, Vec<i64>>> = match q.snapshot {
             Some(sid) => {
-                let gids = self.snapshot_gids(sid)?;
+                /* 快照所属库被移除 / 快照刚被删：当"没有可显示的素材"处理。
+                   这里不能 `?`：界面可能还挂着一个失效的筛选，报错只会变成
+                   一串红条，用户真正需要的是空态（"所属库已被移除"）。 */
+                let gids = self.snapshot_gids(sid).unwrap_or_default();
                 let mut m: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
                 for g in gids {
                     let (lib_id, local) = ungid(g);
@@ -1000,6 +1214,20 @@ impl App {
         q.snapshot = None;
         /* 两个筛选同时给时不叠加（界面是单选），**快照优先** —— 它更"具体"。 */
         let member_ids = snap_ids.or(coll_ids);
+
+        /* 这次允许扫哪些库：
+           ① 后端显式给了 `libs` → 听它的（分组成员 / 快照哈希的归属库会写进来）；
+           ② 点的是标签 → **所有库按名字合并**（同名标签在每个库各建一份，id 不同）；
+           ③ 都没有 → 只查当前库（0.4.5 的隔离，保住普通浏览的性能与直觉）。
+           空数组是有效值：它表示"这些库都不在了"，必须查 0 条，不能回落成当前库。 */
+        let allowed_libs: Option<Vec<i64>> = match q.libs.take() {
+            Some(ids) => Some(ids),
+            None => match &member_ids {
+                Some(m) => Some(m.keys().copied().collect()),
+                None if tag_open => Some(self.libs.iter().map(|l| l.id).collect()),
+                None => None,
+            },
+        };
 
         if let Some(g) = q.dir_id {
             let (lib_id, local) = ungid(g);
@@ -1051,13 +1279,19 @@ impl App {
         };
 
         let mut all: Vec<model::Asset> = Vec::new();
-        /* 合并分页只发生在**当前库内部**（0.4.5，owner 2026-11-20："全部都要隔离"）。
-           以前这里遍历所有库：一按标签/快照/颜色筛，A 库的图就和 B 库混在同一页，
-           用户看到的就是"切了库也没用，数据还是合在一起的"。
-           没有当前库（启动瞬间还没对齐）才退回全部库，避免列表空白。 */
-        let targets: Vec<&Lib> = match self.current {
-            Some(id) => self.libs.iter().filter(|l| l.id == id).collect(),
-            None => self.libs.iter().collect(),
+        /* 合并分页的扫描范围（0.5.7 修正）：
+           - 没有集合筛选 → **当前库**（0.4.5 owner："普通浏览全部都要隔离"）；
+           - 点开分组 → 分组所属库（哪怕当前选的是另一个库）；
+           - 点开标签 → 所有库按名字合并（owner 要的"互通"）；
+           - 点开快照 → 哈希命中的那些库（本来就是跨库数据）。
+           `allowed_libs` 为 Some 时严格按它过滤；`Some(vec![])` 表示一个库都不查。 */
+        let targets: Vec<&Lib> = match &allowed_libs {
+            Some(ids) => self.libs.iter().filter(|l| ids.contains(&l.id)).collect(),
+            None => match self.current {
+                Some(id) => self.libs.iter().filter(|l| l.id == id).collect(),
+                /* 没有当前库（启动瞬间还没对齐）才退回全部库，避免列表空白。 */
+                None => self.libs.iter().collect(),
+            },
         };
         for l in &targets {
             let mut q2 = q.clone();
@@ -1298,10 +1532,11 @@ impl App {
         self.cur_lib().map(|l| &l.conn).unwrap_or(&self.reg)
     }
 
-    /// 手工标签 + 使用数（**当前库 + 内置库合并**，按名字去重）。
+    /// 手工标签 + 使用数（**所有库按名字合并**）。
     ///
-    /// 同名标签在两个库里是两条独立记录（id 空间各自一套），这里按**名字**合计数，
-    /// 颜色 / 分组以**先扫到的那个库**（也就是当前库）为准 —— 否则切库时标签颜色会跳。
+    /// 同名标签在三个库里是三条独立记录（id 空间各自一套），这里按**名字**合计数 ——
+    /// 点开标签时 `App::list` 也是按名字跨库查的，两边口径必须一致（0.5.7）。
+    /// 颜色 / 分组以**当前库**为准（`tag_sources` 把它排第一）—— 否则切库时标签颜色会跳。
     /// 规则标签（T34）的计数现场算：规则是"活"的，没有可数的关联行。
     pub fn tags(&self) -> Result<Vec<model::TagCount>, String> {
         let mut out: Vec<model::TagCount> = Vec::new();
@@ -1361,8 +1596,8 @@ impl App {
         Ok(out)
     }
 
-    /// 自动标签 + 使用数（**当前库 + 内置库合并**：自动标签是从素材列实时聚合的，
-    /// 合并后内置库那 22 张截图也会算进「png / 小图」这类计数里）
+    /// 自动标签 + 使用数（**所有库按名字合并**：自动标签是从素材列实时聚合的，
+    /// 点开某个自动标签同样跨库查，计数必须跟着列表走，不能只算当前库）。
     pub fn auto_tags(&self) -> Result<Vec<model::TagCount>, String> {
         let mut out: Vec<model::TagCount> = Vec::new();
         let mut at: HashMap<String, usize> = HashMap::new();
@@ -1383,7 +1618,8 @@ impl App {
         Ok(out)
     }
 
-    /// 标签分组（**当前库 + 内置库合并**，按分组名求和）
+    /// 标签分组（**所有库按分组名求和** —— 侧栏里的标签已经是合并视图，
+    /// 组头写的数字必须等于点开那一组能看到的张数）
     pub fn groups(&self) -> Result<Vec<model::TagGroup>, String> {
         let mut out: Vec<model::TagGroup> = Vec::new();
         let mut at: HashMap<String, usize> = HashMap::new();
@@ -1541,13 +1777,28 @@ impl App {
         Ok(merged)
     }
 
-    /// 从库里的素材上移除某标签（当前库），返回影响条数
+    /// 从**所有库**的素材上移除某标签，返回影响条数（0.5.7）。
+    ///
+    /// 侧栏的标签是按名字合并显示的，删除也必须按名字落到每个库 —— 只删当前库
+    /// 会让用户点完"从所有素材上移除"后，那一行还挂在那里（别的库那份还在）。
+    /// 一个库都没有时退回注册库（老版本升级的中间态）。
     pub fn delete_tag(&mut self, name: &str) -> Result<i64, String> {
-        let c = self.tag_conn();
-        let Some(tag_id) = reg::tag_id_by_name(c, name)? else { return Ok(0) };
-        let n = db::delete_tag_refs(c, tag_id)?;
-        c.execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![tag_id])
-            .map_err(|e| e.to_string())?;
+        if self.libs.is_empty() {
+            let c = &self.reg;
+            let Some(tag_id) = reg::tag_id_by_name(c, name)? else { return Ok(0) };
+            let n = db::delete_tag_refs(c, tag_id)?;
+            c.execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![tag_id])
+                .map_err(|e| e.to_string())?;
+            return Ok(n);
+        }
+        let mut n = 0;
+        for l in &self.libs {
+            let Some(tag_id) = reg::tag_id_by_name(&l.conn, name)? else { continue };
+            n += db::delete_tag_refs(&l.conn, tag_id)?;
+            l.conn
+                .execute("DELETE FROM tags WHERE id = ?1", rusqlite::params![tag_id])
+                .map_err(|e| e.to_string())?;
+        }
         Ok(n)
     }
 
@@ -3017,6 +3268,49 @@ impl App {
         reg::board_group_set(&self.reg, board, keys, grp)
     }
 
+    /* ------ 灵感板标注图层 ------ */
+
+    /// 一块板上的全部标注（按 z 升序 = 绘制顺序）。
+    pub fn board_ann(&self, board: &str) -> Result<Vec<reg::BoardAnnRow>, String> {
+        reg::board_ann(&self.reg, board)
+    }
+
+    /// 落一层新标注，返回 aid。`payload` 是前端自己的向量 JSON（坐标相对本层原点）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn board_ann_add(
+        &self,
+        board: &str,
+        z: i64,
+        kind: &str,
+        payload: &str,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    ) -> Result<i64, String> {
+        reg::board_ann_add(&self.reg, board, z, kind, payload, x, y, w, h)
+    }
+
+    /// 挪位置 / 换层级。payload 不动（坐标是相对本层的）。
+    pub fn board_ann_update(
+        &self,
+        board: &str,
+        aid: i64,
+        x: f64,
+        y: f64,
+        z: i64,
+    ) -> Result<usize, String> {
+        reg::board_ann_update(&self.reg, board, aid, x, y, z)
+    }
+
+    pub fn board_ann_del(&self, board: &str, aid: i64) -> Result<usize, String> {
+        reg::board_ann_del(&self.reg, board, aid)
+    }
+
+    pub fn board_ann_clear(&self, board: &str) -> Result<usize, String> {
+        reg::board_ann_clear(&self.reg, board)
+    }
+
     /* ---------------- 分组（0.4.4 起每库一份） ----------------
        分组 = 用户自己攒的「一撮素材」。以前住在注册库、成员是**全局** asset id
        （一个分组能横跨几个库，切库时纹丝不动）；现在跟着库走，成员是本库 id。
@@ -3487,6 +3781,23 @@ impl App {
             .unwrap_or_else(|e| e.into_inner())
             .insert(snap, (row.updated_at, out.clone()));
         Ok(out)
+    }
+
+    /// 快照的「记了多少条 / 现在找得回几张」（0.5.7）。
+    ///
+    /// 侧栏的快照行显示的是**记下来的条数**（条目不会因为移动硬盘没插就消失），
+    /// 而点开列表只能显示找得到的素材。两者不等时界面必须明说「有 N 张找不到」，
+    /// 否则用户只会认为"快照坏了"。换算走 `snapshot_gids` 的缓存，打开过快照时零成本。
+    pub fn snapshot_stats(&self, snap: i64) -> Result<model::SnapshotStats, String> {
+        let row = self
+            .snapshot_get(snap)?
+            .ok_or_else(|| "这个快照已经不在了".to_string())?;
+        let found = self.snapshot_gids(snap)?.len() as i64;
+        Ok(model::SnapshotStats {
+            total: row.count,
+            found,
+            missing: (row.count - found).max(0),
+        })
     }
 
     /// 合并 / 差集（P2.9）：把 `ids` 里的快照按 `mode` 合成**一份新快照**，原件一条不动。
@@ -4084,6 +4395,74 @@ mod tests {
         d
     }
 
+    /// 0.5.7：数据从 `%LOCALAPPDATA%` 搬到 `<exe>\data`，老数据要**复制**过去。
+    /// 四条硬要求：搬用户数据、不搬程序/缓存/素材库、幂等、老目录一个字节都不删。
+    #[test]
+    fn migrates_legacy_default_data_once() {
+        let d = tmp("migrate");
+        let old = d.join("old");
+        let new = d.join("install").join("data");
+        std::fs::create_dir_all(old.join("libs")).unwrap();
+        std::fs::write(old.join("ui-prefs.json"), b"{}").unwrap();
+        std::fs::write(old.join("index.db"), b"i").unwrap();
+        std::fs::write(old.join("libs").join("lib-1.db"), b"x").unwrap();
+        // 这些**不该**跟着走
+        std::fs::create_dir_all(old.join("EBWebView")).unwrap();
+        std::fs::write(old.join("EBWebView").join("big.bin"), b"x").unwrap();
+        std::fs::create_dir_all(old.join("cache").join("thumbs")).unwrap();
+        std::fs::create_dir_all(old.join("screenshots")).unwrap();
+        std::fs::write(old.join("assetmanager.exe"), b"x").unwrap();
+
+        let m = migrate_from(&new, std::slice::from_ref(&old)).unwrap().expect("有老索引就要迁");
+        assert_eq!(m.from, old);
+        assert!(new.join("index.db").is_file(), "索引要搬过来");
+        assert!(new.join("ui-prefs.json").is_file(), "界面偏好要搬过来");
+        assert!(new.join("libs").join("lib-1.db").is_file(), "老库文件要搬过来");
+        for skip in ["EBWebView", "cache", "screenshots", "assetmanager.exe"] {
+            assert!(!new.join(skip).exists(), "{skip} 不该被搬进数据目录");
+        }
+
+        // 幂等：新目录已有 index.db → 再也不搬
+        assert!(migrate_from(&new, std::slice::from_ref(&old)).unwrap().is_none());
+        // 复制不是移动：老目录必须原样留着
+        assert!(old.join("index.db").is_file(), "老数据一律不删");
+        assert!(old.join("libs").join("lib-1.db").is_file());
+
+        // 默认安装位置就是"新目录在老目录里面"（`%LOCALAPPDATA%\AssetManager\data`）：
+        // 这种也必须能搬，而且绝不能把 `data` 自己复制进自己
+        let nested_new = old.join("data");
+        migrate_from(&nested_new, std::slice::from_ref(&old)).unwrap().expect("嵌套布局也要能搬");
+        assert!(nested_new.join("index.db").is_file());
+        assert!(!nested_new.join("data").exists(), "不许自嵌套复制");
+
+        // 老目录里根本没有索引（例：只装过程序、从没启动过）→ 不搬，也不凭空建目录
+        let empty_old = d.join("empty-old");
+        std::fs::create_dir_all(&empty_old).unwrap();
+        let empty_new = d.join("empty-install").join("data");
+        assert!(migrate_from(&empty_new, std::slice::from_ref(&empty_old)).unwrap().is_none());
+        assert!(!empty_new.exists(), "没东西可搬时不该凭空建目录");
+
+        /* 用了自定义数据文件夹的用户：索引在 D 盘，老默认目录里**只有指针文件**。
+           这条最容易漏 —— 漏了就是"升级后我的自定义目录不见了、库空了"。 */
+        let ptr_old = d.join("ptr-old");
+        std::fs::create_dir_all(&ptr_old).unwrap();
+        std::fs::write(
+            ptr_old.join("data-root.json"),
+            r#"{"enabled":true,"current":"D:\\素材库数据","dirs":["D:\\素材库数据"]}"#,
+        )
+        .unwrap();
+        let ptr_new = d.join("ptr-install").join("data");
+        migrate_from(&ptr_new, std::slice::from_ref(&ptr_old))
+            .unwrap()
+            .expect("只有指针文件也要搬");
+        assert!(ptr_new.join("data-root.json").is_file(), "指针文件必须跟过去");
+        let cfg = crate::dataroot::load(&ptr_new);
+        assert!(cfg.enabled, "指针里的开关要保留");
+        assert_eq!(cfg.current.as_deref(), Some("D:\\素材库数据"), "自定义目录不能丢");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// 拆库之后**跨库合并分页**必须不重不漏 —— 这是整个 T28 里最容易出错的一块。
     #[test]
     fn merged_paging_across_libs_is_complete() {
@@ -4227,10 +4606,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 标签体系**每库一份**（0.3.9）：在 A 库打的标签不会出现在 B 库的侧栏里，
-    /// 但按标签名筛选仍然能跨库命中（名字是稳定的，id 是各库自己的）。
+    /// 标签体系**每库一份**（0.3.9）：id / 颜色 / 关联行都是各库自己的。
+    ///
+    /// 0.5.7 起**显示与筛选按名字合并**（owner 2026-11-23："标签要互通"）：
+    /// 侧栏一行、计数是各库之和；点开查所有库。删标签也按名字落到每个库
+    /// （对话框写的就是"从所有素材上移除"，只删当前库会让那一行阴魂不散）。
     #[test]
-    fn tags_follow_each_lib() {
+    fn tags_are_stored_per_lib_but_merged_for_view() {
         let d = tmp("libtag");
         let a = d.join("lib-a");
         let b = d.join("lib-b");
@@ -4242,37 +4624,40 @@ mod tests {
         let mut app = App::open(&d).unwrap();
         app.scan(&a.to_string_lossy(), |_| {}).unwrap();
         app.scan(&b.to_string_lossy(), |_| {}).unwrap();
+        app.set_current_lib(&a.to_string_lossy()).unwrap();
 
         let all: Vec<model::Asset> = app
             .list(&model::AssetQuery { recursive: true, limit: Some(10), ..Default::default() })
             .unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 1, "普通浏览只看当前库");
         let ia = all.iter().find(|a| a.name == "x.png").unwrap().id;
-        let ib = all.iter().find(|a| a.name == "w.png").unwrap().id;
+        let b_rows = {
+            let l = app.lib(b_id_for(&app, &b)).unwrap();
+            db::list_assets(&l.conn, &model::AssetQuery { limit: Some(10), ..Default::default() })
+                .unwrap()
+        };
+        let ib = gid(b_id_for(&app, &b), b_rows[0].id);
 
         // 两个库各打一次同名标签（内部各建一份，互不影响）
         app.tag_assets(&[ia], "跨库标签").unwrap();
         app.tag_assets(&[ib], "跨库标签").unwrap();
-        app.set_tag_color("跨库标签", Some("teal")).unwrap(); // 落在当前库
+        app.set_tag_color("跨库标签", Some("teal")).unwrap(); // 落在当前库 A
 
-        // ① 侧栏只显示**当前库**的标签：A 库 1 条命中
+        // ① 侧栏一行，计数是两库之和；颜色取当前库那份
         let tags = app.tags().unwrap();
         assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].count, 1, "当前库只有一个素材挂了这个标签");
+        assert_eq!(tags[0].count, 2, "同名标签跨两库合并计数");
         assert_eq!(tags[0].color.as_deref(), Some("teal"));
 
-        // ② 切到 B 库：同名标签还在，但计数是 B 库自己的，
-        //    颜色是 B 库自己那份（没设过 = None，说明确实是两套数据）
+        // ② 切到 B 库：计数仍是合并值，颜色跟当前库（B 没设过 = None）
         let root_b = b.to_string_lossy().to_string();
         assert!(app.set_current_lib(&root_b).unwrap(), "切库必须报告变化");
         let tags_b = app.tags().unwrap();
         assert_eq!(tags_b.len(), 1);
-        assert_eq!(tags_b[0].count, 1);
+        assert_eq!(tags_b[0].count, 2);
         assert_eq!(tags_b[0].color, None, "B 库的标签不该继承 A 库的颜色");
 
-        // ③ 按标签名筛选：**只命中当前库**（0.4.5，owner 2026-11-20："全部都要隔离"）。
-        //    名字稳定、id 按库换算这件事没变，变的是"不再把别的库一起列出来"——
-        //    否则切到 B 之后按同名标签筛，A 库的图还会出现在同一页里。
+        // ③ 按标签名筛选：**跨所有库合并**（0.5.7，owner 2026-11-23："互通"）
         let q = model::AssetQuery {
             recursive: true,
             tag: Some("跨库标签".into()),
@@ -4280,22 +4665,34 @@ mod tests {
             ..Default::default()
         };
         let hit = app.list(&q).unwrap();
-        assert_eq!(hit.len(), 1, "B 库只有 w.png 挂了这个标签");
-        assert_eq!(hit[0].name, "w.png", "不该混进 A 库的图");
+        assert_eq!(hit.len(), 2, "两库同名标签的素材都要出现");
+        assert_eq!(hit.len(), app.tags().unwrap()[0].count as usize, "计数与列表一致");
 
         // ④ 每素材的标签名（id 要换成全局 id）
         let per = app.tags_for(&[ia, ib]).unwrap();
         assert_eq!(per.len(), 2);
         assert_eq!(per[0].1, vec!["跨库标签".to_string()]);
 
-        // ⑤ 在 B 库删标签，A 库那条不受影响
+        // ⑤ 删标签按名字落到所有库：删完那一行才真的消失
         app.delete_tag("跨库标签").unwrap();
-        assert!(app.tags().unwrap().is_empty(), "B 库删完就空了");
-        assert!(app.set_current_lib(&a.to_string_lossy()).unwrap());
-        assert_eq!(app.tags().unwrap().len(), 1, "A 库的标签不能被 B 库的删除影响");
-        assert_eq!(app.tags_for(&[ia]).unwrap()[0].1, vec!["跨库标签".to_string()]);
+        assert!(app.tags().unwrap().is_empty(), "两库都删掉了");
+        assert!(app
+            .tags_for(&[ia])
+            .unwrap()
+            .iter()
+            .all(|(_, names)| names.is_empty()));
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn b_id_for(app: &App, root: &std::path::Path) -> i64 {
+        let want = root.to_string_lossy().to_string();
+        app.roots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.path == want)
+            .map(|r| lib_of(r.id))
+            .expect("库根该在")
     }
 
     /// 缩略图缓存每库一份（0.3.10）：生成在 `<库根>/.AssetManager/thumbs`，
@@ -5614,10 +6011,15 @@ mod tests {
             .expect("同名快照要出现在目标库");
         assert_eq!(app.snapshot_items(s.id).unwrap().len(), 1, "条目也要跟过来");
 
-        /* 源库：什么都不剩（图已经不属于它了） */
+        /* 源库：本库的标签关联已经清空。
+           注意 `tags()` 现在是**跨库合并视图**（0.5.7），它仍会显示目标库那份的计数；
+           要验证"源库不再数到这张"，得看源库自己的关联行。 */
         app.set_current_lib(&a.to_string_lossy()).unwrap();
-        let src_tags = app.tags().unwrap();
-        assert!(src_tags.iter().all(|t| t.count == 0), "源库不该再数到这张：{src_tags:?}");
+        let src_counts: Vec<i64> = {
+            let l = app.lib(a_id).unwrap();
+            db::counts_by_tag(&l.conn).unwrap().into_iter().map(|(_, n)| n).collect()
+        };
+        assert!(src_counts.iter().all(|n| *n == 0), "源库不该再有关联行：{src_counts:?}");
         let src_snaps = app.snapshot_list().unwrap();
         assert!(
             src_snaps.iter().all(|s| s.count == 0),

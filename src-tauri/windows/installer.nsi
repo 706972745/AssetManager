@@ -12,7 +12,8 @@
 ;   · GUI 安装：.onInit 把主程序解到 $PLUGINSDIR，等它跑完四屏界面，
 ;     按退出码 0（装好）/ 10（用户取消）收尾；
 ;   · GUI 卸载：un.onInit 先把主程序拷到 %TEMP%，再等它跑完三屏卸载界面；
-;   · 界面起不来（其它退出码）→ 回落到**原生 MUI 页**，本文件没有任何自绘备用页；
+;   · 界面起不来（其它退出码）→ **只弹一句人话然后非 0 退出**，不回落原生 MUI 页
+;     （回落 = 用户先看自绘界面、再冒出一个系统向导，等于"两个安装界面"）；
 ;   · /S、/P、/UPDATE 三条语义与上游模板完全同源（更新由主程序内部触发）。
 ;
 ; **一个字都没动**的东西（动了就是升级断链 / 数据被清）：
@@ -188,8 +189,8 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !endif
 
 ; 配色不再覆盖（MUI_BGCOLOR / MUI_TEXTCOLOR 已删）：
-; 路线 C 的界面由主程序画，NSIS 只剩「界面起不来时」的降级页 —— 那一面必须是
-; 系统原生的样子，否则用户会以为装了个半成品。这里刻意一张图都不配：
+; 路线 C 下这些 MUI 页在 GUI 安装里**根本不会渲染**（.onInit 末尾一定 Quit），
+; 保留它们只是照应上游模板结构 / 万一路线 C 关掉时的样子。
 ; 侧栏 / 顶栏 bmp 都已随自绘页一起删除（`sidebar.bmp`、`header.bmp`），
 ; 不再有 `sidebarImage` 这个配置项。
 
@@ -208,8 +209,8 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ;
 ; 路线 C 的欢迎屏、安装位置屏、进度屏、完成屏全部由主程序画
 ; （`assetmanager.exe --installer-ui`，见 setup.html / src/setup/main.ts）。
-; 这里的页面只在"界面起不来"时露出来 —— 所以一律用 MUI 原生页：
-; 一张自绘备用页都不留（上一轮那套白页已经被用户否掉了）。
+; 下面的 MUI 页在 GUI 安装里一行都渲染不到（.onInit 会先 Quit），
+; 留着只是照应上游模板、以及路线 C 关掉时还能正常装。
 ;
 ; 2. License Page (if defined)
 !if "${LICENSE}" != ""
@@ -259,7 +260,7 @@ Var AppStartMenuFolder
 ; 7. Installation page
 !insertmacro MUI_PAGE_INSTFILES
 
-; 8. Finish page（MUI 原生；只在界面起不来时出现）
+; 8. Finish page（MUI 原生；路线 C 的 GUI 安装里渲染不到）
 ;
 ; Don't auto jump to finish page after installation page,
 ; because the installation page has useful info that can be used debug any issues with the installer.
@@ -397,16 +398,24 @@ Function .onInit
     ExecWait '"$PLUGINSDIR\${MAINBINARYNAME}.exe" --installer-ui --setup-exe="$EXEPATH" --install-dir="$INSTDIR"' $R9
     StrCmp $R9 "0" zfm_rc_ok
     StrCmp $R9 "10" zfm_rc_cancel
-    ; 其它返回值（界面起不来 / 被杀软拦 / WebView2 缺失）：什么都不做，
-    ; 让 .onInit 正常返回 → NSIS 照常画原生 MUI 页继续装（E7/G6 的降级面）。
-    Goto zfm_rc_done
+    ; ⚠️ 其它返回值（界面起不来 / 被杀软拦 / WebView2 缺失 / 建窗失败）：
+    ;   **绝对不许回落到原生 MUI 页**。回落等于「用户先看到一个自绘界面，
+    ;   然后又冒出一个系统安装向导」—— 两个界面，用户第一反应是"我是不是装了两遍"。
+    ;   这里只报一句人话，然后以非 0 退出（update.rs 的唯一判据就是 ExitCode -eq 0，
+    ;   非 0 不会被当成"装好了"）。
+    ;   `/S` 走不到这里：上面的 ${IfNot} ${Silent} 已经把静默安装排除在外。
+    ;   ⚠️ 只用英文：本文件没有 BOM（见 hooks.nsh 的 BOM 注释），`Unicode true` 下
+    ;      非 ASCII 字面量会按 ANSI 代码页解析成乱码 —— 这条路本来就极少走到，
+    ;      一句干净的英文胜过一句乱码中文。
+    MessageBox MB_ICONSTOP|MB_OK "AssetManager Setup could not start its installer window, so nothing was installed.$\r$\n$\r$\nPlease run the installer again. If this keeps happening, check whether your antivirus blocked it."
+    SetErrorLevel 1
+    Quit
   zfm_rc_cancel:
     SetErrorLevel 10            ; 用户自己取消：不算失败，但也不是"装好了"
     Quit
   zfm_rc_ok:
     SetErrorLevel 0             ; 界面内部已经拉起 `setup.exe /S` 装完了
     Quit
-  zfm_rc_done:
   ${EndIf}
   !endif
 FunctionEnd
@@ -675,7 +684,12 @@ Function un.onInit
     !insertmacro MULTIUSER_UNINIT
   !endif
 
-  !insertmacro MUI_UNGETLANGUAGE
+  ; ↑ 上游是无条件 `MUI_UNGETLANGUAGE`（弹「选择语言」小窗）。0.5.7 起和安装侧对齐：
+  ;   `displayLanguageSelector = false` 就不弹 —— 否则卸载时用户先看到语言框、
+  ;   再看到自绘卸载界面，又是两个窗口。语言退回注册表里上次选的 / 首个语言。
+  !if "${DISPLAYLANGUAGESELECTOR}" == "true"
+    !insertmacro MUI_UNGETLANGUAGE
+  !endif
 
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
@@ -719,6 +733,9 @@ Function un.onInit
       StrCmp $R9 "10" zfm_un_rc_cancel
     ${EndIf}
     ; 界面起不来 / 用户取消：都退回原生卸载页（原页面一行都没删）
+    ; ★ 和**安装**侧刻意不对称：安装的回落已经删掉（会出现"两个安装界面"），
+    ;   卸载这边保留 —— 界面起不来（WebView2 缺失 / 被杀软拦）时，原生页是用户
+    ;   **唯一**能把软件卸掉的路。少一个界面 < 卸不掉。
     Goto zfm_un_rc_done
   zfm_un_rc_cancel:
     SetErrorLevel 10
@@ -837,8 +854,18 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
     SetShellVarContext current
+    ; 0.5.7 起数据目录在**安装目录下**（`$INSTDIR\data`：索引 / 日志 / 界面偏好 /
+    ; WebView2 用户数据），缩略图缓存在 `$INSTDIR\cache`。勾了「同时删除数据」就必须
+    ; 连它们一起删，否则用户看到的是"勾了却没删"。
+    ; 上面那次 `RMDir "$INSTDIR"` 因为 data / cache 还在而失败，这里删完再补一次。
+    ; ⚠️ `screenshots\` 是**用户的素材**（内置截图库），任何情况下都不删。
+    RMDir /r "$INSTDIR\data"
+    RMDir /r "$INSTDIR\cache"
+    RMDir "$INSTDIR"
+    ; 老版本（≤0.5.6）的两个位置：留着清一遍，免得升级后卸载留一地旧数据
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    RmDir /r "$LOCALAPPDATA\${PRODUCTNAME}\data"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

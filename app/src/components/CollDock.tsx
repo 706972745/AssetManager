@@ -10,7 +10,7 @@ import { useT } from "../lib/i18n";
  * 「分组和标签的…要和 FontManager 一模一样」）：
  *
  * - 与标签面板同一个壳（`.tag-dock` 全套类复用）：头部常驻 32 高、`order:2` 钉在底栏上方；
- * - 展开由全局 `dockHover` 单值驱动、离开延迟 200ms、110ms 高度过渡；
+ * - 展开由全局 `dockHover` 单值驱动、离开延迟 90ms、110ms 高度过渡；
  *   两块都开时各让一步（`.half` → `min(220px,30vh)`）；
  * - 行：`tag-row coll-row` —— 文件夹图标 13 + **序号** + 名称 + 行尾数字，25px 高 / 内距 0 7px；
  * - 新建 / 改名走 FontManager 的 `.collection-input`（32 高、强调色描边 + 3px 光晕）。
@@ -93,7 +93,7 @@ function CollDockImpl({
     leaveTimer.current = window.setTimeout(() => {
       leaveTimer.current = null;
       /* 拖拽期间**不清**：面板展开/收起会让指针"离开"再"回来"，而拖拽时鼠标停住
-         不产生 mousemove，这个 200ms 一到就会把刚展开的面板收回去 ——
+         不产生 mousemove，这个延迟一到就会把刚展开的面板收回去 ——
          表现就是"展开收起反复横跳、怎么也放不进去"（owner 2026-11-20）。
          拖拽结束由 App 的 clearDrag 统一清空。 */
       if (document.body.classList.contains("am-dragging")) return;

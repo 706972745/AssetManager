@@ -132,6 +132,12 @@ struct Ctx {
     /// 存起来而不是当场删，是因为引擎刚被 `TerminateProcess` 掉时目录句柄还没释放；
     /// 后台线程慢慢重试，退出前再兜一次 —— 见 `fail()`。
     rollback: Mutex<Option<PathBuf>>,
+    /// 装完后要拉起来的主程序（用户勾了「立即运行」）。
+    ///
+    /// **不能当场 spawn**：「装完了」这一刻安装界面还开着，主程序紧接着弹自己的启动页，
+    /// 用户就会同时看到两个窗口（一个安装器 + 一个软件）。所以这里只记路径，
+    /// 真正拉起放在 `RunEvent::Exit` —— 那时界面已经关了，进程也正要退。
+    launch: Mutex<Option<PathBuf>>,
 }
 
 static CTX: OnceLock<Ctx> = OnceLock::new();
@@ -193,6 +199,22 @@ pub fn dispatch() -> bool {
         }
     }
 
+    /* 同一模式只允许一个自绘界面（0.5.7）。**必须放在上面那段"搬家重启"之后**：
+       搬家时父进程马上就要退出，它要是先占了互斥体，子进程会被自己人挡回去。
+
+       为什么需要：NSIS 侧没有"安装器互斥体"（它只检查主程序在不在跑），用户连点
+       两下 setup.exe 就会有两个 `--installer-ui` 进程、两块一模一样的界面；而
+       `dispatch()` 又跑在单实例 claim **之前**（安装时那个 claim 恰恰要绕开）。
+       第二个进程按"用户取消"退出（10）—— NSIS 收到 10 就安静收场。 */
+    if !claim_setup_mutex(mode) {
+        log_line(&format!(
+            "[setup] 已有 {} 界面在跑（pid {}），本进程按取消退出",
+            if mode == Mode::Install { "安装" } else { "卸载" },
+            std::process::id()
+        ));
+        std::process::exit(10);
+    }
+
     let _ = CTX.set(Ctx {
         mode,
         lang,
@@ -203,6 +225,7 @@ pub fn dispatch() -> bool {
         child: Mutex::new(None),
         cancelled: AtomicBool::new(false),
         rollback: Mutex::new(None),
+        launch: Mutex::new(None),
     });
 
     // 别在这里用 `setup_exe.is_none()` 当"演练"的判据：卸载模式永远没有 setup_exe，
@@ -218,6 +241,50 @@ pub fn dispatch() -> bool {
 
     true
 }
+
+/// 命名互斥体：同一个安装 / 卸载界面只允许一枚（见 `dispatch` 里的调用点）。
+///
+/// 为什么用命名互斥体而不是锁文件：进程被杀、蓝屏、断电时内核会自动释放，
+/// 不会留下一个"装到一半的锁"让用户永远装不了东西。`Local\` 前缀 = 只在本登录会话内
+/// 生效，多用户同时装各自的副本互不干扰。
+#[cfg(windows)]
+fn claim_setup_mutex(mode: Mode) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attrs: *const core::ffi::c_void, owner: i32, name: *const u16) -> isize;
+        fn GetLastError() -> u32;
+    }
+
+    let name = format!(
+        "Local\\AssetManager-setup-ui-{}",
+        if mode == Mode::Install { "install" } else { "uninstall" }
+    );
+    let wide: Vec<u16> = OsStr::new(&name).encode_wide().chain(std::iter::once(0)).collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle == 0 {
+        // 建不出来（内存耗尽之类的极端情况）：宁可不挡，也不要让用户装不了
+        log_line("[setup] 建互斥体失败，跳过重复实例检查");
+        return true;
+    }
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return false;
+    }
+    // 句柄必须活到进程结束：提前 drop 等于把锁放了
+    let _ = SETUP_MUTEX.set(handle);
+    true
+}
+
+#[cfg(not(windows))]
+fn claim_setup_mutex(_mode: Mode) -> bool {
+    true
+}
+
+/// 存住互斥体句柄（见 `claim_setup_mutex`）。值本身从不读，存在就是"锁还持着"。
+static SETUP_MUTEX: OnceLock<isize> = OnceLock::new();
 
 /// 主程序被直接从安装目录拉起来当卸载界面时，把自己搬去临时目录再跑。
 fn relocate_out_of_install_dir() -> Option<PathBuf> {
@@ -366,6 +433,16 @@ pub fn run_window(mut context: tauri::Context<tauri::Wry>) {
                         let _ = rollback_new_dir(&dir, 4_000, true);
                     }
                     cleanup_webview_dir();
+                    /* 装完「立即运行」：**在这里**才拉起主程序。此时界面已经关了，
+                       用户只会看到主程序自己的启动页，不会出现"安装器 + 软件"两个窗口。
+                       `spawn_detached` 是独立进程，我们随后 exit 不影响它。 */
+                    let launch = ctx().launch.lock().ok().and_then(|mut s| s.take());
+                    if let Some(exe) = launch {
+                        match spawn_detached(&exe, &[]) {
+                            Ok(()) => log_line(&format!("[setup] 已启动主程序：{}", exe.display())),
+                            Err(e) => log_line(&format!("[setup] 启动主程序失败（不影响安装）：{e}")),
+                        }
+                    }
                     std::process::exit(code);
                 }
             });
@@ -415,9 +492,10 @@ fn setup_env() -> Env {
         .or_else(|| installed.as_ref().map(|i| i.dir.clone()))
         .unwrap_or_else(default_install_dir);
 
-    // 数据目录和安装目录**不是同一个地方**（AssetManager 的索引/缓存按 bundle id 存），
-    // 界面上必须分开写 —— 用户以为"卸载会删掉我的素材"是最容易劝退的一种误解。
-    let data_dir = resolved_data_dir();
+    // 数据目录和安装目录在 0.5.7 起是「安装目录 / data」的关系，但仍然可能被用户
+    // 指到别处（data-root.json）：界面上分开写 —— 用户以为"卸载会删掉我的素材"
+    // 是最容易劝退的一种误解。
+    let data_dir = resolved_data_dir(&default_dir);
 
     let payload = c
         .setup_exe
@@ -1060,8 +1138,9 @@ fn setup_uninstall(
         let mut uargs: Vec<&str> = vec!["/S"];
         // 模板里默认不删数据（`$DeleteAppDataCheckboxState` 只有 /PURGE 会置 1）。
         // `/PURGE=1` 是我们在 un.onInit 里留的口子，语义只有"勾了那个框"：
-        // 删的是 %APPDATA%/%LOCALAPPDATA% 下按 bundle id 存的索引、缓存与设置，
-        // **素材文件本身在用户自己的素材库里，一个都不动**。
+        // 删的是**数据目录**（0.5.7 起默认 = `<安装目录>\data`：索引 / 回收站 / 设置 /
+        // WebView2 用户数据；老版本在 %APPDATA%/%LOCALAPPDATA% 下按 bundle id 存的
+        // 那两处也一并清）。**素材文件本身在用户自己的素材库里，一个都不动**。
         if purge_data {
             uargs.push("/PURGE=1");
         }
@@ -1284,8 +1363,18 @@ fn setup_window(app: tauri::AppHandle, action: String, launch: Option<bool>) {
                 let dir = env.install_dir.unwrap_or(env.default_dir);
                 let exe = PathBuf::from(dir).join(MAIN_EXE);
                 if exe.exists() {
-                    let _ = spawn_detached(&exe, &[]);
-                    log_line(&format!("[setup] 安装完成后启动主程序：{}", exe.display()));
+                    /* 只记下来，不在这里 spawn：这一刻安装界面还开着，
+                       立刻拉起主程序会出现"两个窗口"（见 Ctx::launch 的注释）。
+                       真正的 spawn 在 `RunEvent::Exit`。 */
+                    if let Ok(mut slot) = ctx().launch.lock() {
+                        *slot = Some(exe.clone());
+                    }
+                    log_line(&format!(
+                        "[setup] 安装完成，界面退出后启动主程序：{}",
+                        exe.display()
+                    ));
+                } else {
+                    log_line(&format!("[setup] 勾了「立即运行」但找不到 {}", exe.display()));
                 }
             }
             let code = ctx().exit_code.load(Ordering::SeqCst);
@@ -1821,21 +1910,29 @@ fn default_install_dir() -> PathBuf {
     }
 }
 
-/// Tauri 的应用数据目录（索引 / 缩略图缓存 / 设置）：`%LOCALAPPDATA%\<identifier>`。
-fn default_data_dir() -> PathBuf {
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        PathBuf::from(local).join(BUNDLE_ID)
-    } else {
-        PathBuf::from(".")
+/// 默认数据目录：0.5.7 起是**安装目录下的 `data\`**（主程序用的是同一个规则）；
+/// 升级安装时新目录还没生成，而老数据还在 `%LOCALAPPDATA%\<identifier>` ——
+/// 那时按老的显示，用户看到的是"我现在数据在哪"，首次启动后主程序会把它们复制过来。
+fn default_data_dir(install_dir: &Path) -> PathBuf {
+    let beside = install_dir.join("data");
+    if beside.is_dir() {
+        return beside;
     }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let old = PathBuf::from(local).join(BUNDLE_ID);
+        if old.join("index.db").is_file() {
+            return old;
+        }
+    }
+    beside
 }
 
 /// 用户设过「数据文件夹」就显示真地址（`data-root.json`），否则默认目录。
 ///
 /// 只读那个 JSON，**不**走 `am_core::dataroot::resolve`（它会写一个探针文件）；
 /// setup 模式连一个字节的用户数据都不该碰。
-fn resolved_data_dir() -> PathBuf {
-    let default = default_data_dir();
+fn resolved_data_dir(install_dir: &Path) -> PathBuf {
+    let default = default_data_dir(install_dir);
     let cfg = am_core::dataroot::load(&default);
     if !cfg.enabled {
         return default;

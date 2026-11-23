@@ -865,7 +865,9 @@ pub fn install_setup(app: &AppHandle, path: &str, want_sha: &str, want_version: 
     log_line("[update] ps1 spawned, exiting in 1.2s");
     // 留一点时间让前端把「正在安装」画完；脚本会等本进程真的退出
     std::thread::sleep(Duration::from_millis(1200));
-    app.exit(0);
+    // 统一走退出出口（0.5.7）：托盘图标 / 隐藏窗口一起收，只留 app.exit(0) 时
+    // 通知区偶尔会残留一个空图标。这里**不问用户** —— 更新已经点了确认。
+    crate::exit_app(&app);
     Ok(())
 }
 

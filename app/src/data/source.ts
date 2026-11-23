@@ -2,6 +2,7 @@ import type {
   Asset,
   AutoRule,
   AutoTag,
+  BoardAnnRow,
   BoardItemDto,
   BoardNote,
   BoardPastedItem,
@@ -30,6 +31,7 @@ import type {
   SnapshotAdd,
   SnapshotResolve,
   SnapshotRow,
+  SnapshotStats,
   SnapshotZip,
   Source,
   TagCount,
@@ -216,6 +218,7 @@ export const tauriSource: Source = {
 
   /* ---------------- 快照（0.12.0） ---------------- */
   snapshotList: () => invoke!<SnapshotRow[]>("am_snapshot_list"),
+  snapshotStats: (id) => invoke!<SnapshotStats>("am_snapshot_stats", { snapshot: id }),
   snapshotCreate: (name) => invoke!<number>("am_snapshot_create", { name }),
   snapshotRename: (id, name) => invoke!<void>("am_snapshot_rename", { id, name }),
   snapshotDelete: (id) => invoke!<void>("am_snapshot_delete", { id }),
@@ -302,6 +305,59 @@ export const tauriSource: Source = {
 };
 
 export const source: Source = invoke ? tauriSource : mockSource;
+
+/* ---------------- 灵感板标注（一笔 = 一层） ----------------
+   没有塞进 `Source` / `mockSource`：这两个是全站共用的大接口，标注只是灵感板
+   自己的小接口，塞进去等于逼 mock 也实现一遍。这里直接走同一个 `invoke`，
+   浏览器预览（没有 Tauri 运行时）用一个内存 Map 顶着 —— 预览本来就没有注册库，
+   刷新即丢是预期行为。 */
+const annMem = new Map<string, BoardAnnRow[]>();
+let annMemId = 0;
+
+export const boardAnnApi = {
+  list: (board: string): Promise<BoardAnnRow[]> =>
+    invoke
+      ? invoke<BoardAnnRow[]>("am_board_ann", { board })
+      : Promise.resolve([...(annMem.get(board) ?? [])]),
+
+  add: (
+    board: string,
+    z: number,
+    kind: string,
+    payload: string,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ): Promise<number> => {
+    if (invoke) return invoke<number>("am_board_ann_add", { board, z, kind, payload, x, y, w, h });
+    const aid = ++annMemId;
+    annMem.set(board, [...(annMem.get(board) ?? []), { aid, z, kind, payload, x, y, w, h }]);
+    return Promise.resolve(aid);
+  },
+
+  update: (board: string, aid: number, x: number, y: number, z: number): Promise<number> => {
+    if (invoke) return invoke<number>("am_board_ann_update", { board, aid, x, y, z });
+    const rows = annMem.get(board) ?? [];
+    annMem.set(board, rows.map((r) => (r.aid === aid ? { ...r, x, y, z } : r)));
+    return Promise.resolve(rows.some((r) => r.aid === aid) ? 1 : 0);
+  },
+
+  del: (board: string, aid: number): Promise<number> => {
+    if (invoke) return invoke<number>("am_board_ann_del", { board, aid });
+    const rows = annMem.get(board) ?? [];
+    annMem.set(board, rows.filter((r) => r.aid !== aid));
+    return Promise.resolve(rows.length - (annMem.get(board)?.length ?? 0));
+  },
+
+  clear: (board: string): Promise<number> => {
+    if (invoke) return invoke<number>("am_board_ann_clear", { board });
+    const n = annMem.get(board)?.length ?? 0;
+    annMem.set(board, []);
+    return Promise.resolve(n);
+  },
+};
+
 
 /**
  * 订阅后端事件（扫描进度 / 目录变更 / 拖拽结束）。

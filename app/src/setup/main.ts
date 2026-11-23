@@ -101,7 +101,7 @@ const zh = {
 
   "i0.lead1": "你的全部素材，一处管理，永不离开你的电脑。",
   "i0.lead2":
-    "程序装进下面这个目录；素材库、索引与设置放在单独的数据目录里 —— 卸载时不会被删除。",
+    "程序装进下面这个目录；索引、设置与缓存在它的 data 文件夹里（设置里可以改到别的盘）—— 卸载时默认保留，不会被删除。",
   "i0.sub": "预计 5 秒 · 无需管理员权限",
   "i0.metaDir": "安装位置",
   "i0.metaNeeded": "需要空间",
@@ -112,7 +112,8 @@ const zh = {
   "i0.next": "继续",
 
   "i1.title": "选择安装位置",
-  "i1.lead": "换一个盘，只影响程序文件；素材库与数据目录不在这里，也不会被搬动。",
+  "i1.lead":
+    "换一个盘，程序文件和默认的数据文件夹（安装目录下的 data）会一起装过去；素材库本身不在这里，不会被搬动。",
   "i1.browse": "浏览…",
   "i1.metaNeeded": "需要空间",
   "i1.metaAfter": "完成后",
@@ -217,7 +218,7 @@ const en: Record<Key, string> = {
 
   "i0.lead1": "All your assets in one place — they never leave your computer.",
   "i0.lead2":
-    "The program goes into the folder below. Your library, index and settings live in a separate data folder — they are not deleted when you uninstall.",
+    "The program goes into the folder below; the index, settings and cache live in its data folder (you can move them to another drive in Settings). They are kept by default when you uninstall.",
   "i0.sub": "About 5 seconds · no admin rights needed",
   "i0.metaDir": "Install location",
   "i0.metaNeeded": "Space needed",
@@ -229,7 +230,7 @@ const en: Record<Key, string> = {
 
   "i1.title": "Choose install location",
   "i1.lead":
-    "Picking another drive only moves the program files. Your library and data folder stay where they are.",
+    "Picking another drive moves the program files and the default data folder (data, next to the app). Your library itself stays where it is.",
   "i1.browse": "Browse…",
   "i1.metaNeeded": "Space needed",
   "i1.metaAfter": "After install",
@@ -509,7 +510,8 @@ async function boot() {
     targetDir = env.defaultDir;
     $("#mInstallDir").textContent = tail(env.defaultDir, 2);
     $("#mNeeded").textContent = t("env.needed", { size: mb(env.payloadBytes) });
-    // 数据目录**不在**安装目录里：写真实路径的尾部，别写成"<安装目录>\data"骗人
+    // 写**真实生效**路径的尾部：升级安装时数据还在老位置（%LOCALAPPDATA% 那边），
+    // 新装时才是安装目录下的 data\。别在这里自己拼路径，env.dataDir 才是事实。
     $("#mDataDir").textContent = tail(env.dataDir, 2);
     $("#iSub0").textContent = env.elevated ? t("env.elevated") : t("i0.sub");
     $("#iStatus0").textContent = env.installedVersion

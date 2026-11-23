@@ -104,6 +104,11 @@ pub struct AssetQuery {
     /// **后端填的**：这一页只许出现这些库内 id（分组筛选时由 `App::list` 拆出来）。
     /// 前端不送。
     pub ids: Option<Vec<i64>>,
+    /// **后端填的**：这次查询允许扫哪些库（库号，不是库内 id）。
+    /// 前端不送 —— 它只知道"我点的是分组 X / 标签 Y"，不知道该查哪个库。
+    /// 没给时按老口径只查当前库（0.4.5 的隔离），给空数组 = 明确查不到任何库
+    /// （分组所属库被移除时就是这种状态，不能退化成"列全库"）。
+    pub libs: Option<Vec<i64>>,
 }
 
 /// 标签 + 使用数（侧栏每次刷新拉一次）。
@@ -182,6 +187,18 @@ pub struct SimilarPair {
     pub b: i64,
     /// 汉明距离（0 = 几乎一模一样）
     pub dist: u32,
+}
+
+/// 快照对账概况（侧栏/空态用，0.5.7）。
+///
+/// `total` 是**记下来的条数**（条目不会因为找不到而消失）；`found` 是现在能按哈希
+/// 找回几张。两者不等时界面必须说清"有几张找不到"，不能拿 total 冒充列表长度。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotStats {
+    pub total: i64,
+    pub found: i64,
+    pub missing: i64,
 }
 
 /// 引用行（T26）

@@ -9,7 +9,10 @@
  * 改成全局单值之后：指针一进某个面板就把 active 立刻切过去，另一个面板**同一帧**开始
  * 收起，与这个的展开动画并行，净位移只剩「展开高度 − 收起高度」，指针仍落在面板内。
  *
- * 离开时由面板自己延迟 200ms 再清（给「从面板移到相邻面板」留出路）。
+ * 离开时由面板自己延迟 90ms 再清（给「从面板移到相邻面板」留出路）。
+ * 这个延迟只是**离开的尾巴**，不是交接机制：交接靠"进另一个面板立刻把 active 切过去"，
+ * 所以即使缩到 90ms，指针在分组/标签之间来回也不会抖 —— 走的那一块在切走的那一帧
+ * 就已经不是 active 了（清空时还会再确认一次"还是不是我"）。
  */
 import { useSyncExternalStore } from "react";
 
@@ -30,7 +33,12 @@ export function getActiveDock() {
   return active;
 }
 
-export const DOCK_LEAVE_DELAY = 200;
+/**
+ * 离开面板后多久清空 active（owner 2026-11-23：200ms 看着"挂在屏幕上"）。
+ * 80–100ms 足够跨过两块面板之间那 4px 间隙：
+ * 正常移速（≥50px/s）走完 4px ≤80ms，再慢就是"人停在缝里"，本来就该收起。
+ */
+export const DOCK_LEAVE_DELAY = 90;
 
 export function useDockHover(): string | null {
   return useSyncExternalStore(

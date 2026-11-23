@@ -15,7 +15,7 @@ import { useT } from "../lib/i18n";
  * - 头部（`🏷 标签`）**永远可见、位置不动**，靠 `order: 2` 钉在底栏上方 —— 它才敢当点击目标；
  * - 悬停展开由 `lib/dockHover.ts` 的全局单值驱动（**不用 CSS `:hover`**：分组与标签上下相邻，
  *   各自 :hover 时从标签移到分组会让标签先收起、把分组推走，指针脱靶，分组永远展不开）；
- *   离开延迟 200ms；
+ *   离开延迟 90ms；
  * - 展开/收起 110ms 高度过渡；单开 `min(300px,42vh)`，两块都开时各让一步 `min(220px,30vh)`；
  * - 行：25px 高 / 内距 0 7px / 圆角 5 / gap 7 / 11px 500（与侧栏 32px 的导航行**刻意不同**）；
  * - 选中 = `--ui-hover` 浅灰底 + 2px 竖线（配过色的标签竖线与行名跟标签色走）；
@@ -104,7 +104,7 @@ function TagDockImpl({
     leaveTimer.current = window.setTimeout(() => {
       leaveTimer.current = null;
       /* 拖拽期间**不清**：面板展开/收起会让指针"离开"再"回来"，而拖拽时鼠标停住
-         不产生 mousemove，这个 200ms 一到就会把刚展开的面板收回去 ——
+         不产生 mousemove，这个延迟一到就会把刚展开的面板收回去 ——
          表现就是"展开收起反复横跳、怎么也放不进去"（owner 2026-11-20）。
          拖拽结束由 App 的 clearDrag 统一清空。 */
       if (document.body.classList.contains("am-dragging")) return;

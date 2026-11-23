@@ -178,6 +178,25 @@ extern "system" {
     fn SetTimer(h: Hwnd, id: usize, ms: u32, f: usize) -> usize;
     fn KillTimer(h: Hwnd, id: usize) -> i32;
     fn ScreenToClient(h: Hwnd, p: *mut PointI) -> i32;
+    /* ---- 窗口识别（0.5.x 取色器 + 窗口截图） ----
+       覆盖层是整屏 topmost 的，`WindowFromPoint` 只会命中它自己；
+       所以拿到本进程的句柄之后还要沿 z 序往下走（见 `pick_window_hwnd`）。 */
+    fn WindowFromPoint(p: PointI) -> Hwnd;
+    fn GetAncestor(h: Hwnd, flags: u32) -> Hwnd;
+    fn GetTopWindow(h: Hwnd) -> Hwnd;
+    fn GetWindow(h: Hwnd, cmd: u32) -> Hwnd;
+    fn IsWindowVisible(h: Hwnd) -> i32;
+    fn IsIconic(h: Hwnd) -> i32;
+    fn GetWindowThreadProcessId(h: Hwnd, pid: *mut u32) -> u32;
+    fn GetClassNameW(h: Hwnd, buf: *mut u16, n: i32) -> i32;
+    fn GetCursorPos(p: *mut PointI) -> i32;
+}
+
+/* DWM 真实边框（含阴影外的可见边界）。`GetWindowRect` 会把不可见的 8px
+   resize 边框也算进去，截出来四周多一圈桌面 —— 取色/截窗都该用 DWM 这一版。 */
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmGetWindowAttribute(h: Hwnd, attr: u32, out: *mut c_void, size: u32) -> i32;
 }
 
 extern "system" {
@@ -512,7 +531,7 @@ fn tool_label(t: Tool) -> (&'static str, &'static str) {
         Tool::Block => ("色块遮挡", "G"),
         Tool::Sticker => ("贴纸", "S"),
         Tool::Check => ("勾选图章", "X"),
-        Tool::Cross => ("叉号图章", "C"),
+        Tool::Cross => ("叉号图章", "Z"),
         Tool::Image => ("插入图片", "I"),
     }
 }
@@ -715,6 +734,17 @@ struct Ctx {
     keys: [i32; 4],
     editor: Hwnd,
     editing: Option<(i32, i32)>,
+    /* ---- 取色器 / 窗口识别（0.5.x） ---- */
+    /// 光标在客户区里的位置（物理像素）。放大镜和窗口识别都读它。
+    mouse: Option<(i32, i32)>,
+    /// 色值格式：false = `R, G, B`，true = `#RRGGBB`（Shift 切换）
+    hex: bool,
+    /// 光标下待识别的顶层窗口矩形（虚拟桌面坐标，已 clamp）
+    win_hit: Option<[i32; 4]>,
+    /// 按下瞬间抓到的窗口矩形 —— 抬起时位移小于 `CLICK_SLOP` 就用它当选区
+    press_win: Option<[i32; 4]>,
+    /// 本次按下后是否真的拖动过（区分「单击截窗」与「自由框选」）
+    moved: bool,
     // 交付结果
     done: Option<(String, Vec<u8>, [f64; 4])>,
 }
@@ -1212,6 +1242,98 @@ fn norm4(a: (i32, i32), b: (i32, i32)) -> [i32; 4] {
 fn inside(r: [i32; 4], x: i32, y: i32) -> bool {
     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
 }
+
+/* ---------------- 取色器（放大镜） / 窗口识别 ----------------
+
+   两块功能都只改原生层：`Snip.tsx` 是 A 方案失败时的回落，真机走不到，
+   而且那边另一路在改，保持原样。
+
+   坐标口径沿用本文件：**虚拟桌面物理像素**（客户区原点 = 虚拟桌面左上角）。
+   放大镜取样直接读 `Ctx::base`（冻结帧的原始 BGRA），不读 `bits` ——
+   后者已经压暗、画过标注，取到的颜色是"用户看到的假颜色"。
+
+   8 倍、184×136 是照 `Snip.tsx` 的 `LOUPE` 口径（184/8=23、136/8=17，
+   都是奇数，光标那一像素正好落在面板正中心，描边框才对得齐）。 */
+
+const LOUPE_ZOOM: i32 = 8;
+/// 放大镜显示区（取样 23×17 个源像素）
+const LOUPE_W: i32 = 184;
+const LOUPE_H: i32 = 136;
+/// 面板内距（放大镜不能顶到圆角上）
+const LOUPE_PAD: i32 = 6;
+/// 放大镜下方：坐标 + 色块/色值
+const LOUPE_INFO_H: i32 = 56;
+/// 最底部两行提示（按 C / 按 Shift）
+const LOUPE_HINT_H: i32 = 36;
+/// 面板离屏幕边的硬留白
+const LOUPE_MARGIN: i32 = 4;
+/// 面板与光标的间距（放右下方；贴边时翻到左上方）
+const LOUPE_OFFSET: i32 = 18;
+/// 「单击」与「拖动」的分界（物理像素）。手抖几个像素仍然算单击。
+const CLICK_SLOP: i32 = 5;
+
+fn loupe_panel_w() -> i32 {
+    LOUPE_W + LOUPE_PAD * 2
+}
+
+fn loupe_panel_h() -> i32 {
+    LOUPE_PAD + LOUPE_H + LOUPE_INFO_H + LOUPE_HINT_H
+}
+
+/// `R, G, B`（owner 截图里的默认格式，如 `250, 250, 248`）
+fn fmt_rgb(r: u8, g: u8, b: u8) -> String {
+    format!("{r}, {g}, {b}")
+}
+
+/// `#RRGGBB`（Shift 切换后的格式，大写更符合设计稿）
+fn fmt_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// 把一个矩形夹进 `w × h` 的桌面；完全落在外面返回 None。
+/// 窗口矩形来自 DWM，最大化窗口的边框会伸到屏幕外（常见 -8px），必须夹。
+fn clamp_rect(r: [i32; 4], w: i32, h: i32) -> Option<[i32; 4]> {
+    let x0 = r[0].max(0);
+    let y0 = r[1].max(0);
+    let x1 = (r[0] + r[2]).min(w);
+    let y1 = (r[1] + r[3]).min(h);
+    if x1 - x0 <= 0 || y1 - y0 <= 0 {
+        None
+    } else {
+        Some([x0, y0, x1 - x0, y1 - y0])
+    }
+}
+
+/// 单轴夹紧；屏幕比面板还小时（罕见）退化成居中偏 0，绝不 panic。
+fn clamp_panel(v: i32, size: i32, total: i32) -> i32 {
+    let hi = total - size - LOUPE_MARGIN;
+    if hi < LOUPE_MARGIN {
+        ((total - size) / 2).max(0)
+    } else {
+        v.clamp(LOUPE_MARGIN, hi)
+    }
+}
+
+/// 放大镜面板矩形：默认在光标右下，右边/下边放不下就翻到左/上，最后夹进屏幕。
+/// 纯函数，单测直接覆盖四角与翻转。
+fn loupe_at(cx: i32, cy: i32, sw: i32, sh: i32) -> [i32; 4] {
+    let (pw, ph) = (loupe_panel_w(), loupe_panel_h());
+    let mut x = cx + LOUPE_OFFSET;
+    let mut y = cy + LOUPE_OFFSET;
+    if x + pw > sw - LOUPE_MARGIN {
+        x = cx - LOUPE_OFFSET - pw;
+    }
+    if y + ph > sh - LOUPE_MARGIN {
+        y = cy - LOUPE_OFFSET - ph;
+    }
+    [
+        clamp_panel(x, pw, sw),
+        clamp_panel(y, ph, sh),
+        pw,
+        ph,
+    ]
+}
+
 
 fn lo(v: isize) -> i32 {
     (v & 0xFFFF) as i16 as i32
@@ -3142,6 +3264,9 @@ impl Ctx {
             self.draw_op(op);
         }
         self.preview = pv;
+        /* 光标下窗口的强调色框：画在标注之上、选区框之下 —— 用户先看见"要截谁"，
+           再看见选区把手。按下鼠标时 `win_hit` 已被清掉，所以不会有残影。 */
+        self.draw_win_hit();
         self.draw_sel();
         /* 没选区就不画工具栏（owner 2026-11-18 当面提的）：按下 F1 的瞬间它飘在屏幕底部
            中间，既挡住内容、又没有任何可用动作。框选之后才贴到选区下方。 */
@@ -3153,6 +3278,9 @@ impl Ctx {
             self.draw_bar_tip();
         }
         self.draw_keys();
+        /* 放大镜永远画在最上层：它跟着光标走，压在工具栏/提示面板上也比被挡住有用
+           （光标真正落到这些面板上时 `loupe_rect` 会返回 None）。 */
+        self.draw_loupe();
         self.present();
     }
 
@@ -3300,11 +3428,359 @@ impl Ctx {
         }
         None
     }
+
+    /* ---------------- 取色器 / 窗口识别 ---------------- */
+
+    /// 读**冻结帧原始像素**（BGRA，`base`）。越界夹到边缘 —— 屏幕边上的取色不该返回黑。
+    ///
+    /// 绝不能读 `bits`：那是"压暗 + 标注"之后的合成结果，取色器会取到被压暗的颜色，
+    /// 用户拿这串 RGB 去用（owner 的取色器就是给设计/开发对色值用的）会直接错。
+    fn sample_base(&self, x: i32, y: i32) -> (u8, u8, u8) {
+        if self.w <= 0 || self.h <= 0 {
+            return (0, 0, 0);
+        }
+        let xx = x.clamp(0, self.w - 1);
+        let yy = y.clamp(0, self.h - 1);
+        let o = ((yy as usize) * (self.w as usize) + xx as usize) * 4;
+        if o + 3 >= self.base.len() {
+            return (0, 0, 0);
+        }
+        let p = unsafe { self.base.as_ptr().add(o) };
+        unsafe { (*p.add(2), *p.add(1), *p) }
+    }
+
+    /// 这个点是不是压在要交互的面板上（放大镜要收起，别挡住按钮）。
+    fn over_ui(&self, x: i32, y: i32) -> bool {
+        (self.has_sel() && inside(self.bar, x, y))
+            || (self.tray[2] > 0 && inside(self.tray, x, y))
+            || (self.menu_open && inside(self.menu, x, y))
+            || (self.palette && inside(self.sw, x, y))
+            || inside(self.keys, x, y)
+    }
+
+    /// 放大镜面板矩形；None = 这一帧不显示。
+    fn loupe_rect(&self) -> Option<[i32; 4]> {
+        if self.editor != 0 {
+            return None;
+        }
+        let (x, y) = self.mouse?;
+        if x < 0 || y < 0 || x >= self.w || y >= self.h {
+            return None;
+        }
+        if self.over_ui(x, y) {
+            return None;
+        }
+        Some(loupe_at(x, y, self.w, self.h))
+    }
+
+    /// 光标下窗口矩形（客户区坐标，已 clamp 进虚拟桌面）。
+    fn window_rect_at(&self, x: i32, y: i32) -> Option<[i32; 4]> {
+        let h = unsafe { pick_window_hwnd(self.ox + x, self.oy + y) };
+        if h == 0 {
+            return None;
+        }
+        let r = unsafe { win_screen_rect(h) }?;
+        clamp_rect(
+            [r[0] - self.ox, r[1] - self.oy, r[2], r[3]],
+            self.w,
+            self.h,
+        )
+    }
+
+    /// 这一刻该高亮的窗口。拖拽中 / 压在已有选区上 / 压在面板上都不识别：
+    /// 前者是"按下即清高亮"，后两者是"正在改选区，别再闪一个框"。
+    fn hover_window(&self, x: i32, y: i32) -> Option<[i32; 4]> {
+        if self.editor != 0 || self.over_ui(x, y) {
+            return None;
+        }
+        if self.areas.iter().any(|a| inside(*a, x, y)) {
+            return None;
+        }
+        let r = self.window_rect_at(x, y)?;
+        if Some(r) == self.sel {
+            return None;
+        }
+        Some(r)
+    }
+
+    /// 取色器当前色值文本；放大镜没显示时 None（C 键退回「叉号图章」快捷键）。
+    fn color_text(&self) -> Option<String> {
+        let (x, y) = self.mouse?;
+        self.loupe_rect()?;
+        let (r, g, b) = self.sample_base(x, y);
+        Some(if self.hex {
+            fmt_hex(r, g, b)
+        } else {
+            fmt_rgb(r, g, b)
+        })
+    }
+
+    /// 光标下窗口的 2px 强调色框。画在标注之上、选区框之下。
+    fn draw_win_hit(&mut self) {
+        let Some(r) = self.win_hit else { return };
+        if r[2] <= 2 || r[3] <= 2 {
+            return;
+        }
+        let c = self.pal.accent;
+        self.pframe(r[0], r[1], r[0] + r[2], r[1] + r[3], 2, c);
+    }
+
+    /// 放大镜面板：取样网格 + 中心像素描边 + 坐标 + 色块/色值 + 两行提示。
+    ///
+    /// 取样走 `base`（冻结帧），所以压暗、窗口高亮、标注都不会污染取到的颜色。
+    fn draw_loupe(&mut self) {
+        let Some([px, py, pw, ph]) = self.loupe_rect() else {
+            return;
+        };
+        let (mx, my) = match self.mouse {
+            Some(v) => v,
+            None => return,
+        };
+        let (cr, cg, cb) = self.sample_base(mx, my);
+
+        /* 先把 23×17 个源像素抄进临时缓冲：draw 要 &mut self，不能一边借 base 一边 put。 */
+        let sw = LOUPE_W / LOUPE_ZOOM;
+        let sh = LOUPE_H / LOUPE_ZOOM;
+        let sx0 = mx - sw / 2;
+        let sy0 = my - sh / 2;
+        let mut tile = Vec::with_capacity((sw * sh * 4) as usize);
+        for yy in 0..sh {
+            for xx in 0..sw {
+                let (r, g, b) = self.sample_base(sx0 + xx, sy0 + yy);
+                tile.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+
+        self.bar_plate(px, py, pw, ph, 10);
+        let gx = px + LOUPE_PAD;
+        let gy = py + LOUPE_PAD;
+        for yy in 0..LOUPE_H {
+            let row = (yy / LOUPE_ZOOM) as usize * sw as usize;
+            for xx in 0..LOUPE_W {
+                let o = (row + (xx / LOUPE_ZOOM) as usize) * 4;
+                self.put(gx + xx, gy + yy, tile[o], tile[o + 1], tile[o + 2], 1.0);
+            }
+        }
+        /* 像素网格：每 8px 一条极淡的线。没有它 8 倍放大看着像一张模糊的图，
+           用户分不清"取的是不是这一个像素"。 */
+        for i in 1..sw {
+            self.pline_a(
+                gx + i * LOUPE_ZOOM,
+                gy,
+                gx + i * LOUPE_ZOOM,
+                gy + LOUPE_H - 1,
+                1,
+                0x000000,
+                0.10,
+            );
+        }
+        for j in 1..sh {
+            self.pline_a(
+                gx,
+                gy + j * LOUPE_ZOOM,
+                gx + LOUPE_W - 1,
+                gy + j * LOUPE_ZOOM,
+                1,
+                0x000000,
+                0.10,
+            );
+        }
+        self.pframe(gx - 1, gy - 1, gx + LOUPE_W, gy + LOUPE_H, 1, self.pal.edge);
+
+        /* 中心像素描边：白色外框 + 黑色内框，中心那一像素本身要露出来（8×8）。
+           参考 `Snip.tsx` 的 9px 取样框，但那里是白色实心，会盖住取到的颜色。 */
+        let ccx = gx + LOUPE_W / 2;
+        let ccy = gy + LOUPE_H / 2;
+        self.pframe(ccx - 5, ccy - 5, ccx + 5, ccy + 5, 1, 0xFFFFFF);
+        self.pframe(ccx - 4, ccy - 4, ccx + 4, ccy + 4, 1, 0x000000);
+
+        /* 信息区：坐标 / 色块 + 色值 / 两行提示 */
+        let iy = gy + LOUPE_H;
+        let hy = iy + LOUPE_INFO_H;
+        let coord = format!("({}, {})", self.ox + mx, self.oy + my);
+        let value = if self.hex {
+            fmt_hex(cr, cg, cb)
+        } else {
+            fmt_rgb(cr, cg, cb)
+        };
+        self.pfill(gx + 2, iy + 26, gx + 22, iy + 46, ((cr as u32) << 16) | ((cg as u32) << 8) | cb as u32);
+        /* 边框用图标墨色：色块可能是纯黑，深色面板上用 `edge_out` 会整块看不见 */
+        self.pframe(gx + 2, iy + 26, gx + 22, iy + 46, 1, self.pal.icon);
+
+        let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+        unsafe {
+            let f_small = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+            let f_val = CreateFontW(-15, 0, 0, 0, FW_BOLD, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+            let oldf = SelectObject(self.mem, f_small);
+            SetBkMode(self.mem, TRANSPARENT);
+
+            SelectObject(self.mem, f_small);
+            SetTextColor(self.mem, rgb(self.pal.text2));
+            let u: Vec<u16> = coord.encode_utf16().collect();
+            let mut rc = RectPos {
+                left: gx + 2,
+                top: iy + 4,
+                right: gx + LOUPE_W,
+                bottom: iy + 24,
+            };
+            DrawTextW(self.mem, u.as_ptr(), u.len() as i32, &mut rc, DT_SINGLELINE);
+
+            SelectObject(self.mem, f_val);
+            SetTextColor(self.mem, rgb(self.pal.icon));
+            let u2: Vec<u16> = value.encode_utf16().collect();
+            let mut rc2 = RectPos {
+                left: gx + 30,
+                top: iy + 26,
+                right: gx + LOUPE_W,
+                bottom: iy + 48,
+            };
+            DrawTextW(
+                self.mem,
+                u2.as_ptr(),
+                u2.len() as i32,
+                &mut rc2,
+                DT_SINGLELINE | DT_VCENTER,
+            );
+
+            SelectObject(self.mem, f_small);
+            SetTextColor(self.mem, rgb(self.pal.text3));
+            for (k, s) in ["按 C 复制颜色值", "按 Shift 切换 RGB / HEX"].iter().enumerate() {
+                let u3: Vec<u16> = s.encode_utf16().collect();
+                let mut rc3 = RectPos {
+                    left: gx + 2,
+                    top: hy + 1 + k as i32 * 16,
+                    right: gx + LOUPE_W,
+                    bottom: hy + 19 + k as i32 * 16,
+                };
+                DrawTextW(self.mem, u3.as_ptr(), u3.len() as i32, &mut rc3, DT_SINGLELINE);
+            }
+            SelectObject(self.mem, oldf);
+            DeleteObject(f_val);
+            DeleteObject(f_small);
+        }
+        /* GDI 写字只写 RGB，不写 alpha；不固化的话真机上字会透底（见 `solidify`）。 */
+        self.solidify([px, py, pw, ph]);
+    }
 }
 
 extern "system" {
     fn GetWindowRect(h: Hwnd, r: *mut RectPos) -> i32;
 }
+
+/* ---------------- 窗口识别（光标下的顶层窗口） ----------------
+
+   为什么不能只调一次 `WindowFromPoint`：覆盖层本身是整屏 topmost 的 layered 窗口，
+   那个 API 永远返回它自己。本进程的窗口要**排除**（截图覆盖层 / 贴图窗 / 托盘菜单 /
+   启动页），于是拿到本进程句柄后必须沿 z 序往下找第一个"别人的、可见的、含这个点"的窗口。
+
+   `GetAncestor(GA_ROOT)` 把子控件（按钮、输入框）归到顶层窗；窗口矩形优先用
+   `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` —— 它不含 Win10+ 那圈
+   不可见的 8px 缩放边框，截出来才是用户眼睛看到的窗口。 */
+
+const GA_ROOT: u32 = 2;
+const GW_HWNDNEXT: u32 = 2;
+const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+/// 虚拟桌面 / UWP 挂起窗口会被 DWM "cloaked"：`IsWindowVisible` 仍为真，但用户看不见。
+const DWMWA_CLOAKED: u32 = 14;
+
+/// 桌面壳不算"可截的窗口"：桌面本身是整屏矩形，单击空白处会变成"截整屏"。
+fn is_desktop_shell(h: Hwnd) -> bool {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 {
+        return false;
+    }
+    let name = String::from_utf16_lossy(&buf[..n as usize]);
+    matches!(name.as_str(), "Progman" | "WorkerW")
+}
+
+/// 这个窗口能不能被"识别"：别人家的、可见、没最小化、有尺寸、包含测试点。
+unsafe fn window_ok(h: Hwnd, sx: i32, sy: i32) -> bool {
+    if h == 0 {
+        return false;
+    }
+    /* 排除本进程：覆盖层、贴图窗、托盘菜单、启动页全是我们的 */
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(h, &mut pid);
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    if IsWindowVisible(h) == 0 || IsIconic(h) != 0 {
+        return false;
+    }
+    /* 别的虚拟桌面上的窗口：`IsWindowVisible` 仍是真，但截到的是看不见的窗口。
+       DWM 查询失败时**不**排除（老系统没有这个属性），只有明确 cloaked 才跳过。 */
+    let mut cloaked = 0u32;
+    if DwmGetWindowAttribute(
+        h,
+        DWMWA_CLOAKED,
+        &mut cloaked as *mut u32 as *mut c_void,
+        std::mem::size_of::<u32>() as u32,
+    ) == 0
+        && cloaked != 0
+    {
+        return false;
+    }
+    let mut r = RectPos::default();
+    if GetWindowRect(h, &mut r) == 0 {
+        return false;
+    }
+    if r.right <= r.left || r.bottom <= r.top {
+        return false;
+    }
+    if sx < r.left || sx >= r.right || sy < r.top || sy >= r.bottom {
+        return false;
+    }
+    !is_desktop_shell(h)
+}
+
+/// 窗口的真实可视矩形（屏幕坐标）。DWM 失败 / 返回空矩形时回落 `GetWindowRect`。
+unsafe fn win_screen_rect(h: Hwnd) -> Option<[i32; 4]> {
+    let mut r = RectPos::default();
+    let mut ok = DwmGetWindowAttribute(
+        h,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut r as *mut RectPos as *mut c_void,
+        std::mem::size_of::<RectPos>() as u32,
+    ) == 0;
+    if !ok || r.right <= r.left || r.bottom <= r.top {
+        r = RectPos::default();
+        ok = GetWindowRect(h, &mut r) != 0;
+    }
+    if !ok || r.right <= r.left || r.bottom <= r.top {
+        return None;
+    }
+    Some([r.left, r.top, r.right - r.left, r.bottom - r.top])
+}
+
+/// 屏幕坐标 (sx, sy) 下最顶层的"别人的窗口"句柄。
+unsafe fn pick_window_hwnd(sx: i32, sy: i32) -> Hwnd {
+    let hit = WindowFromPoint(PointI { x: sx, y: sy });
+    if hit != 0 {
+        let root = GetAncestor(hit, GA_ROOT);
+        if window_ok(root, sx, sy) {
+            return root;
+        }
+    }
+    /* 覆盖层自己挡住了 WindowFromPoint → 从 z 序顶端往下走。
+       `GetTopWindow(0)` 正常返回最顶层窗口；万一为空，就从覆盖层自己的下一个兄弟开始
+       （覆盖层此时已经在 z 序里，两者等价）。
+       4096 上限只是防 API 异常时死循环，正常桌面几十个窗口就结束。 */
+    let mut h = GetTopWindow(0);
+    if h == 0 {
+        h = GetWindow(CUR.load(std::sync::atomic::Ordering::SeqCst), GW_HWNDNEXT);
+    }
+    let mut guard = 0;
+    while h != 0 && guard < 4096 {
+        if window_ok(h, sx, sy) {
+            return h;
+        }
+        h = GetWindow(h, GW_HWNDNEXT);
+        guard += 1;
+    }
+    0
+}
+
 
 /* ---------------- 文本输入 ----------------
    用真正的 EDIT 子控件，不用自己收 WM_CHAR —— 只有 EDIT 才吃输入法（中文标注要用）。 */
@@ -3516,6 +3992,17 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
     let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
     let Some(c) = g.as_mut() else { return };
     if down {
+        /* 光标位置 + 手势状态：放大镜跟手、单击截窗都靠这两个字段。
+           `win_hit` 在按下的这一刻就清掉（owner 要求：进入拖拽/按下后不许留高亮残影）。 */
+        c.mouse = Some((x, y));
+        c.moved = false;
+        c.press_win = None;
+        let had_hit = c.win_hit.take().is_some();
+        /* 有些按下分支会直接 return（拖把手 / 移动选区），不在这里补一帧的话，
+           屏幕上会留着"按下前的窗口高亮框"，看起来像卡住。 */
+        if had_hit {
+            c.render();
+        }
         /* 正在输入文字时，点屏幕任何地方 = 提交。
            以前只有 Enter 能提交，用户习惯性去点下一个工具，文字就卡在编辑框里。 */
         if c.editor != 0 {
@@ -3725,23 +4212,41 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
             c.sel0 = [x, y, 0, 0];
             c.drag = Drag::NewSel;
             c.anchor = (x, y);
+            c.moved = false;
+            /* 单击截窗的候选：按下时抓一次。抬起前若发生拖动（`moved`），这个候选作废。 */
+            c.press_win = c.hover_window(x, y);
         }
     } else {
         /* 收尾要按**手势类型**分派（0.4.24 多框选）：以前 NewSel 与 Draw 共用一个分支、
            再回头看当前工具，于是"非选择工具在框外拖出的新块"会被当成画一笔。
            现在 NewSel 永远只改选区，Draw 永远只落一条标注。 */
+        c.mouse = Some((x, y));
         let d = c.drag;
         match d {
             Drag::NewSel => {
-                let r = norm4(c.anchor, (x, y));
-                /* 太小的框不算一块：把活动块还给集合里最后一块，
-                   工具栏和 HUD 不会因为"手抖点了一下"整条消失。 */
-                c.sel = if r[2] > 3 && r[3] > 3 {
-                    Some(r)
+                /* 单击（位移 < CLICK_SLOP）= 截"光标下那个窗口"：直接拿它的矩形当选区，
+                   选区一出来工具栏就跟着出现，后面和自由框选完全同一条链路。
+                   拖动超过阈值 = 老行为，自由框选。 */
+                if !c.moved {
+                    match c.press_win.take() {
+                        Some(wr) => {
+                            c.sel = Some(wr);
+                            c.sel0 = wr;
+                        }
+                        None => c.sel = c.areas.last().copied(),
+                    }
+                    c.preview = None;
                 } else {
-                    c.areas.last().copied()
-                };
-                c.preview = None;
+                    let r = norm4(c.anchor, (x, y));
+                    /* 太小的框不算一块：把活动块还给集合里最后一块，
+                       工具栏和 HUD 不会因为"手抖点了一下"整条消失。 */
+                    c.sel = if r[2] > 3 && r[3] > 3 {
+                        Some(r)
+                    } else {
+                        c.areas.last().copied()
+                    };
+                    c.preview = None;
+                }
             }
             Drag::Draw => {
                 let a = c.anchor;
@@ -3819,8 +4324,13 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
 unsafe fn on_move(x: i32, y: i32) {
     let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
     let Some(c) = g.as_mut() else { return };
+    /* 放大镜跟着光标走：每移动一像素都要重画一帧。用 `painted` 收口，
+       保证一次 mousemove 最多 render 一次（整屏重绘 4~8ms，翻倍会掉帧）。 */
+    c.mouse = Some((x, y));
+    let mut painted = false;
     if c.update_bar_hover(x, y) {
         c.render();
+        painted = true;
     }
     /* 「复制 ▾」下拉的悬停：它挂在条下方，坐标不落在 bar/tray 上，所以单独记
        `menu_hover`（`menu_hit` 里已经排掉了 1px 缝隙，和点击用的是同一套几何）。 */
@@ -3828,11 +4338,28 @@ unsafe fn on_move(x: i32, y: i32) {
     if mh != c.menu_hover {
         c.menu_hover = mh;
         c.render();
+        painted = true;
+    }
+    /* 窗口识别：拖拽中一律不识别（按下那一刻已经清空高亮，避免"上一个悬停框"残留）。 */
+    let wh = if matches!(c.drag, Drag::None) {
+        c.hover_window(x, y)
+    } else {
+        None
+    };
+    if wh != c.win_hit {
+        c.win_hit = wh;
+        c.render();
+        painted = true;
     }
     match c.drag {
         Drag::NewSel => {
+            /* 拖出阈值就标记为"真拖拽"，抬起时不再当成单击截窗 */
+            if (x - c.anchor.0).abs() > CLICK_SLOP || (y - c.anchor.1).abs() > CLICK_SLOP {
+                c.moved = true;
+            }
             c.sel = Some(norm4(c.anchor, (x, y)));
             c.render();
+            painted = true;
         }
         Drag::Draw => {
             c.cur = (x, y);
@@ -3852,6 +4379,7 @@ unsafe fn on_move(x: i32, y: i32) {
                 c.preview = c.make_op(c.anchor, (x, y), &pts);
             }
             c.render();
+            painted = true;
         }
         Drag::MoveSel | Drag::Resize(_) => {
             // 复用 up 里的逻辑：这里直接算
@@ -3893,9 +4421,14 @@ unsafe fn on_move(x: i32, y: i32) {
             if r[2] > 6 && r[3] > 6 {
                 c.sel = Some(r);
                 c.render();
+                painted = true;
             }
         }
         _ => {}
+    }
+    /* 没走过任何需要重绘的分支：仍然要重画 —— 否则放大镜不跟手 */
+    if !painted {
+        c.render();
     }
     /* 悬停状态机有截止时间就挂 20ms 计时器；到点由 WM_TIMER 落地 */
     if c.hover_due.is_some() {
@@ -4000,6 +4533,14 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                 let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(c) = g.as_mut() {
                     match w as u32 {
+                        /* Shift：RGB ↔ HEX。长按会连发 WM_KEYDOWN（lparam bit30=1），
+                           只认第一次，否则文本会疯狂来回跳。 */
+                        0x10 => {
+                            if (l as usize & 0x4000_0000) == 0 {
+                                c.hex = !c.hex;
+                                c.render();
+                            }
+                        }
                         0x1B => {
                             /* 先关浮层，再谈退出：托盘/调色板开着时 Esc 只收浮层 */
                             if c.palette || c.open.is_some() || c.hover_due.is_some() || c.menu_open {
@@ -4048,6 +4589,15 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         0x53 if ctrl && shift => deliver_to(c, "saveas"),
                         0x53 if ctrl => deliver_to(c, "save"),
                         0x43 if ctrl => deliver_to(c, "copy"),
+                        /* 取色器：C = 复制当前色值（owner 给的界面稿上就写着
+                           「按 C 复制颜色值」）。**必须排在 Ctrl+C 之后**，否则会把
+                           "复制截图"截胡（0.4.19 的坑）。
+                           叉号图章的字母键让给取色（原 C → Z），两条都留在工具栏提示里。 */
+                        0x43 if !ctrl => {
+                            if let Some(text) = c.color_text() {
+                                let _ = am_core::clipimg::set_text(&text);
+                            }
+                        }
                         /* Ctrl+P：菜单里写着「贴到桌面 Ctrl+P」，但这颗键**从来没人接**
                            （0.4.24 实测：菜单能点、Ctrl+P 按了没反应）。用户报的
                            "快捷键贴图用不了"里有一半就是它。必须放在 `0x50 if !ctrl`
@@ -4072,7 +4622,9 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         0x47 if !ctrl => c.pick_tool(Tool::Block),
                         0x53 if !ctrl => c.pick_tool(Tool::Sticker),
                         0x58 if !ctrl => c.pick_tool(Tool::Check),
-                        0x43 if !ctrl => c.pick_tool(Tool::Cross),
+                        /* 叉号图章的字母键：C 让给取色器的"复制色值"（owner 2026-11-23），
+                           这里换到 Z，工具栏上的键位提示同步改过。 */
+                        0x5A if !ctrl => c.pick_tool(Tool::Cross),
                         0x49 if !ctrl => c.pick_tool(Tool::Image),
                         // 方向键：微调选区；Shift+方向键改大小（网页版同手感）
                         0x25 | 0x26 | 0x27 | 0x28 => {
@@ -4226,7 +4778,7 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
 
         {
             let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
-            *g = Some(Box::new(Ctx {
+            let mut c = Box::new(Ctx {
                 w,
                 h,
                 ox: shot.x,
@@ -4270,8 +4822,25 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
                 keys: [0; 4],
                 editor: 0,
                 editing: None,
+                mouse: None,
+                hex: false,
+                win_hit: None,
+                press_win: None,
+                moved: false,
                 done: None,
-            }));
+            });
+            /* 第一帧就把放大镜摆在光标旁边：不能等第一次 WM_MOUSEMOVE ——
+               用户按下 F1 后手不动的话，屏幕上会什么都没有。 */
+            let mut pt = PointI { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) != 0 {
+                let mx = pt.x - shot.x;
+                let my = pt.y - shot.y;
+                if mx >= 0 && my >= 0 && mx < w && my < h {
+                    c.mouse = Some((mx, my));
+                    c.win_hit = c.hover_window(mx, my);
+                }
+            }
+            *g = Some(c);
             if let Some(c) = g.as_mut() {
                 c.render();
             }
@@ -4432,6 +5001,12 @@ mod bar_preview {
             keys: [0; 4],
             editor: 0,
             editing: None,
+            /* 取色器 / 窗口识别（0.5.x）：离屏测试没有光标，默认不显示放大镜。 */
+            mouse: None,
+            hex: false,
+            win_hit: None,
+            press_win: None,
+            moved: false,
             done: None,
             /* 工具栏 v3 新增的三个字段（分裂按钮的下拉）：测试用的 Ctx 也得给初值，
                否则 `cargo test` 直接编不过 —— 0.4.23 加字段时漏了这一处，
@@ -4935,6 +5510,43 @@ mod bar_preview {
             DeleteObject(bmp);
         }
     }
+
+    /// 取色必须取**冻结帧**（`base`），不能取压暗后的 `bits` / `dim`；BGRA 通道顺序也要对。
+    /// 这条盯的是"取到的颜色等于用户眼睛看到的颜色"——压暗层一旦被误读，色值会整体偏暗。
+    #[test]
+    fn loupe_reads_frozen_frame_bgra() {
+        unsafe {
+            let (mut c, bmp) = mk_ctx(40, 30, Palette::dark());
+            for p in c.base.chunks_exact_mut(4) {
+                p[0] = 10; // B
+                p[1] = 20; // G
+                p[2] = 250; // R
+                p[3] = 255;
+            }
+            /* 合成缓冲压成纯黑：只要 `sample_base` 误读 `bits`/`dim`，这里立刻红 */
+            let px = std::slice::from_raw_parts_mut(c.bits, (c.w * c.h * 4) as usize);
+            for p in px.chunks_exact_mut(4) {
+                p[0] = 0;
+                p[1] = 0;
+                p[2] = 0;
+                p[3] = 255;
+            }
+            for p in c.dim.chunks_exact_mut(4) {
+                p[0] = 0;
+                p[1] = 0;
+                p[2] = 0;
+                p[3] = 255;
+            }
+            assert_eq!(c.sample_base(10, 10), (250, 20, 10), "BGRA 通道顺序错了");
+            assert_eq!(
+                c.sample_base(-99, -99),
+                (250, 20, 10),
+                "越界要夹到边缘，不能返回黑"
+            );
+            DeleteDC(c.mem);
+            DeleteObject(bmp);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4986,5 +5598,80 @@ mod stack_tests {
         let src = buf(4, 4);
         assert!(stack_rows(&src, 4, 4, &[]).is_none());
         assert!(stack_rows(&src, 4, 4, &[[0, 0, 0, 5]]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod pick_tests {
+    /*! 取色器 / 窗口识别的纯逻辑单测（0.5.x）。
+
+        为什么只测这几块：真窗口、真光标、真 DPI 在 CI/沙箱里都没有，
+        `WindowFromPoint` / `DwmGetWindowAttribute` 只能装机手测。
+        但"面板会不会出屏""窗口矩形夹不夹得住""色值格式对不对"全是纯算术，
+        改一个边界条件就能在这里立刻发现。 */
+
+    use super::*;
+
+    /// 面板默认在光标右下；靠右/靠下时翻到左/上，且始终完整留在屏幕里。
+    #[test]
+    fn loupe_flips_and_stays_on_screen() {
+        let (pw, ph) = (loupe_panel_w(), loupe_panel_h());
+        let (sw, sh) = (1920, 1080);
+
+        /* 右下角：必须翻到左上方 */
+        let r = loupe_at(1900, 1000, sw, sh);
+        assert_eq!((r[2], r[3]), (pw, ph));
+        assert!(r[0] + pw <= sw, "贴右边时面板出屏：{r:?}");
+        assert!(r[1] + ph <= sh, "贴下边时面板出屏：{r:?}");
+        assert!(r[0] < 1900, "贴右边应该翻到光标左侧：{r:?}");
+        assert!(r[1] < 1000, "贴下边应该翻到光标上方：{r:?}");
+
+        /* 四角 + 中心：一个都不许出屏 */
+        for (cx, cy) in [
+            (0, 0),
+            (sw - 1, 0),
+            (0, sh - 1),
+            (sw - 1, sh - 1),
+            (sw / 2, sh / 2),
+        ] {
+            let r = loupe_at(cx, cy, sw, sh);
+            assert!(
+                r[0] >= 0 && r[1] >= 0 && r[0] + pw <= sw && r[1] + ph <= sh,
+                "光标 ({cx},{cy}) 处面板出屏：{r:?}"
+            );
+        }
+    }
+
+    /// 屏幕比面板还小（极端窗口/远程桌面）：不能 panic，也不能返回负数。
+    #[test]
+    fn loupe_survives_tiny_screen() {
+        let r = loupe_at(10, 10, 120, 90);
+        assert!(r[0] >= 0 && r[1] >= 0, "小屏夹紧不应出现负坐标：{r:?}");
+    }
+
+    /// 窗口矩形要 clamp 到虚拟桌面：DWM 最大化窗口的边框常见负坐标。
+    #[test]
+    fn window_rect_clamps_to_desktop() {
+        assert_eq!(clamp_rect([-10, -10, 100, 100], 1920, 1080), Some([0, 0, 90, 90]));
+        assert_eq!(
+            clamp_rect([1900, 1070, 100, 100], 1920, 1080),
+            Some([1900, 1070, 20, 10])
+        );
+        /* 整块在屏幕外 / 零尺寸：没有可截的东西 */
+        assert_eq!(clamp_rect([2000, 2000, 50, 50], 1920, 1080), None);
+        assert_eq!(clamp_rect([10, 10, 0, 50], 1920, 1080), None);
+    }
+
+    /// 色值格式：默认 `R, G, B`，Shift 后 `#RRGGBB`；0 / 255 两个边界都要对。
+    #[test]
+    fn formats_rgb_and_hex_at_bounds() {
+        assert_eq!(fmt_rgb(0, 0, 0), "0, 0, 0");
+        assert_eq!(fmt_rgb(255, 255, 255), "255, 255, 255");
+        assert_eq!(fmt_rgb(250, 250, 248), "250, 250, 248");
+
+        assert_eq!(fmt_hex(0, 0, 0), "#000000");
+        assert_eq!(fmt_hex(255, 255, 255), "#FFFFFF");
+        /* 单个数字必须补零：10 / 171 / 255 → 0A AB FF */
+        assert_eq!(fmt_hex(10, 171, 255), "#0AABFF");
     }
 }

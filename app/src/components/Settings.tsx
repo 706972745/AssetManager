@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { HotkeyField } from "./HotkeyField";
-import { loadHotkeys, saveHotkeys, type HotkeySet } from "../lib/hotkeys";
+import { hotkeyBindings, loadHotkeys, saveHotkeys, type HotkeySet } from "../lib/hotkeys";
 import { fmtSize, type Prefs, type Source, type WarmProgress } from "../types";
 import { Icon } from "./ui";
 import { DataFolderCard } from "./DataFolderCard";
@@ -173,17 +173,24 @@ export function Settings({
     };
   }, [open, activePath, source]);
 
-  /* 「关闭到托盘 / 启动时最小化 / 缩放」三项必须同步给后端：
-     这两件都发生在 webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs）。 */
+  /* 「关闭到托盘 / 启动时最小化 / 缩放 / 回收站保留天数」必须同步给后端：
+     这些都发生在 webview 起来之前，后端读不到 localStorage（见 main.rs 的 UiPrefs）。 */
   useEffect(() => {
     void source
       .uiPrefsSet({
         closeToTray: draft.closeToTray,
         startMinimized: draft.startMinimized,
         uiScale: draft.uiScale,
+        trashRetentionDays: draft.trashRetentionDays,
       })
       .catch(() => {});
-  }, [draft.closeToTray, draft.startMinimized, draft.uiScale, source]);
+  }, [
+    draft.closeToTray,
+    draft.startMinimized,
+    draft.uiScale,
+    draft.trashRetentionDays,
+    source,
+  ]);
 
   const [q, setQ] = useState("");
   const [stat, setStat] = useState<CacheStat | null>(null);
@@ -195,7 +202,7 @@ export function Settings({
   const [refSum, setRefSum] = useState<[number, number] | null>(null);
   /* 每个库一个 DB 文件（T28）：用户要能看见"一个库一个文件" */
   const [libFiles, setLibFiles] = useState<[string, string, number][]>([]);
-  /* 系统级快捷键（F1/F3）：改动立刻注册，注册失败的组合如实回显 */
+  /* 系统级快捷键（F1/F3/Alt+F3 组合/Shift+F3 交替）：改动立刻注册，注册失败的组合如实回显 */
   const [hotkeys, setHotkeys] = useState<HotkeySet>(() => loadHotkeys());
   /* 多库导出（ZIP / 用户数据）先弹窗选一个库：绝不把几个库攒成一份
      （owner 2026-11-20）。null = 没在选择中；run 是选定之后要做的那件事。 */
@@ -203,18 +210,14 @@ export function Settings({
     null
   );
 
-  /** 改一个系统快捷键：存起来 → 立刻重新注册三个 → 失败的单独说 */
+  /** 改一个系统快捷键：存起来 → 立刻重新注册整套 → 失败的单独说 */
   const applyHotkey = useCallback(
     async (which: keyof HotkeySet, accel: string) => {
       const next = { ...hotkeys, [which]: accel };
       setHotkeys(next);
       saveHotkeys(next);
       try {
-        const failed = await source.hotkeysSet([
-          [next.snip, "snip"],
-          [next.clip, "clip_peek"],
-          [next.toggle, "peek_toggle"],
-        ]);
+        const failed = await source.hotkeysSet(hotkeyBindings(next));
         if (failed.length) {
           onToast(t("settings.toast.hotkeysTaken", { keys: failed.join(t("app.common.list_sep")) }), true);
         } else {
@@ -786,6 +789,35 @@ export function Settings({
               </div>
             ),
           },
+          /* 0.5.7：软件自己的回收站留多少天。`0` = 永不自动清理。
+             清理只在启动时后台跑一次（见 main.rs 的启动线程），不是定时器 ——
+             素材管理器常驻几天不动，定时器往往一次也不触发，反而更不可预期。 */
+          {
+            id: "trash-retention",
+            label: t("settings.trashRetention"),
+            hint: t("settings.trashRetentionHint"),
+            kw: t("settings.kw.trashRetention"),
+            node: (
+              <div className="set-num">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={draft.trashRetentionDays}
+                  onChange={(e) => {
+                    /* 空输入框不能当 0：用户全选删除准备重打时要保持原值，
+                       否则一中间态就把「自动清理」悄悄关掉了 */
+                    if (e.target.value === "") return;
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v >= 0) {
+                      patch({ trashRetentionDays: Math.round(v) });
+                    }
+                  }}
+                />
+                <span className="set-unit">{t("settings.trashRetentionUnit")}</span>
+              </div>
+            ),
+          },
           {
             id: "cache-clear",
             label: t("settings.cacheClear"),
@@ -1031,6 +1063,32 @@ export function Settings({
               <HotkeyField
                 value={hotkeys.toggle}
                 onChange={(v) => void applyHotkey("toggle", v)}
+              />
+            ),
+          },
+          /* 0.5.7：Alt+F3 归「一起开关」，Shift+F3 归「交替」；
+             老的「只控制贴图」默认不绑键，留在上一行给需要的人自己配。 */
+          {
+            id: "hk-together",
+            label: t("shortcuts.hkTogether"),
+            hint: t("shortcuts.hkTogetherHint"),
+            kw: t("settings.kw.hkTogether"),
+            node: (
+              <HotkeyField
+                value={hotkeys.together}
+                onChange={(v) => void applyHotkey("together", v)}
+              />
+            ),
+          },
+          {
+            id: "hk-swap",
+            label: t("shortcuts.hkSwap"),
+            hint: t("shortcuts.hkSwapHint"),
+            kw: t("settings.kw.hkSwap"),
+            node: (
+              <HotkeyField
+                value={hotkeys.swap}
+                onChange={(v) => void applyHotkey("swap", v)}
               />
             ),
           },
