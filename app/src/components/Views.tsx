@@ -623,6 +623,9 @@ const Tile = memo(function Tile({
       ref={rootRef}
       className={`tile ${selected ? "sel" : ""} ${loadedSrc ? "loaded" : ""}`}
       data-asset-id={a.id}
+      /* 只有能滚的长图才认领 Shift+滚轮：`momentumScroll` 是 window capture，
+         看到这个标记就不接管，否则列表会跟着一起滚（0.5.9 的 bug）。 */
+      data-shift-wheel={scrollable ? "" : undefined}
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h, transform: "translateZ(0)" }}
       onClick={(e) => onPick(a, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
       onDoubleClick={(e) => {

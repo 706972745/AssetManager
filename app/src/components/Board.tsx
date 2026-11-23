@@ -2403,6 +2403,37 @@ export function Board() {
   /** 工具条上那个读数：线宽还是字号，看当前工具 */
   const annValue = annTexty ? annFont : annWeight;
 
+  /* 粗细/字号支持滚轮（owner 2026-11-23，和截图工具条同一手感）。
+     必须原生非 passive 挂：React 的 onWheel 在 WebView2 上是 passive，`preventDefault`
+     无效 —— 而且这里不只要吞掉滚动，还得 `stopPropagation`，否则板子的滚轮缩放会跟着动。
+     触控板会连发很小的 delta，累计 ≥40 才走一档，和截图那边同一个阈值。 */
+  const weightRef = useRef<HTMLDivElement | null>(null);
+  const annStepRef = useRef(annStepW);
+  annStepRef.current = annStepW;
+  useEffect(() => {
+    const el = weightRef.current;
+    if (!el || !annOpen) return;
+    let acc = 0;
+    let timer = 0;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      acc += e.deltaY;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        acc = 0;
+      }, 220);
+      if (Math.abs(acc) < 40) return;
+      annStepRef.current(acc < 0 ? 1 : -1, e.shiftKey);
+      acc = 0;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      window.clearTimeout(timer);
+    };
+  }, [annOpen]);
+
   return (
     <div
       ref={rootRef}
@@ -3030,7 +3061,7 @@ export function Board() {
           </div>
 
           {/* 粗细（文字 / 序号工具下是字号）*/}
-          <div className="board-ann-weight" title={tr("board.ann.weight")}>
+          <div className="board-ann-weight" ref={weightRef} title={tr("board.ann.weight")}>
             <button className="board-ann-step" onClick={() => annStepW(-1, false)}>
               <Minus size={11} strokeWidth={2} />
             </button>

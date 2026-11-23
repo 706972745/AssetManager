@@ -119,11 +119,11 @@ function TagDockImpl({
     [],
   );
 
-  /** 有标签正在筛时面板保持展开（不改用户的固定开关） */
-  const selectedHold = activeTag !== null;
-  const open = pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold;
-  /** 「已固定」的显示口径：手动固定的，或被选中项撑开的 */
-  const showingPinned = pinned || selectedHold;
+  /* 0.5.11（owner）：不再有"自动固定" —— 正在筛某个标签也不再撑开面板；
+     展开只来自悬停 / 拖拽 hold / 面板内聚焦，常驻只能靠用户点「固定」。 */
+  const open = pinned || activeDock === DOCK_ID || !!hold || focusHold;
+  /** 「已固定」只认手动：以前把"选中项撑开"也算成已固定，开关看着是开的，点了没反应 */
+  const showingPinned = pinned;
   /** 两块同时开 → 各让一步 */
   const half = open && dockOpen.collections;
 
@@ -157,12 +157,6 @@ function TagDockImpl({
   }, [open]);
 
   const togglePin = () => {
-    // 面板是被「选中的标签」撑开时，点头部的意思是收起它 —— 先取消筛选，
-    // 否则点了没反应（pinned 本来是 false，切了也看不出变化）。
-    if (selectedHold && !pinned) {
-      onPickTag(null);
-      return;
-    }
     setPinned(!pinned);
   };
 

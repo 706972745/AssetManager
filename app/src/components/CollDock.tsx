@@ -108,11 +108,12 @@ function CollDockImpl({
     [],
   );
 
-  /** 看某个分组时面板保持展开（不改用户的固定开关） */
-  const selectedHold = activeId !== null;
-  const open =
-    pinned || selectedHold || activeDock === DOCK_ID || !!hold || focusHold || adding || renaming !== null;
-  const showingPinned = pinned || selectedHold;
+  /* 0.5.11（owner）：**没有任何"自动固定"** —— 选中的分组不再把面板撑开，
+     展开只来自三件"手上正在做的事"：悬停（activeDock）、拖拽/菜单 hold、面板内聚焦；
+     常驻只看用户自己点的「固定」。以前 `selectedHold` 会让面板在选中项存在时一直开着，
+     鼠标走了也收不回去，看起来就像"自动固定"。 */
+  const open = pinned || activeDock === DOCK_ID || !!hold || focusHold || adding || renaming !== null;
+  const showingPinned = pinned;
   const half = open && dockOpen.tags;
 
   useEffect(() => {
@@ -136,12 +137,7 @@ function CollDockImpl({
   }, [renaming]);
 
   const togglePin = () => {
-    if (selectedHold && !pinned) {
-      onPick(null);
-      return;
-    }
-    const next = !pinned;
-    setPinned(next);
+    setPinned(!pinned);
   };
 
   const commitCreate = () => {

@@ -436,6 +436,12 @@ export function installMomentumScroll(): () => void {
   const onWheel = (e: WheelEvent) => {
     // Ctrl / ⌘ + 滚轮 = 调预览字号（另一条链路），Alt + 滚轮 也别碰
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    /* Shift + 滚轮 = 组件自己的手势，必须**在这里**让路。
+       为什么非让不可：本监听是 window 的 capture 阶段，先于组件自己的 wheel 监听执行；
+       对方再 `preventDefault()` 也追不回来 —— 列表已经按我们的 `push()` 滚走了
+       （0.5.9 的"长图上 Shift+滚轮，主列表跟着滚"就是这么来的）。
+       认领方式：组件在最外层元素上打 `data-shift-wheel`（见 `Views.tsx` 的长图缩略图）。 */
+    if (e.shiftKey && e.target instanceof Element && e.target.closest("[data-shift-wheel]")) return;
     // 横向为主（跑马灯 / 横向列表）交回原生
     if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
     if (!inertiaAllowed(document.documentElement.dataset.motion, !!reduceQuery?.matches)) return;
