@@ -554,31 +554,50 @@ fn am_scan_start(app: AppHandle, path: String, state: State<AppState>) -> Result
 
     std::thread::spawn(move || {
         let mut failed: Option<String> = None;
+        let mut done: Option<ScanStats> = None;
         match open_app(&data_dir) {
             Ok(mut a) => {
                 match a.scan_cancelable(&path, &cancel, |p| {
                     let _ = app.emit("scan://progress", p);
                 }) {
-                    Ok(s) => {
-                        let mut msg = format!(
-                            "{} 个目录 · {} 个文件 · {} 张图有尺寸 · {:.1} 秒",
-                            s.dirs, s.files, s.with_dims, s.elapsed_ms as f64 / 1000.0
-                        );
-                        if s.skipped > 0 {
-                            msg.push_str(&format!(" · 跳过 {} 个外部素材库目录", s.skipped));
-                        }
-                        let _ = app.emit("scan://done", ScanDone { ok: true, message: msg, stats: s });
-                    }
+                    Ok(s) => done = Some(s),
                     Err(e) => failed = Some(e),
                 }
             }
             Err(e) => failed = Some(e),
         }
-        if let Some(e) = failed {
-            let _ = app.emit(
-                "scan://done",
-                ScanDone { ok: false, message: e, stats: ScanStats::default() },
-            );
+
+        /* 扫描用的是**自己的连接**（见上面注释），所以新库只写进了注册库 index.db；
+           界面这个常驻实例的 `App.libs` 还是扫描前那份内存快照，`roots()` / `tree()`
+           全从它读 —— 不同步，用户看到的就是「加了库，左侧面板 0/3、列表里没有它、
+           这个库的图片一张都不出来」（2026-11-23 owner 报的正是这个）。
+           必须在 `scan://done` **之前**同步：前端一收到 done 就会重拉侧栏。 */
+        if let Some(st) = app.try_state::<AppState>() {
+            let mut a = lock(&st);
+            a.reload_libs();
+            if let Ok(bs) = builtin_roots_of(&a) {
+                a.set_builtin_roots(bs);
+            }
+        }
+
+        match (done, failed) {
+            (Some(s), _) => {
+                let mut msg = format!(
+                    "{} 个目录 · {} 个文件 · {} 张图有尺寸 · {:.1} 秒",
+                    s.dirs, s.files, s.with_dims, s.elapsed_ms as f64 / 1000.0
+                );
+                if s.skipped > 0 {
+                    msg.push_str(&format!(" · 跳过 {} 个外部素材库目录", s.skipped));
+                }
+                let _ = app.emit("scan://done", ScanDone { ok: true, message: msg, stats: s });
+            }
+            (None, Some(e)) => {
+                let _ = app.emit(
+                    "scan://done",
+                    ScanDone { ok: false, message: e, stats: ScanStats::default() },
+                );
+            }
+            (None, None) => {}
         }
         scan_ctl().busy.store(false, Ordering::SeqCst);
     });
