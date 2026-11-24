@@ -6,12 +6,15 @@
   /* 3px 紫色外阴影（0.6.2）：和贴图窗 / 灵感板同一套做法。
      `box-shadow` 画在边框盒**外**，而窗口本身没有像素 —— 所以外壳必须先往里缩 3px，
      阴影才落在窗口内这圈边距里；不缩的话整圈阴影都在窗口外，被裁得一个像素都看不见
-     （贴图窗当初就踩过这个坑）。窗口是 `transparent(true) + shadow(false)`，没有系统黑投影。 */
-  margin: 3px;
-  height: calc(100% - 6px);
+     （贴图窗当初就踩过这个坑）。窗口是 `transparent(true) + shadow(false)`，没有系统黑投影。
+
+     内缩必须用 `position:absolute + inset`，**不能用 margin**：`#root` 不是 BFC，
+     首个子元素的 margin-top 会和它折叠到 body 上 —— 结果是左右下各缩 3px、顶边贴死窗口，
+     看起来"只有顶部没有阴影"（owner 2026-11-24 报的就是这个）。 */
+  position: absolute;
+  inset: 3px;
   display: flex;
   flex-direction: column;
-  position: relative;
   background: var(--canvas);
   /* 窗口自己（tauri transparent:true / shadow:false）不画任何东西，
      圆角 + 1px 外描边全在这里：四角是透明的，桌面从 --qb-radius 的缺口透出来。
@@ -20,7 +23,7 @@
   border-radius: var(--qb-radius);
   overflow: hidden;
   isolation: isolate;
-  box-shadow: 0 0 3px 0 var(--accent-a);
+  box-shadow: 0 0 3px 0 var(--shadow-color);
 }
 
 /* ---------------------------------------------------------------- 标题栏 */
@@ -2098,6 +2101,43 @@
 .seg-fill .seg-btn {
   flex: 1;
   padding: 0 4px;
+}
+
+/* 窗口外阴影色预设（0.6.3）：主题紫 / 黑 / 白 / 灰四个色块。
+   不做色轮 —— owner 要的就是这四档，少一个自由输入就少一处脏值。 */
+.shadow-swatches {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.shadow-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  border-radius: 6px;
+  background: var(--e1);
+  color: var(--text-2);
+  font-size: var(--fs-11);
+  transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
+}
+.shadow-swatch:hover {
+  color: var(--text-1);
+}
+.shadow-swatch.on {
+  background: var(--ui-panel);
+  border-color: var(--ui-accent);
+  color: var(--text-1);
+}
+.shadow-swatch-dot {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  /* 白/浅灰色块也要看得见边界，所以四档统一内描边 */
+  box-shadow: inset 0 0 0 1px rgba(var(--ink-rgb), 0.2);
 }
 
 /* 开关：形态照 FontManager `.pill-toggle`（34×19 胶囊 + 内阴影 + 白色渐变滑块，
@@ -4643,7 +4683,7 @@ body.peek-body #root {
   inset: var(--peek-glow);
   overflow: hidden;
   /* 紫色 3px 外阴影（主题紫，深/浅两套自动跟随），和灵感板同一套做法。 */
-  box-shadow: 0 0 3px 0 var(--accent-a);
+  box-shadow: 0 0 3px 0 var(--shadow-color);
   /* **必须全透明**：Ctrl+滚轮降不透明度时，透出来的应该是桌面，
      不是这层容器自己的底色（0.10.x 这里写的是 #0f0f11，owner 看到的就是"变黑"）。 */
   background: transparent;
@@ -5897,7 +5937,7 @@ body.board-body #root {
   background-size: 48px 48px;
   background-position: 0 0;
   /* 紫色 3px 外阴影，和贴图窗一致（主题紫 `--accent-a`，深/浅两套自动跟随）。 */
-  box-shadow: 0 0 3px 0 var(--accent-a);
+  box-shadow: 0 0 3px 0 var(--shadow-color);
   /* 平时就是普通箭头：这块画布的主操作是"点图 / 拖图 / 框选"，抓手光标会让人误以为
      整块板都能抓走（owner 2026-11-2x：悬停永远是抓手）。只有中键按住平移时才变 `grabbing`。 */
   cursor: default;

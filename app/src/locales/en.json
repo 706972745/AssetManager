@@ -1432,5 +1432,12 @@
   "board.ann.kind_marker": "Highlighter",
   "board.ann.kind_text": "Text",
   "board.ann.kind_badge": "Number",
-  "board.ann.kind_mosaic": "Mosaic"
+  "board.ann.kind_mosaic": "Mosaic",
+  "settings.shadowColor": "Window shadow color",
+  "settings.shadowColorHint": "All three windows share this; Theme purple follows the light/dark theme.",
+  "settings.shadowTheme": "Theme purple",
+  "settings.shadowBlack": "Black",
+  "settings.shadowWhite": "White",
+  "settings.shadowGray": "Gray",
+  "settings.kw.shadowColor": "shadow color glow purple black white gray 阴影"
 }

@@ -1382,5 +1382,12 @@
   "trash.deletedAt": "刪除時間",
   "trash.originalPath": "原始位置",
   "trash.restoreHere": "還原到原始位置",
-  "trash.pickFolder": "選擇要還原到的資料夾"
+  "trash.pickFolder": "選擇要還原到的資料夾",
+  "settings.shadowColor": "視窗陰影顏色",
+  "settings.shadowColorHint": "三扇窗共用；「主題紫」跟隨深淺主題自動變化",
+  "settings.shadowTheme": "主題紫",
+  "settings.shadowBlack": "黑色",
+  "settings.shadowWhite": "白色",
+  "settings.shadowGray": "灰色",
+  "settings.kw.shadowColor": "陰影 顏色 光暈 紫 黑 白 灰 shadow color"
 }

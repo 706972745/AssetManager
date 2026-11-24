@@ -314,6 +314,9 @@ export const mockSource: Source = {
   async uiPrefsSet() {
     /* 浏览器预览没有后端：托盘/自启/缩放都只在前端记住，不报错 */
   },
+  initShadowColor() {
+    return () => {};
+  },
   async setUiScale(scale: number | null) {
     return scale ?? 1;
   },

@@ -1382,5 +1382,12 @@
   "trash.deletedAt": "Удалено",
   "trash.originalPath": "Исходное расположение",
   "trash.restoreHere": "Восстановить в исходное место",
-  "trash.pickFolder": "Выберите папку для восстановления"
+  "trash.pickFolder": "Выберите папку для восстановления",
+  "settings.shadowColor": "Цвет тени окон",
+  "settings.shadowColorHint": "Все три окна используют один цвет; Фиолетовый темы следует за темой.",
+  "settings.shadowTheme": "Фиолетовый темы",
+  "settings.shadowBlack": "Чёрный",
+  "settings.shadowWhite": "Белый",
+  "settings.shadowGray": "Серый",
+  "settings.kw.shadowColor": "тень цвет фиолетовый чёрный белый серый shadow color"
 }

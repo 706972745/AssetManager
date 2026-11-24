@@ -16,6 +16,7 @@ import { clearProgress, setProgress, useProgress } from "./lib/progressStore";
 import { useEvent } from "./lib/useEvent";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
+  applyShadowColor,
   fmtNum,
   fmtSize,
   loadPrefs,
@@ -208,6 +209,7 @@ export default function App() {
         startMinimized: prefs.startMinimized,
         uiScale: prefs.uiScale,
         trashRetentionDays: prefs.trashRetentionDays,
+        shadowColor: prefs.shadowColor,
       })
       .catch(() => {});
     void source.setUiScale(prefs.uiScale).catch(() => {});
@@ -498,6 +500,12 @@ export default function App() {
     /* 贴图窗口是独立 webview，要用这个值决定它右键菜单的深浅 */
     void source.setUiTheme(resolved).catch(() => {});
   }, [prefs.theme, prefs.motion, sysDark]);
+
+  /* 窗口外阴影色：空串 = 跟随主题（CSS 令牌 --shadow-color 指向 --accent-a）；
+     非空则内联覆盖根变量，三扇窗立刻一起变。 */
+  useEffect(() => {
+    applyShadowColor(prefs.shadowColor);
+  }, [prefs.shadowColor]);
 
   /* 托盘自绘菜单的三个入口（2026-11-22，最小监听）：
      · open://settings —— 托盘「打开设置」；

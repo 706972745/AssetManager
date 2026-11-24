@@ -5627,6 +5627,25 @@ struct UiPrefs {
     /// 必须存在后端：启动清理发生在 webview 起来之前，localStorage 读不到。
     #[serde(default = "default_trash_days", rename = "trashRetentionDays")]
     trash_retention_days: u64,
+    /// 窗口外阴影色（0.6.3）：`#rrggbb` 或 None（跟随主题）。
+    /// 后端存一份，是为了让**独立 webview 贴图/板窗**建窗时能拿到当前值 ——
+    /// 它们的 localStorage 不保证和主窗同分区（见 Peek.tsx 的 bootData 注释）。
+    #[serde(default, rename = "shadowColor")]
+    shadow_color: Option<String>,
+}
+
+/// 只接受 `#RRGGBB`（大小写都行）或空 = 跟随主题，避免把脏字符串写进 CSS 变量。
+fn normalize_shadow_hex(v: Option<&str>) -> Option<String> {
+    let s = v?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b.len() == 7 && b[0] == b'#' && b[1..].iter().all(u8::is_ascii_hexdigit) {
+        Some(s.to_ascii_lowercase())
+    } else {
+        None
+    }
 }
 
 /// `UiPrefs` 不能 derive `Default`：`u64` 的默认 0 会被读成「永不清理」，
@@ -5642,6 +5661,7 @@ impl Default for UiPrefs {
             start_minimized: false,
             ui_scale: None,
             trash_retention_days: default_trash_days(),
+            shadow_color: None,
         }
     }
 }
@@ -5669,13 +5689,20 @@ fn am_ui_prefs_get(app: AppHandle) -> UiPrefs {
 }
 
 #[tauri::command]
-fn am_ui_prefs_set(app: AppHandle, prefs: UiPrefs) -> Result<(), String> {
+fn am_ui_prefs_set(app: AppHandle, mut prefs: UiPrefs) -> Result<(), String> {
+    /* 前端只给白名单色（主题紫 / 黑 / 白 / 灰），这里再挡一道：
+       脏值一律当「跟随主题」，绝不把任意字符串拼进 CSS。 */
+    prefs.shadow_color = normalize_shadow_hex(prefs.shadow_color.as_deref());
     let p = ui_prefs_path(&app);
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let body = serde_json::to_string_pretty(&prefs).map_err(|e| e.to_string())?;
-    std::fs::write(&p, body).map_err(|e| format!("写界面偏好失败：{e}"))
+    std::fs::write(&p, body).map_err(|e| format!("写界面偏好失败：{e}"))?;
+    /* 贴图 / 灵感板是独立 webview，主窗改完颜色它们要立刻跟着变。
+       `emit` 本来就是广播（见 WORKLOG #91），这里正好要发给所有窗口。 */
+    let _ = app.emit("shadow-color://changed", prefs.shadow_color);
+    Ok(())
 }
 
 /* 界面缩放的自动档：工作区 / 设计尺寸，取不超过它的最大档。

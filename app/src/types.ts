@@ -820,7 +820,11 @@ export interface Source {
     startMinimized: boolean;
     uiScale: number | null;
     trashRetentionDays: number;
+    /** 窗口外阴影色，`""` = 跟随主题 */
+    shadowColor?: string;
   }): Promise<void>;
+  /** 独立 webview 读阴影色 + 订阅主窗改色；返回取消监听 */
+  initShadowColor(): () => void;
   /** 设缩放；传 null = 自动。返回**实际生效**的倍率（前端拿它显示"当前 100%"） */
   setUiScale(scale: number | null): Promise<number>;
   setAutostart(on: boolean): Promise<void>;
@@ -902,6 +906,11 @@ export interface Prefs {
    * 类型放宽成 string 是为了**老数据/新语言**都不炸：真正的白名单校验在 i18n 里。
    */
   locale: string;
+  /**
+   * 窗口外阴影颜色（0.6.3）：`#RRGGBB` 自定义色；`""` = 跟随主题的 `--accent-a`。
+   * 主窗 / 贴图 / 灵感板三扇窗共用这一个值，设置页用预设色块改。
+   */
+  shadowColor: string;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -924,7 +933,21 @@ export const DEFAULT_PREFS: Prefs = {
   /* 应用回收站里的东西留 7 天，启动时后台清一次；0 = 永不自动清理 */
   trashRetentionDays: 7,
   locale: "system",
+  shadowColor: "",
 };
+
+/** 合法的阴影颜色：空串（跟随主题）或 `#RRGGBB`。别的值一律退回跟随主题。 */
+export function normalizeShadowColor(v: unknown): string {
+  return typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : "";
+}
+
+/** 把当前生效的阴影色写到根元素；空串 = 跟随主题（删掉内联覆盖，让 CSS 令牌生效）。 */
+export function applyShadowColor(v: unknown): void {
+  const hex = normalizeShadowColor(v);
+  const el = document.documentElement;
+  if (hex) el.style.setProperty("--shadow-color", hex);
+  else el.style.removeProperty("--shadow-color");
+}
 
 /* ---------------- 检查更新（0.1.35） ---------------- */
 
@@ -1007,6 +1030,7 @@ export function loadPrefs(): Prefs {
           ? Math.round(p.trashRetentionDays)
           : DEFAULT_PREFS.trashRetentionDays,
       locale: typeof p.locale === "string" && p.locale ? p.locale : "system",
+      shadowColor: normalizeShadowColor(p.shadowColor),
     };
   } catch {
     return { ...DEFAULT_PREFS };

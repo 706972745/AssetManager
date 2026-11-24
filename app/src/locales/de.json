@@ -1378,5 +1378,12 @@
   "trash.deletedAt": "Gelöscht",
   "trash.originalPath": "Ursprünglicher Ort",
   "trash.restoreHere": "Am ursprünglichen Ort wiederherstellen",
-  "trash.pickFolder": "Ordner zum Wiederherstellen wählen"
+  "trash.pickFolder": "Ordner zum Wiederherstellen wählen",
+  "settings.shadowColor": "Fensterschattenfarbe",
+  "settings.shadowColorHint": "Alle drei Fenster teilen diese Farbe; Themenlila folgt dem Hell/Dunkel-Thema.",
+  "settings.shadowTheme": "Themenlila",
+  "settings.shadowBlack": "Schwarz",
+  "settings.shadowWhite": "Weiß",
+  "settings.shadowGray": "Grau",
+  "settings.kw.shadowColor": "Schatten Farbe Lila Schwarz Weiß Grau shadow color"
 }

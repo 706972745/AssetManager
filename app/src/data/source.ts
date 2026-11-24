@@ -40,6 +40,7 @@ import type {
   UpdateInfo,
   WarmProgress,
 } from "../types";
+import { applyShadowColor } from "../types";
 import { mockSource } from "./mock";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -154,6 +155,15 @@ export const tauriSource: Source = {
   trashList: () => invoke!<TrashEntry[]>("am_trash_list"),
   trashMedia: (ids) => invoke!<(string | null)[]>("am_trash_media", { ids }),
   uiPrefsSet: (prefs) => invoke!<void>("am_ui_prefs_set", { prefs }),
+  /* 独立 webview（贴图 / 板）用：后端读一次 + 订阅主窗改色事件 */
+  initShadowColor: () => {
+    void invoke!<{ shadowColor?: string | null }>("am_ui_prefs_get")
+      .then((p) => applyShadowColor(p.shadowColor ?? ""))
+      .catch(() => {});
+    return onAppEvent<string | null>("shadow-color://changed", (v) =>
+      applyShadowColor(v ?? "")
+    );
+  },
   setUiScale: (scale) => invoke!<number>("am_set_ui_scale", { scale }),
   setAutostart: (enabled) => invoke!<void>("am_set_autostart", { enabled }),
   getAutostart: () => invoke!<boolean>("am_get_autostart"),

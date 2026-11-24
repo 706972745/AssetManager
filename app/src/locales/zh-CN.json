@@ -1432,5 +1432,12 @@
   "board.ann.kind_marker": "荧光笔",
   "board.ann.kind_text": "文字",
   "board.ann.kind_badge": "序号",
-  "board.ann.kind_mosaic": "马赛克"
+  "board.ann.kind_mosaic": "马赛克",
+  "settings.shadowColor": "窗口阴影颜色",
+  "settings.shadowColorHint": "三扇窗共用；「主题紫」跟随深浅主题自动变化",
+  "settings.shadowTheme": "主题紫",
+  "settings.shadowBlack": "黑色",
+  "settings.shadowWhite": "白色",
+  "settings.shadowGray": "灰色",
+  "settings.kw.shadowColor": "阴影 颜色 光晕 紫 黑 白 灰 shadow color"
 }

@@ -1378,5 +1378,12 @@
   "trash.deletedAt": "Supprimé",
   "trash.originalPath": "Emplacement d'origine",
   "trash.restoreHere": "Restaurer à l'emplacement d'origine",
-  "trash.pickFolder": "Choisir un dossier de restauration"
+  "trash.pickFolder": "Choisir un dossier de restauration",
+  "settings.shadowColor": "Couleur de l'ombre",
+  "settings.shadowColorHint": "Les trois fenêtres partagent cette couleur ; Violet du thème suit le thème clair/sombre.",
+  "settings.shadowTheme": "Violet du thème",
+  "settings.shadowBlack": "Noir",
+  "settings.shadowWhite": "Blanc",
+  "settings.shadowGray": "Gris",
+  "settings.kw.shadowColor": "ombre couleur violet noir blanc gris shadow color"
 }

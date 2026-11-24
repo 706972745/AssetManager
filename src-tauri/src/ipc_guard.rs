@@ -86,6 +86,7 @@ const MAIN_ONLY: &[&str] = &[
 /// 贴图窗（label `peek-N`）
 const PEEK: &[&str] = &[
     "am_clip_text",
+    "am_ui_prefs_get",
     "am_peek_boot",
     "am_peek_close",
     "am_peek_copy_file",
@@ -128,6 +129,7 @@ const BOARD: &[&str] = &[
     "am_save_as",
     "am_snapshot_paste",
     "am_system_fonts",
+    "am_ui_prefs_get",
 ];
 
 /// 截图覆盖层（label `snip`）

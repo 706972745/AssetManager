@@ -934,7 +934,10 @@ export function Board() {
     /* 主题：灵感板是独立 webview，不自动继承主窗 data-theme（同 Peek 的做法：
        开窗时由 Rust 把当前主题塞进 boot，这里设到根上，tokens / 板面 CSS 跟着走） */
     document.documentElement.dataset.theme = boot?.theme === "light" ? "light" : "dark";
+    /* 外阴影色同样要靠后端同步（板窗的 localStorage 不保证同分区） */
+    const offShadow = source.initShadowColor();
     return () => {
+      offShadow();
       document.body.classList.remove("board-body");
       document.documentElement.classList.remove("board-body");
     };

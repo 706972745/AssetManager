@@ -1378,5 +1378,12 @@
   "trash.deletedAt": "Eliminado",
   "trash.originalPath": "Ubicación original",
   "trash.restoreHere": "Restaurar a la ubicación original",
-  "trash.pickFolder": "Elegir una carpeta para restaurar"
+  "trash.pickFolder": "Elegir una carpeta para restaurar",
+  "settings.shadowColor": "Color de la sombra",
+  "settings.shadowColorHint": "Las tres ventanas comparten este color; Morado del tema sigue el tema claro/oscuro.",
+  "settings.shadowTheme": "Morado del tema",
+  "settings.shadowBlack": "Negro",
+  "settings.shadowWhite": "Blanco",
+  "settings.shadowGray": "Gris",
+  "settings.kw.shadowColor": "sombra color morado negro blanco gris shadow color"
 }

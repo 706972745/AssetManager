@@ -400,6 +400,9 @@ export function Peek() {
 
   const cur = boot.items[idx];
 
+  /* 外阴影色：贴图是独立 webview，从后端读当前值 + 订阅主窗改色。 */
+  useEffect(() => source.initShadowColor(), [source]);
+
   /* 图可能已经在缓存里（onLoad 不会再触发），所以再挂一道兜底 */
   useEffect(() => {
     armReady(400);

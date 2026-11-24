@@ -1382,5 +1382,12 @@
   "trash.deletedAt": "Excluído",
   "trash.originalPath": "Local original",
   "trash.restoreHere": "Restaurar ao local original",
-  "trash.pickFolder": "Escolha uma pasta para restaurar"
+  "trash.pickFolder": "Escolha uma pasta para restaurar",
+  "settings.shadowColor": "Cor da sombra",
+  "settings.shadowColorHint": "As três janelas compartilham; Roxo do tema acompanha o tema claro/escuro.",
+  "settings.shadowTheme": "Roxo do tema",
+  "settings.shadowBlack": "Preto",
+  "settings.shadowWhite": "Branco",
+  "settings.shadowGray": "Cinza",
+  "settings.kw.shadowColor": "sombra cor roxo preto branco cinza shadow color"
 }

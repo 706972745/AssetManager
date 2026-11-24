@@ -51,6 +51,47 @@ const NAV: { key: SettingsKey; label: string; tk: TKey; icon: string }[] = [
   { key: "update", label: "更新", tk: "nav.update", icon: "refresh" },
 ];
 
+/** 窗口外阴影的四档预设（0.6.3）：主题紫 + 黑 / 白 / 灰。
+ *  不做任意颜色：owner 明确要求"不用色轮，就紫色和其他黑白灰"。 */
+const SHADOW_PRESETS: { v: string; swatch: string; tk: TKey }[] = [
+  { v: "", swatch: "var(--accent-a)", tk: "settings.shadowTheme" },
+  { v: "#000000", swatch: "#000000", tk: "settings.shadowBlack" },
+  { v: "#FFFFFF", swatch: "#FFFFFF", tk: "settings.shadowWhite" },
+  { v: "#8A8A8A", swatch: "#8A8A8A", tk: "settings.shadowGray" },
+];
+
+function ShadowSwatches({
+  value,
+  onChange,
+  t,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  t: (k: TKey) => string;
+}) {
+  return (
+    <div className="shadow-swatches" role="radiogroup" aria-label={t("settings.shadowColor")}>
+      {SHADOW_PRESETS.map((p) => {
+        const on = p.v === "" ? !value : value.toLowerCase() === p.v.toLowerCase();
+        return (
+          <button
+            key={p.v || "theme"}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            title={t(p.tk)}
+            className={`shadow-swatch${on ? " on" : ""}`}
+            onClick={() => onChange(p.v)}
+          >
+            <span className="shadow-swatch-dot" style={{ background: p.swatch }} />
+            <span>{t(p.tk)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 interface RowDef {
   id: string;
   label: string;
@@ -188,6 +229,7 @@ export function Settings({
         startMinimized: draft.startMinimized,
         uiScale: draft.uiScale,
         trashRetentionDays: draft.trashRetentionDays,
+        shadowColor: draft.shadowColor,
       })
       .catch(() => {});
   }, [
@@ -195,6 +237,7 @@ export function Settings({
     draft.startMinimized,
     draft.uiScale,
     draft.trashRetentionDays,
+    draft.shadowColor,
     source,
   ]);
 
@@ -569,6 +612,19 @@ export function Settings({
               { v: "dark", label: t("settings.themeDark") },
               { v: "system", label: t("settings.themeSystem") },
             ], (v) => patch({ theme: v as Prefs["theme"] })),
+          },
+          {
+            id: "shadowColor",
+            label: t("settings.shadowColor"),
+            hint: t("settings.shadowColorHint"),
+            kw: t("settings.kw.shadowColor"),
+            node: (
+              <ShadowSwatches
+                value={draft.shadowColor}
+                onChange={(v) => patch({ shadowColor: v })}
+                t={t}
+              />
+            ),
           },
           {
             id: "motion",

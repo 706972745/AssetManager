@@ -1378,5 +1378,12 @@
   "trash.deletedAt": "削除日時",
   "trash.originalPath": "元の場所",
   "trash.restoreHere": "元の場所へ復元",
-  "trash.pickFolder": "復元先のフォルダーを選択"
+  "trash.pickFolder": "復元先のフォルダーを選択",
+  "settings.shadowColor": "ウィンドウの影の色",
+  "settings.shadowColorHint": "3つのウィンドウで共通。「テーマ紫」は明暗テーマに追従します",
+  "settings.shadowTheme": "テーマ紫",
+  "settings.shadowBlack": "黒",
+  "settings.shadowWhite": "白",
+  "settings.shadowGray": "グレー",
+  "settings.kw.shadowColor": "影 色 紫 黒 白 グレー shadow color"
 }
