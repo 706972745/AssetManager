@@ -1439,5 +1439,6 @@
   "settings.shadowBlack": "Black",
   "settings.shadowWhite": "White",
   "settings.shadowGray": "Gray",
-  "settings.kw.shadowColor": "shadow color glow purple black white gray 阴影"
+  "settings.kw.shadowColor": "shadow color glow purple black white gray 阴影",
+  "app.toast.drop_no_path": "No file path was received from that drop. Drag the files again from File Explorer."
 }

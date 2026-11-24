@@ -1439,5 +1439,6 @@
   "settings.shadowBlack": "黑色",
   "settings.shadowWhite": "白色",
   "settings.shadowGray": "灰色",
-  "settings.kw.shadowColor": "阴影 颜色 光晕 紫 黑 白 灰 shadow color"
+  "settings.kw.shadowColor": "阴影 颜色 光晕 紫 黑 白 灰 shadow color",
+  "app.toast.drop_no_path": "没读到拖入的文件路径，请从资源管理器重新拖一次"
 }

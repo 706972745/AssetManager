@@ -104,6 +104,21 @@ function textCopyContext(): boolean {
 
 let toastSeq = 1;
 
+/**
+ * 拖拽落点。窗口内拖动（拖素材）和从资源管理器拖文件**共用同一套判定**：
+ * `dropTargetOf` 只答"指针下面是哪里"，内部拖拽照旧走 `dropHit` 的动作，
+ * 外部文件则先导入再按同一个落点建关联 —— 否则两边各写一遍选择器，
+ * 改了一个漏另一个（分组面板复用 `.tag-dock` 样式那次就这么错过一次）。
+ */
+type DropTarget =
+  | { kind: "head"; which: string }
+  | { kind: "tag"; tag: string }
+  | { kind: "coll"; id: number }
+  | { kind: "snap"; id: number }
+  | { kind: "dir"; path: string }
+  | { kind: "titlebar" }
+  | null;
+
 /** 「把图片加入快照」弹层的四种来源（见 `snapPromptProps`） */
 type SnapPromptState =
   | { mode: "tag"; tag: string; count?: number }
@@ -328,6 +343,8 @@ export default function App() {
   /* 0.4.24：主界面右键 = 在鼠标旁弹详情（不再让右侧详情栏常驻占位）。
      非空即浮层开启，坐标就是右键点；菜单挪到 Shift+右键。 */
   const [detailPop, setDetailPop] = useState<{ x: number; y: number } | null>(null);
+  /** 有外部文件正被拖进窗口：只驱动那条居中提示，真正动作在 drop 时才做 */
+  const [externalDrag, setExternalDrag] = useState(false);
   /* 扫描 / 批量进度**不在这里**：后端分别每 120ms / 100ms 推一次，放 App state 会把整棵树
      按 8–10Hz 重渲（而真正变的只有底部那条进度条）。它们住在 `lib/progressStore`，
      由底部的 `ProgressStrip` 自己订阅——取消按钮等要读的人也从那个 store 取。 */
@@ -335,6 +352,10 @@ export default function App() {
   const reqRef = useRef(0);
   const dirRef = useRef<DirNode | null>(null);
   dirRef.current = dir;
+  /* 库根清单的同步快照：外部文件落到标题栏时要换算"当前库根"，
+     而拖放事件订阅是长期存活的闭包，读 state 会拿到挂载那一刻的旧值 */
+  const libRootsRef = useRef<DirNode[]>([]);
+  libRootsRef.current = libRoots;
   const dragPaths = useRef<string[] | null>(null);
   const dragPreview = useRef<number | null>(null);
   /** 拖动时"这一批是谁"（库内 id）。
@@ -2579,59 +2600,208 @@ export default function App() {
     releaseDragGate();
   }, [hideGhost, releaseDragGate]);
 
+  /**
+   * 外部文件拖入的视觉收尾：提示条 + 落点高亮。
+   * 特意**不走** `clearDrag`：那会放闸 800ms 并吞掉用户下一次点击 ——
+   * 外部拖拽从没压过闸，松手后用户点哪儿都该立刻生效。
+   */
+  const clearExternalDrop = useCallback(() => {
+    setExternalDrag(false);
+    hotRef.current?.removeAttribute("data-hot");
+    hotRef.current = null;
+    setActiveDock(null);
+  }, []);
+
   /** 保留旧调用点：闸门已经是常驻的，这里只把尾巴再延到放行窗口长度 */
   const blockNextClick = useCallback(() => {
     releaseDragGate(800);
   }, [releaseDragGate]);
 
+  /**
+   * 指针下面是什么落点。**只有这一处**读 data-* 选择器：
+   * `dropHit`（窗口内拖拽）和外部文件拖入（`importDropped`）都靠它，
+   * 以后加一种落点改这里一处就够。
+   *
+   * 顺序不能反：分组面板复用了 `.tag-dock` 样式，头部优先是因为指针停在
+   * 展开后的头部时，行列表已经被顶到上面去了（见 `dropOnHead` 的注释）。
+   */
+  const dropTargetOf = useCallback((el: HTMLElement | null): DropTarget => {
+    if (!el) return null;
+    const headEl = el.closest<HTMLElement>("[data-drop-head]");
+    if (headEl?.dataset.dropHead) return { kind: "head", which: headEl.dataset.dropHead };
+    const tagEl = el.closest<HTMLElement>("[data-drop-tag]");
+    if (tagEl?.dataset.dropTag) return { kind: "tag", tag: tagEl.dataset.dropTag };
+    const collEl = el.closest<HTMLElement>("[data-drop-coll]");
+    if (collEl?.dataset.dropColl) return { kind: "coll", id: Number(collEl.dataset.dropColl) };
+    const snapEl = el.closest<HTMLElement>("[data-drop-snap]");
+    if (snapEl?.dataset.dropSnap) return { kind: "snap", id: Number(snapEl.dataset.dropSnap) };
+    const row = el.closest<HTMLElement>("[data-dir-path]");
+    if (row?.dataset.dirPath) return { kind: "dir", path: row.dataset.dirPath };
+    /* 标题栏没有 data-* 标记（属于 Chrome 组件，不给拖拽开洞），
+       只读 class 就够：它整条都是窗口拖动区，不会和别的落点重叠 */
+    if (el.closest(".titlebar")) return { kind: "titlebar" };
+    return null;
+  }, []);
+
   /** 落点动作：标签 / 分组 / 快照只建关联；目录是**唯一**会动磁盘的落点 */
   const dropHit = useCallback(
     (el: HTMLElement | null, ids: number[] | null, paths: string[]) => {
-      if (!el) return;
-      if (ids?.length) {
-        const headEl = el.closest<HTMLElement>("[data-drop-head]");
-        if (headEl?.dataset.dropHead) {
-          void dragDropRef.current.head(headEl.dataset.dropHead, ids);
-          return;
-        }
-        const tagEl = el.closest<HTMLElement>("[data-drop-tag]");
-        if (tagEl?.dataset.dropTag) {
-          void dragDropRef.current.tag(tagEl.dataset.dropTag, ids);
-          return;
-        }
-        const collEl = el.closest<HTMLElement>("[data-drop-coll]");
-        if (collEl?.dataset.dropColl) {
-          void dragDropRef.current.coll(Number(collEl.dataset.dropColl), ids);
-          return;
-        }
-        const snapEl = el.closest<HTMLElement>("[data-drop-snap]");
-        if (snapEl?.dataset.dropSnap) {
-          void dragDropRef.current.snap(Number(snapEl.dataset.dropSnap), ids);
-          return;
-        }
-      } else if (el.closest("[data-drop-tag],[data-drop-coll],[data-drop-snap]")) {
-        /* 拖的是文件夹：这些集合只装"素材条目"，装不了一个目录。
-           不说清楚的话，用户只会看到"松手什么都没发生"。 */
-        toast(
-          t("app.toast.drop_folder_on_shelf"),
-          true,
-          t("app.toast.drop_folder_on_shelf_detail")
-        );
+      const hit = dropTargetOf(el);
+      if (!hit) return;
+      if (hit.kind === "head") {
+        if (ids?.length) void dragDropRef.current.head(hit.which, ids);
         return;
       }
+      if (hit.kind === "tag") {
+        if (ids?.length) void dragDropRef.current.tag(hit.tag, ids);
+        else {
+          /* 拖的是文件夹：这些集合只装"素材条目"，装不了一个目录。
+             不说清楚的话，用户只会看到"松手什么都没发生"。 */
+          toast(t("app.toast.drop_folder_on_shelf"), true, t("app.toast.drop_folder_on_shelf_detail"));
+        }
+        return;
+      }
+      if (hit.kind === "coll") {
+        if (ids?.length) void dragDropRef.current.coll(hit.id, ids);
+        else {
+          toast(t("app.toast.drop_folder_on_shelf"), true, t("app.toast.drop_folder_on_shelf_detail"));
+        }
+        return;
+      }
+      if (hit.kind === "snap") {
+        if (ids?.length) void dragDropRef.current.snap(hit.id, ids);
+        else {
+          toast(t("app.toast.drop_folder_on_shelf"), true, t("app.toast.drop_folder_on_shelf_detail"));
+        }
+        return;
+      }
+      /* 标题栏对窗口内拖拽没有语义（标题栏是"导入到库根"，只有外部文件才谈得上导入） */
+      if (hit.kind === "titlebar") return;
 
-      const row = el.closest<HTMLElement>("[data-dir-path]");
-      const target = row?.dataset.dirPath;
-      if (!target) return;
       // 拖回自己所在的目录 = 无操作，别弹一堆提示
-      const tl = target.toLowerCase().replace(/[\\/]+$/, "");
+      const tl = hit.path.toLowerCase().replace(/[\\/]+$/, "");
       if (paths.every((x) => x.slice(0, x.lastIndexOf("\\") + 1).toLowerCase().replace(/[\\/]+$/, "") === tl)) {
         return;
       }
-      void dragMoveRef.current(paths, target);
+      void dragMoveRef.current(paths, hit.path);
     },
-    [toast]
+    [dropTargetOf, toast]
   );
+
+  /** 当前"库根"的真实磁盘路径：外部文件落到标题栏时的目标 */
+  const currentLibRootPath = useCallback((): string | null => {
+    const cur = dirRef.current;
+    if (cur) {
+      const lid = libIdOf(cur.id);
+      const root = libRootsRef.current.find((r) => libIdOf(r.id) === lid);
+      if (root) return root.path;
+    }
+    /* 没选目录、但只登记了一个库：标题栏仍然是明确的入口。
+       多个库时猜不出用户要哪个 —— 宁可让他先选，也别写进不相干的库。 */
+    return libRootsRef.current.length === 1 ? libRootsRef.current[0].path : null;
+  }, []);
+
+  /**
+   * 一个目录里现有的素材 id。`deep = true` 连子目录一起（拖进来的是一整个文件夹时，
+   * 新图落在新建的子目录里，只扫当前层就找不到它们）。
+   *
+   * 外部文件导入后要"顺带进分组 / 打标签"，但后端 `am_import_files` 只回计数、
+   * 不回新 id，又不能加命令（0.6.4 这条链路只改前端）。用导入前后两份清单做差集。
+   * 扫不完（超大目录）返回 null：宁可这次不建关联，也绝不把老素材误挂进去。
+   */
+  const dirAssetIds = useCallback(
+    async (dirId: number, deep: boolean): Promise<Set<number> | null> => {
+      const ids = new Set<number>();
+      let cursor: [number, number] | null = null;
+      for (let page = 0; page < 100; page++) {
+        const rows = await source.list({
+          dirId,
+          recursive: deep,
+          kinds: null,
+          text: "",
+          sort: "mtime_desc",
+          cursor,
+          limit: 1000,
+        });
+        for (const a of rows) ids.add(a.id);
+        if (rows.length < 1000) return ids;
+        const last = rows[rows.length - 1];
+        cursor = [last.mtime, last.id];
+      }
+      return null;
+    },
+    []
+  );
+
+  /**
+   * 从资源管理器（或别的程序）拖进来的文件：**复制**进目标文件夹并入库。
+   *
+   * 与窗口内拖拽的区别只有一个字——内部拖到目录是"移动"，外部拖进来只能是"复制"
+   * （源可能还在 U 盘/下载目录，移走等于替用户删了原文件，见 `fsops::copy_into`）。
+   * 落点判断直接复用 `dropTargetOf`；标签/分组/快照这些集合装不了"还没入库的文件"，
+   * 所以先导入、拿到新 id 再走内部拖拽同一套 handler。
+   */
+  const importDropped = useCallback(
+    async (paths: string[], hit: DropTarget) => {
+      if (!paths.length) return;
+      try {
+        const cur = dirRef.current;
+        /* 标题栏 = 导入到当前库根；其余区域（含拖到某个目录行）= 当前打开的文件夹。
+           外部文件的语义是"放进我正在看的这里"，不按目录行改写目标（那还会让人以为文件被移走了）。 */
+        const dest = hit?.kind === "titlebar" ? currentLibRootPath() : cur?.path ?? null;
+        if (!dest) {
+          /* 静默失败最气人：用户松手看不到任何反应，只会以为功能坏了 */
+          toast(t("app.toast.import_need_folder"), true);
+          return;
+        }
+        const assoc =
+          hit?.kind === "tag" || hit?.kind === "coll" || hit?.kind === "snap" || hit?.kind === "head"
+            ? hit
+            : null;
+        /* 拖进来的是文件夹时，新图会被放进新建的子目录 —— 差集必须连子目录一起扫。
+           `statPaths` 会走一遍盘（导入本来也要走），文件数多于"拖进来的顶层条目数"
+           就说明里面有文件夹。拿不准就按深的扫：宁可慢一点，也不能漏掉整批。 */
+        let deep = true;
+        if (assoc) {
+          try {
+            const st = await source.statPaths(paths);
+            deep = st.files > paths.length;
+          } catch {
+            /* 读不到大小就按文件夹算（多加的只是扫描量，不会误关联） */
+          }
+        }
+        const before = assoc && cur ? await dirAssetIds(cur.id, deep).catch(() => null) : null;
+
+        const r = await source.importFiles(paths, dest);
+        setRefreshKey((k) => k + 1);
+        /* 一批只发一条 toast（拖几十个文件不该刷屏），口径与「选文件导入」一致 */
+        const head =
+          t("app.toast.import_imported", { count: r.copied }) +
+          (r.skipped ? t("app.toast.import_skipped_count", { skipped: r.skipped }) : "");
+        if (r.failed.length) {
+          toast(head, true, t("app.toast.import_failed", { count: r.failed.length, error: r.failed[0][1] }));
+        } else {
+          toast(head, false, t("app.toast.import_added", { count: r.added }));
+        }
+
+        if (!assoc || !cur || !before) return;
+        const after = await dirAssetIds(cur.id, deep).catch(() => null);
+        if (!after) return;
+        const ids = [...after].filter((id) => !before.has(id));
+        if (!ids.length) return;
+        if (assoc.kind === "tag") await dragDropRef.current.tag(assoc.tag, ids);
+        else if (assoc.kind === "coll") await dragDropRef.current.coll(assoc.id, ids);
+        else if (assoc.kind === "snap") await dragDropRef.current.snap(assoc.id, ids);
+        else await dragDropRef.current.head(assoc.which, ids);
+      } catch (e) {
+        toast(String(e), true);
+      }
+    },
+    [currentLibRootPath, dirAssetIds, t, toast]
+  );
+  /* 拖放订阅是长期存活的闭包：handler 走 ref，才拿得到最新的 dir/库根 */
+  const importDroppedRef = useRef<(paths: string[], hit: DropTarget) => void>(() => {});
+  importDroppedRef.current = (p, hit) => void importDropped(p, hit);
 
   const beginDrag = useCallback(
     (p: DragPayload, x: number, y: number) => {
@@ -2854,9 +3024,39 @@ export default function App() {
       .then(({ getCurrentWebview }) =>
         getCurrentWebview()
           .onDragDropEvent((e) => {
-            const mine = handoffPayload.current;
-            if (!mine) return;
             const p = e.payload;
+            const mine = handoffPayload.current;
+            if (!mine) {
+              /* 没有 handoff 载荷 = 从资源管理器 / 别的程序拖进来的**新文件**。
+                 enter 只负责让界面明显"能接"，真正动作在 drop 时一次做完；
+                 over 复用内部拖拽的高亮，分组 / 标签 / 快照面板照样会展开。
+                 这条分支**不碰** drag / handoff / 闸门等内部拖拽状态。 */
+              if (p.type === "leave") {
+                clearExternalDrop();
+                return;
+              }
+              const dpr = window.devicePixelRatio || 1;
+              const x = p.position.x / dpr;
+              const y = p.position.y / dpr;
+              if (p.type === "enter") {
+                setExternalDrag(true);
+                markDropAt(x, y);
+              } else if (p.type === "over") {
+                markDropAt(x, y);
+              } else {
+                /* drop：**先取落点再收提示**。收起提示/面板会改变"指针下面是哪里"
+                   （面板一收，行就从指针底下滑走），命中测试必须在收尾之前做。 */
+                const el = document.elementFromPoint(x, y) as HTMLElement | null;
+                const hit = dropTargetOf(el);
+                clearExternalDrop();
+                const paths = p.paths ?? [];
+                /* 空路径以前直接 return —— 用户看到的就是"拖进去什么都没发生"。
+                   拖的是文字/链接也会走到这里，给一句人话比静默强。 */
+                if (!paths.length) toast(t("app.toast.drop_no_path"), true);
+                else importDroppedRef.current(paths, hit);
+              }
+              return;
+            }
             /* leave 没有 paths：正有一趟自己的系统拖拽、指针又出了窗口 → 收起浮层，
                窗口外由系统拖影接管 */
             if (p.type === "leave") {
@@ -2868,7 +3068,7 @@ export default function App() {
               came.length === mine.paths.length &&
               [...came].sort((a, b) => a.localeCompare(b)).join("\n").toLowerCase() ===
                 [...mine.paths].sort((a, b) => a.localeCompare(b)).join("\n").toLowerCase();
-            if (!same) return; /* 别人拖进来的文件，交给导入等各自的处理器 */
+            if (!same) return; /* 别人拖进来的文件，交给上面的外部导入分支 */
             if (p.type === "enter") {
               /* 只在 enter 时画一次（浮层出现），跟手交给轮询 + over 双路 */
               const dpr = window.devicePixelRatio || 1;
@@ -2899,7 +3099,7 @@ export default function App() {
       dead = true;
       un?.();
     };
-  }, [blockNextClick, showGhost, hideGhost, moveGhost, markDropAt]);
+  }, [blockNextClick, clearExternalDrop, dropTargetOf, showGhost, hideGhost, moveGhost, markDropAt]);
 
   /* 拖回来之后的**跟手**：OLE 拖放期间 WebView 收不到 mousemove，drag-over 事件
      又不持续（实测浮层恢复了也不跟手），改用 `cursorPosition()` 轮询 ——
@@ -5356,6 +5556,38 @@ export default function App() {
       />
 
       {dlg.node}
+      {/* 外部文件拖进窗口时的居中提示：一眼看清"松手会导进哪"。
+          必须 `pointer-events:none` —— 它盖在标题栏下方，drop 那一刻的命中测试
+          会走 elementFromPoint，提示条挡住就会把"标题栏=导入到库根"变成"导入到当前文件夹"。 */}
+      {externalDrag && (
+        <div
+          style={{
+            position: "fixed",
+            top: "calc(var(--titlebar-h) + 14px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 70,
+            pointerEvents: "none",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 14px",
+            borderRadius: 999,
+            background: "var(--canvas)",
+            border: "1px solid var(--accent)",
+            boxShadow: "0 6px 24px rgba(var(--ink-rgb), 0.16)",
+            color: "var(--text)",
+            fontSize: 12,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <Icon name="download" size={14} />
+          <span>{dir ? t("app.cmd.import_files") : t("app.toast.import_need_folder")}</span>
+          {dir && (
+            <b style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }}>{dir.name}</b>
+          )}
+        </div>
+      )}
       <Toaster items={toasts} />
       <HoverHintHost />
 

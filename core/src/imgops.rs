@@ -109,6 +109,95 @@ fn ext_of(p: &Path) -> String {
         .unwrap_or_default()
 }
 
+/* ---------------- 截图「插入图片」的公共入口 ----------------
+
+   截图原生层（`src-tauri/src/snip_native.rs`）没有 `image` 依赖，也不该为这一个功能
+   再拉一份解码器 —— 那边只认 BGRA 缓冲（和冻结帧 `Ctx::base` 同字节序），
+   所以解码、缩放、转字节序都收在这里，src-tauri 只调一个函数。 */
+
+/// 单张图解码前的像素上限（约 8000×8000）。超过就拒绝，避免一次插入把内存打爆。
+pub const IMG_MAX_PX: u64 = 64_000_000;
+/// 单边上限（libwebp / GPU 纹理的常见硬限制就在这个量级）。
+pub const IMG_MAX_EDGE: u32 = 8192;
+
+/// 解码前的尺寸校验。**先读文件头再解码**：一张 30000×30000 的图真解出来要 3.6 GB，
+/// 等解完再拒绝等于没保护。
+pub fn img_dims_ok(w: u32, h: u32) -> Result<(), String> {
+    if w == 0 || h == 0 {
+        return Err("图片尺寸是 0".into());
+    }
+    if w > IMG_MAX_EDGE || h > IMG_MAX_EDGE {
+        return Err(format!("图片太大（{w}×{h}，单边上限 {IMG_MAX_EDGE}）"));
+    }
+    if (w as u64) * (h as u64) > IMG_MAX_PX {
+        return Err(format!(
+            "图片太大（{w}×{h}，超过 {} 万像素）",
+            IMG_MAX_PX / 10_000
+        ));
+    }
+    Ok(())
+}
+
+/// 计算插入后的显示尺寸：**等比、只缩不放**。
+///
+/// - `box`：放置区域（选区或屏幕）的宽高，0 表示不约束；
+/// - `max_long`：长边上限（屏幕短边的 80%），0 表示不约束。
+///
+/// 只缩不放的理由：插入的是用户自己的素材，把它"放大"只会得到一张糊图，
+/// 还凭空多占内存。
+pub fn fit_dims(w: u32, h: u32, box_w: u32, box_h: u32, max_long: u32) -> (u32, u32) {
+    let (w, h) = (w.max(1), h.max(1));
+    let mut k = 1.0f32;
+    if box_w > 0 && box_h > 0 {
+        k = k
+            .min(box_w as f32 / w as f32)
+            .min(box_h as f32 / h as f32);
+    }
+    if max_long > 0 {
+        k = k.min(max_long as f32 / w.max(h) as f32);
+    }
+    if k >= 1.0 {
+        return (w, h);
+    }
+    let nw = ((w as f32 * k).round() as u32).max(1);
+    let nh = ((h as f32 * k).round() as u32).max(1);
+    (nw, nh)
+}
+
+/// 截图「插入图片」：读头 → 像素上限校验 → 解码 → 缩放到 `box` / `max_long` → RGBA 转 **BGRA**。
+///
+/// 返回 `(宽, 高, BGRA 字节)`，宽高是**缩放后**的尺寸（调用方按它算落点）。
+/// BGRA 是为了和截图 DIB 对齐：`Ctx::base` 的字节序就是 `B,G,R,A`，
+/// 原生层拿到就能直接按像素混进画面，不用再转一遍。
+pub fn load_bgra_fit(
+    path: &Path,
+    box_w: u32,
+    box_h: u32,
+    max_long: u32,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    if !path.is_file() {
+        return Err(format!("文件不在了：{}", path.display()));
+    }
+    let (ow, oh) = image::image_dimensions(path)
+        .map_err(|e| format!("这张图读不出尺寸（{}）：{e}", ext_of(path)))?;
+    img_dims_ok(ow, oh)?;
+    let img = image::open(path).map_err(|e| format!("这张图解不开（{}）：{e}", ext_of(path)))?;
+    let rgba = img.to_rgba8();
+    let (nw, nh) = fit_dims(ow, oh, box_w, box_h, max_long);
+    let out = if (nw, nh) == (ow, oh) {
+        rgba
+    } else {
+        /* Lanczos3：插入的素材要经得起看；缩放只在落位时做**一次**，
+           渲染每帧只做一次像素混合，不重复采样。 */
+        image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Lanczos3)
+    };
+    let mut buf = out.into_raw();
+    for px in buf.chunks_exact_mut(4) {
+        px.swap(0, 2); // RGBA -> BGRA
+    }
+    Ok((nw, nh, buf))
+}
+
 /// 这个格式能不能"调整尺寸"（另存为是复制字节，任何格式都行）
 pub fn resizable(src: &Path) -> bool {
     matches!(

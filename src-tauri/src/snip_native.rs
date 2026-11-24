@@ -594,6 +594,30 @@ enum Op {
     Stamp(i32, i32, u32, Stamp),
     /// 引线气泡：矩形 + 颜色 + 文字（空串 = 只有泡泡）
     Callout([i32; 4], u32, String),
+    /// 外部图片（0.6.5「插入图片」）：位置 + 显示尺寸 + 已缩放的 BGRA 像素。
+    ///
+    /// 为什么像素在**插入时**就缩到显示尺寸：缩放是采样最贵的一步，放进 `draw_op`
+    /// 会变成每帧重采样一次（整屏重绘 4~8ms 的预算直接爆）。插入时用 Lanczos3 缩
+    /// 一次，渲染只剩一次整数 alpha 混合，移动图片也就只是改 x/y。
+    Image(ImgOp),
+}
+
+/// 插入图片的载荷。`px` 用 `Arc` 共享：`Op` 是 `Clone` 的，撤销/重做栈来回搬时
+/// 不该把几十 MB 的像素缓冲复制一遍。
+#[derive(Clone)]
+struct ImgOp {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    /// BGRA，长度 = `w * h * 4`，与冻结帧 `Ctx::base` 同字节序。
+    px: std::sync::Arc<Vec<u8>>,
+}
+
+impl ImgOp {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
 }
 
 /// 图章的种类
@@ -647,6 +671,7 @@ impl Op {
                 [x0 - w, y0 - w, (x1 - x0) + w * 2, (y1 - y0) + w * 2]
             }
             Op::Text(_, x, y, _, size) => [*x, *y - size, size * 40, size + size / 2],
+            Op::Image(im) => [im.x, im.y, im.w, im.h],
         }
     }
 }
@@ -658,6 +683,8 @@ enum Drag {
     MoveSel,
     Resize(usize), // 0..3 左上/右上/左下/右下
     Draw,
+    /// 拖动已插入的图片（Select 点中图片本体时）；下标指向 `ops`。
+    MoveImg(usize),
 }
 
 struct Ctx {
@@ -745,6 +772,18 @@ struct Ctx {
     press_win: Option<[i32; 4]>,
     /// 本次按下后是否真的拖动过（区分「单击截窗」与「自由框选」）
     moved: bool,
+    /* ---- 插入图片（0.6.5） ---- */
+    /// 待处理的插入请求（画面坐标）。`:Image` 工具单击画布时只登记落点，
+    /// 真正的选图对话框在 `wnd_proc` 里、**锁释放之后**才弹 —— 它是阻塞的，
+    /// 攥着 `CTX` 锁去等用户挑文件会把整个覆盖层卡死。
+    img_req: Option<(i32, i32)>,
+    /// 当前用 Select 点中的图片 op 下标（拖拽 / Delete 都靠它）。
+    /// 只认 `Op::Image`，撤销后下标可能失效，用之前一律重新核对。
+    sel_op: Option<usize>,
+    /// 拖图片时，按下那一刻的原矩形；移动量 = 当前点 - `anchor`。
+    img0: [i32; 4],
+    /// 一次性提示（插入失败等）：文案 + 出现时刻。到点自动消失。
+    notice: Option<(String, std::time::Instant)>,
     // 交付结果
     done: Option<(String, Vec<u8>, [f64; 4])>,
 }
@@ -1243,6 +1282,35 @@ fn inside(r: [i32; 4], x: i32, y: i32) -> bool {
     x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]
 }
 
+/// 插入图片的长边上限：屏幕短边的 80%。留出余量，图片才不会顶到屏幕边、
+/// 也不会把选区外的工具栏挤得没处放。
+fn img_cap_edge(sw: i32, sh: i32) -> u32 {
+    ((sw.min(sh) as f32 * 0.8).round() as i32).max(1) as u32
+}
+
+/// 插入图片的落点：以点击处为**中心**，再夹进 `area`（选区或整屏）。
+///
+/// 图片的显示尺寸已经由 `am_core::imgops::fit_dims` 按 area / 长边上限算好，
+/// 这里只负责摆放 —— 单独拆出来的原因是它可以脱离 GDI / 文件系统做纯单测，
+/// 而"落点跑到选区外"正是这类功能最容易被忽略的回归。
+fn image_place(w: i32, h: i32, cx: i32, cy: i32, area: [i32; 4]) -> [i32; 4] {
+    let w = w.max(1);
+    let h = h.max(1);
+    let maxx = area[0] + area[2] - w;
+    let maxy = area[1] + area[3] - h;
+    let x = if maxx < area[0] {
+        area[0]
+    } else {
+        (cx - w / 2).clamp(area[0], maxx)
+    };
+    let y = if maxy < area[1] {
+        area[1]
+    } else {
+        (cy - h / 2).clamp(area[1], maxy)
+    };
+    [x, y, w, h]
+}
+
 /* ---------------- 取色器（放大镜） / 窗口识别 ----------------
 
    两块功能都只改原生层：`Snip.tsx` 是 A 方案失败时的回落，真机走不到，
@@ -1651,6 +1719,62 @@ impl Ctx {
                 SelectObject(self.mem, old);
                 DeleteObject(f);
             },
+            Op::Image(im) => self.draw_image(im),
+        }
+    }
+
+    /// 把一张已缩放到显示尺寸的 BGRA 图混进当前 DIB。
+    ///
+    /// 为什么不走 GDI 的 `StretchBlt`：像素已经按目标尺寸准备好了，再让 GDI
+    /// 拉伸一遍等于二次采样（反而更糊），而且每次重绘都要建临时 DIB、拷一遍源像素。
+    /// 这里直接按行写 `bits`，和标注的像素直绘同一条路径（GDI pen/brush 在这块
+    /// layered DIB 上本来就有状态残留问题）；`a == 255` 走直拷快路。
+    fn draw_image(&mut self, im: &ImgOp) {
+        let (vw, vh) = (self.w, self.h);
+        let stride = vw as usize * 4;
+        let need = (im.w.max(0) as usize) * (im.h.max(0) as usize) * 4;
+        if im.px.len() < need || im.w <= 0 || im.h <= 0 {
+            return;
+        }
+        let px: &[u8] = im.px.as_slice();
+        let x0 = im.x.max(0);
+        let x1 = (im.x + im.w).min(vw);
+        if x1 <= x0 {
+            return;
+        }
+        let dy0 = im.y.max(0);
+        let dy1 = (im.y + im.h).min(vh);
+        for dy in dy0..dy1 {
+            let sy = (dy - im.y) as usize;
+            let src_row = sy * im.w as usize;
+            let dst_row = dy as usize * stride;
+            for x in x0..x1 {
+                let sx = (x - im.x) as usize;
+                let si = (src_row + sx) * 4;
+                let (b, g, r, a) = (px[si], px[si + 1], px[si + 2], px[si + 3]);
+                if a == 0 {
+                    continue;
+                }
+                let di = dst_row + x as usize * 4;
+                unsafe {
+                    let d = self.bits.add(di);
+                    if a == 255 {
+                        *d = b;
+                        *d.add(1) = g;
+                        *d.add(2) = r;
+                        *d.add(3) = 255;
+                    } else {
+                        let ia = 255u16 - a as u16;
+                        let mix = |s: u8, dv: u8| -> u8 {
+                            ((s as u16 * a as u16 + dv as u16 * ia) / 255) as u8
+                        };
+                        *d = mix(b, *d);
+                        *d.add(1) = mix(g, *d.add(1));
+                        *d.add(2) = mix(r, *d.add(2));
+                        *d.add(3) = 255;
+                    }
+                }
+            }
         }
     }
 
@@ -1860,6 +1984,68 @@ impl Ctx {
         }
     }
 
+    /// 光标下最上层的图片 op（逆序 = 后插入的在上，与 `draw_ops` 顺序一致）。
+    fn image_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.ops.iter().enumerate().rev().find_map(|(i, op)| match op {
+            Op::Image(im) if im.contains(x, y) => Some(i),
+            _ => None,
+        })
+    }
+
+    /// 选中的图片画一圈强调色外框：不然用户不知道 Delete 会删谁。
+    fn draw_img_sel(&mut self) {
+        let Some(i) = self.sel_op else { return };
+        let Some(Op::Image(im)) = self.ops.get(i) else { return };
+        let (x, y, w, h) = (im.x, im.y, im.w, im.h);
+        let c = self.pal.accent;
+        self.pframe(x - 1, y - 1, x + w + 1, y + h + 1, 1, c);
+    }
+
+    /// 弹一句一次性提示（插入失败等）。到点由 `tick` 清掉。
+    fn show_notice(&mut self, msg: String) {
+        self.notice = Some((msg, std::time::Instant::now()));
+        unsafe {
+            SetTimer(self.hwnd, 1, 20, 0);
+        }
+        self.render();
+    }
+
+    /// 顶部居中的提示条。中文只能走 `DrawTextW`。
+    fn draw_notice(&mut self) {
+        let Some((msg, _)) = self.notice.clone() else { return };
+        let tw = ((msg.chars().count() as i32) * 15 + 40).min((self.w - 40).max(120));
+        let th = 40;
+        let x = ((self.w - tw) / 2).max(8);
+        let y = 18;
+        self.pfill_round_a(x, y, x + tw, y + th, 10, 0x1C1C1A, 0.90);
+        let face: Vec<u16> = "Microsoft YaHei\0".encode_utf16().collect();
+        let wide: Vec<u16> = msg.encode_utf16().collect();
+        unsafe {
+            let f = CreateFontW(-15, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 4, 0, face.as_ptr());
+            let old = SelectObject(self.mem, f);
+            SetBkMode(self.mem, TRANSPARENT);
+            SetTextColor(self.mem, 0xFFFFFF);
+            let mut rc = RectPos {
+                left: x + 12,
+                top: y,
+                right: x + tw - 12,
+                bottom: y + th,
+            };
+            DrawTextW(
+                self.mem,
+                wide.as_ptr(),
+                wide.len() as i32,
+                &mut rc,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            SelectObject(self.mem, old);
+            DeleteObject(f);
+        }
+        /* ClearType 会把字形像素的 alpha 写成 0（见 `force_alpha` 的注释），
+           这块是实心提示条，整块拉满 alpha 最省事。 */
+        self.solidify([x, y, tw, th]);
+    }
+
     /// 工具栏位置与尺寸（宽度由 `bar_w` 累加，尺寸见 `BTN_W` 那一段注释）。
     fn bar_layout(&mut self) {
         /* 原型 `.toolbar{padding:0 10px}` —— 左右各 10，不是各 5 */
@@ -1976,6 +2162,11 @@ impl Ctx {
         self.palette = false;
         self.hover_due = None;
         self.render();
+        /* 这颗工具最容易"点了以为没反应"：选完工具还要在画面上点一下才弹选图框。
+           明说一次，省得 owner 对着工具栏图标反复点（0.6.4 报的就是这个）。 */
+        if t == Tool::Image {
+            self.show_notice("在选区内点一下，选择要插入的图片".into());
+        }
     }
 
     /* ---------- 托盘（悬停展开） ----------
@@ -2141,11 +2332,19 @@ impl Ctx {
 
     /// WM_TIMER 到点：把 `hover_due` 落地。返回是否需要重绘。
     fn tick(&mut self) -> bool {
+        let mut painted = false;
+        /* 提示条到点消失。它和悬停展开共用 1 号定时器，所以两件事都要在这里落地。 */
+        if let Some((_, at)) = &self.notice {
+            if at.elapsed() >= std::time::Duration::from_millis(2600) {
+                self.notice = None;
+                painted = true;
+            }
+        }
         let Some((due, open, idx)) = self.hover_due else {
-            return false;
+            return painted;
         };
         if std::time::Instant::now() < due {
-            return false;
+            return painted;
         }
         self.hover_due = None;
         if open {
@@ -3264,6 +3463,9 @@ impl Ctx {
             self.draw_op(op);
         }
         self.preview = pv;
+        /* 选中的图片描边：画在图片/标注之上、选区框之下 —— 它表示"这一个 op 被选中"，
+           不是选区本身。 */
+        self.draw_img_sel();
         /* 光标下窗口的强调色框：画在标注之上、选区框之下 —— 用户先看见"要截谁"，
            再看见选区把手。按下鼠标时 `win_hit` 已被清掉，所以不会有残影。 */
         self.draw_win_hit();
@@ -3278,6 +3480,8 @@ impl Ctx {
             self.draw_bar_tip();
         }
         self.draw_keys();
+        /* 提示条压在所有面板之上（它是在报告"刚才那下失败了"，不能被工具栏盖住） */
+        self.draw_notice();
         /* 放大镜永远画在最上层：它跟着光标走，压在工具栏/提示面板上也比被挡住有用
            （光标真正落到这些面板上时 `loupe_rect` 会返回 None）。 */
         self.draw_loupe();
@@ -4149,11 +4353,39 @@ unsafe fn on_mouse(down: bool, x: i32, y: i32) {
             c.anchor = (x, y);
             return;
         }
+        if c.tool == Tool::Image && c.sel.is_none() {
+            /* 没框选也能插：`insert_image_pending` 在 sel=None 时拿整屏当放置区。
+               以前这段藏在 `if let Some(sel)` 里，没选区时点画布毫无反应。 */
+            c.img_req = Some((x, y));
+            c.preview = None;
+            return;
+        }
         if let Some(sel) = c.sel {
             if inside(sel, x, y) && c.tool == Tool::Select {
+                /* 图片优先于「移动选区」：Select 点中图片本体 = 拖图片；点到图片
+                   外面仍然是移动选区。两者共存，不需要先切一个"图片移动"模式。 */
+                if let Some(i) = c.image_at(x, y) {
+                    if let Op::Image(im) = &c.ops[i] {
+                        c.img0 = [im.x, im.y, im.w, im.h];
+                    }
+                    c.sel_op = Some(i);
+                    c.drag = Drag::MoveImg(i);
+                    c.anchor = (x, y);
+                    c.render();
+                    return;
+                }
+                c.sel_op = None;
                 c.drag = Drag::MoveSel;
                 c.sel0 = sel;
                 c.anchor = (x, y);
+                return;
+            }
+            /* 插入图片：单击画布只登记落点。系统选图对话框是**阻塞**的，
+               这里还攥着 `CTX` 锁，绝不能弹 —— 交给 `wnd_proc` 在 `on_mouse`
+               返回、锁释放之后再处理（见 `insert_image_pending`）。 */
+            if c.tool == Tool::Image && inside(sel, x, y) {
+                c.img_req = Some((x, y));
+                c.preview = None;
                 return;
             }
             if c.tool == Tool::Text {
@@ -4383,6 +4615,16 @@ unsafe fn on_move(x: i32, y: i32) {
             c.render();
             painted = true;
         }
+        Drag::MoveImg(i) => {
+            let (dx, dy) = (x - c.anchor.0, y - c.anchor.1);
+            let (nx, ny) = (c.img0[0] + dx, c.img0[1] + dy);
+            if let Some(Op::Image(im)) = c.ops.get_mut(i) {
+                im.x = nx;
+                im.y = ny;
+            }
+            c.render();
+            painted = true;
+        }
         Drag::MoveSel | Drag::Resize(_) => {
             // 复用 up 里的逻辑：这里直接算
             let sel0 = c.sel0;
@@ -4438,11 +4680,86 @@ unsafe fn on_move(x: i32, y: i32) {
     }
 }
 
+/// 处理一次「插入图片」请求。由 `wnd_proc` 在 `on_mouse` 返回后调用 ——
+/// 此刻 `CTX` 锁已经释放，才可以弹阻塞的系统选图框。
+///
+/// 顺序刻意写成「取请求（短暂持锁）→ 藏浮层 → 选图 → 解码（不持锁）→ 落 op」：
+/// 对话框会阻塞到用户选完、解码可能几百毫秒，任何一段攥着锁都会让覆盖层假死。
+unsafe fn insert_image_pending(hwnd: Hwnd) {
+    let req = {
+        let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(c) = g.as_mut() else { return };
+        let Some((cx, cy)) = c.img_req.take() else { return };
+        let area = c.sel.unwrap_or([0, 0, c.w, c.h]);
+        Some(((cx, cy), area, img_cap_edge(c.w, c.h)))
+    };
+    let Some(((cx, cy), area, cap)) = req else { return };
+
+    /* 覆盖层是整屏 topmost 的，不藏起来会把系统选图框压在下面 —— 表现又会是
+       "点了没反应"。先 ReleaseCapture：不放开的话鼠标还归我们，对话框点不动。 */
+    ReleaseCapture();
+    ShowWindow(hwnd, 0 /* SW_HIDE */);
+    let picked = rfd::FileDialog::new()
+        .set_title("插入图片")
+        .add_filter(
+            "图片",
+            /* 只列 `core` 里 `image` 真正编进来的解码器：AVIF 没开 feature，
+               放进筛选器等于骗用户选到一个必然失败的格式。 */
+            &["png", "jpg", "jpeg", "jfif", "bmp", "gif", "webp", "tif", "tiff", "ico", "tga"],
+        )
+        .pick_file();
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+
+    let Some(path) = picked else {
+        /* 取消：把冻结帧原样画回去（浮层刚被隐藏过，重新贴一次图） */
+        let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = g.as_mut() {
+            c.render();
+        }
+        return;
+    };
+
+    let res = am_core::imgops::load_bgra_fit(
+        &path,
+        area[2].max(1) as u32,
+        area[3].max(1) as u32,
+        cap,
+    );
+
+    let mut g = CTX.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(c) = g.as_mut() else { return };
+    match res {
+        Ok((iw, ih, px)) => {
+            let r = image_place(iw as i32, ih as i32, cx, cy, area);
+            c.ops.push(Op::Image(ImgOp {
+                x: r[0],
+                y: r[1],
+                w: r[2],
+                h: r[3],
+                px: std::sync::Arc::new(px),
+            }));
+            c.redo.clear();
+            /* 插入即选中：接着就能拖、能 Delete，不用再点一下去"认领"它 */
+            c.sel_op = Some(c.ops.len() - 1);
+            c.render();
+        }
+        Err(e) => {
+            /* 不崩、不吞：日志留一行给排查，画面上再给用户一句人话 */
+            crate::log_runtime_opt(&format!("[snip] 插入图片失败 {}：{e}", path.display()));
+            c.show_notice(format!("插入图片失败：{e}"));
+        }
+    }
+}
+
 unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isize {
     match msg {
         WM_LBUTTONDOWN => {
             SetCapture(h);
             on_mouse(true, lo(l), hi(l));
+            /* `on_mouse` 返回时 `CTX` 锁已释放。插入图片要弹阻塞的系统选图框，
+               只能放在这里，绝对不能留在 `on_mouse` 的持锁区间里。 */
+            insert_image_pending(h);
             0
         }
         WM_LBUTTONUP => {
@@ -4463,7 +4780,7 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         if c.tick() {
                             c.render();
                         }
-                        c.hover_due.is_some()
+                        c.hover_due.is_some() || c.notice.is_some()
                     }
                     None => false,
                 }
@@ -4590,6 +4907,20 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                                 c.ops.push(op);
                             }
                             c.render();
+                        }
+                        /* Delete：删掉 Select 点中的那张插入图片。
+                           只动 `Op::Image` —— 标注的删除仍走橡皮擦，语义不混。 */
+                        0x2E => {
+                            if let Some(i) = c.sel_op {
+                                if matches!(c.ops.get(i), Some(Op::Image(_))) {
+                                    c.ops.remove(i);
+                                    /* 下标变了，撤销栈里的旧 op 顺序也变了 —— 清掉重做，
+                                       免得 Ctrl+Y 把一张已经被删掉的图又塞回来。 */
+                                    c.redo.clear();
+                                    c.sel_op = None;
+                                    c.render();
+                                }
+                            }
                         }
                         // Ctrl+A：选中整屏（网页版同键）。多框选时**整屏替换**所有块
                         0x41 if ctrl => {
@@ -4855,6 +5186,10 @@ pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivere
                 win_hit: None,
                 press_win: None,
                 moved: false,
+                img_req: None,
+                sel_op: None,
+                img0: [0; 4],
+                notice: None,
                 done: None,
             });
             /* 第一帧就把放大镜摆在光标旁边：不能等第一次 WM_MOUSEMOVE ——
@@ -5035,6 +5370,11 @@ mod bar_preview {
             win_hit: None,
             press_win: None,
             moved: false,
+            /* 插入图片（0.6.5）：离屏测试不弹对话框，默认没有请求/选中/提示。 */
+            img_req: None,
+            sel_op: None,
+            img0: [0; 4],
+            notice: None,
             done: None,
             /* 工具栏 v3 新增的三个字段（分裂按钮的下拉）：测试用的 Ctx 也得给初值，
                否则 `cargo test` 直接编不过 —— 0.4.23 加字段时漏了这一处，
@@ -5571,6 +5911,74 @@ mod bar_preview {
                 (250, 20, 10),
                 "越界要夹到边缘，不能返回黑"
             );
+            DeleteDC(c.mem);
+            DeleteObject(bmp);
+        }
+    }
+
+    /// 插入图片的缩放与落位（纯逻辑，不碰文件/GDI）。
+    ///
+    /// 这三个数就是这条功能最容易回归的地方：大图必须被屏幕短边 80% 卡住、
+    /// 小图不许放大、落点靠边时要夹进选区而不是画到屏幕外面。
+    #[test]
+    fn insert_image_scales_and_centers() {
+        let cap = img_cap_edge(1920, 1080);
+        assert_eq!(cap, 864, "1080 的 80%");
+
+        /* 大图：4000×2000 → 长边 864，比例 2:1 不变 */
+        let (w, h) = am_core::imgops::fit_dims(4000, 2000, 1920, 1080, cap);
+        assert_eq!((w, h), (864, 432));
+        let r = image_place(w as i32, h as i32, 960, 540, [0, 0, 1920, 1080]);
+        assert_eq!(r, [528, 324, 864, 432], "落点要以点击处为中心");
+
+        /* 小图：只缩不放 */
+        let (w2, h2) = am_core::imgops::fit_dims(120, 60, 1920, 1080, cap);
+        assert_eq!((w2, h2), (120, 60));
+
+        /* 选区比屏幕小：先被选区宽卡住 */
+        let (w3, h3) = am_core::imgops::fit_dims(4000, 2000, 400, 300, cap);
+        assert_eq!((w3, h3), (400, 200));
+
+        /* 点在选区左上角：图片不能溢出选区 */
+        let r2 = image_place(200, 100, 5, 5, [0, 0, 400, 300]);
+        assert_eq!(r2, [0, 0, 200, 100]);
+    }
+
+    /// 超限拒绝：8193 的单边、以及超过 64MP 的像素数都要在**解码前**被挡掉。
+    #[test]
+    fn insert_image_rejects_oversize() {
+        assert!(am_core::imgops::img_dims_ok(1920, 1080).is_ok());
+        assert!(am_core::imgops::img_dims_ok(8000, 8000).is_ok(), "恰好 64MP 允许");
+        assert!(am_core::imgops::img_dims_ok(8192, 8192).is_err(), "67MP 超像素上限");
+        assert!(am_core::imgops::img_dims_ok(8193, 10).is_err(), "单边超 8192");
+        assert!(am_core::imgops::img_dims_ok(0, 100).is_err(), "0 尺寸要拒绝");
+    }
+
+    /// 像素落盘这一层也要钉住：`draw_image` 必须按 BGRA 写、半透明要按 alpha 混，
+    /// 否则插进来的图会红蓝互换（截图里最刺眼的一类错）。
+    #[test]
+    fn insert_image_draws_bgra_and_blends() {
+        unsafe {
+            let (mut c, bmp) = mk_ctx(20, 20, Palette::dark());
+            let px = vec![
+                10, 20, 30, 255, // 不透明像素：B=10 G=20 R=30
+                40, 50, 60, 128, // 半透明：B=40 G=50 R=60
+            ];
+            let im = ImgOp {
+                x: 3,
+                y: 4,
+                w: 2,
+                h: 1,
+                px: std::sync::Arc::new(px),
+            };
+            c.draw_op(&Op::Image(im));
+            let s = std::slice::from_raw_parts(c.bits, (20 * 20 * 4) as usize);
+            let o = ((4 * 20) + 3) * 4;
+            assert_eq!(&s[o..o + 3], &[10, 20, 30], "BGRA 通道顺序被写反了");
+            assert_eq!(s[o + 3], 255);
+            /* 半透明像素混在黑色底上：40*128/255≈20、50*128/255≈25、60*128/255≈30 */
+            let o2 = ((4 * 20) + 4) * 4;
+            assert_eq!(&s[o2..o2 + 3], &[20, 25, 30], "alpha 混合没按 255 归一");
             DeleteDC(c.mem);
             DeleteObject(bmp);
         }
