@@ -6397,7 +6397,11 @@ body.board-body #root {
    列表顺序只表示"板上有哪些图"，**不代表上下压盖** —— 层级只认"最近点了谁"
    （`.board-cell.top`），所以这里没有任何拖拽排序。 */
 .board-layers {
-  position: fixed;
+  /* 用 absolute 而不是 fixed（2026-11-24 owner 报「多出来一圈直角」）：
+     fixed 会逃出 `.board-root` 的 `overflow:hidden`，面板的直角就压在板子 4px 圆角上，
+     角落看起来是方的。absolute 相对 root 定位，被 root 的圆角裁掉，四角跟板子一致。
+     root 自己是 `position: fixed`，可以直接当包含块，坐标口径不变（差 3px 的窗口边距）。 */
+  position: absolute;
   left: 0;
   top: 30px;
   bottom: 0;
@@ -6626,7 +6630,8 @@ body.board-body #root {
 
 /* 顶栏：拖窗口的把手 + 缩放/关闭。整条只有 30px，不挡画布 */
 .board-top {
-  position: fixed;
+  /* 同 `.board-layers`：absolute 才能被板子圆角裁到，fixed 会把上边两个角切成直角。 */
+  position: absolute;
   left: 0;
   right: 0;
   top: 0;
@@ -6699,8 +6704,9 @@ body.board-body #root {
   background: rgba(255, 255, 255, 0.16);
 }
 .board-miss {
-  position: fixed;
-  inset: var(--frame-inset);
+  /* absolute + inset:0：贴满板面并**跟着板子的圆角裁**（fixed 会把四角顶成直角）。 */
+  position: absolute;
+  inset: 0;
   border-radius: 4px;
   display: grid;
   place-items: center;
@@ -6711,8 +6717,8 @@ body.board-body #root {
 
 /* 空板 / 操作反馈（0.11.0）—— 板上没有 toast，就一条会自己消失的提示 */
 .board-empty {
-  position: fixed;
-  inset: 30px var(--frame-inset) var(--frame-inset);
+  position: absolute;
+  inset: 30px 0 0;
   display: flex;
   flex-direction: column;
   align-items: center;
