@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { HotkeyField } from "./HotkeyField";
 import { hotkeyBindings, loadHotkeys, saveHotkeys, type HotkeySet } from "../lib/hotkeys";
-import { fmtSize, type Prefs, type Source, type WarmProgress } from "../types";
+import { fmtSize, MAIN_BORDER_DEFAULT, MAIN_BORDER_NONE, type Prefs, type Source, type WarmProgress } from "../types";
 import { Icon } from "./ui";
 import { DataFolderCard } from "./DataFolderCard";
 import { LibraryCard } from "./LibraryCard";
@@ -84,6 +84,50 @@ function ShadowSwatches({
             aria-label={t(p.tk)}
             className={on ? "glow-chip on" : "glow-chip"}
             style={{ background: p.swatch }}
+            onClick={() => onChange(p.v)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** 主界面边框预设（本次，照 FontManager 的 FrameGlowPicker）：
+ *  主题紫 + 墨黑 / 纸白 / 中灰，末尾多一枚「无边框」（宽度归零）。
+ *  只控制主窗那一圈 1px 边框；贴图窗 / 灵感板的 3px 阴影仍由上面那条阴影色决定。 */
+const BORDER_PRESETS: { v: string; swatch?: string; tk: TKey }[] = [
+  { v: MAIN_BORDER_DEFAULT, swatch: "var(--accent-a)", tk: "settings.shadowTheme" },
+  { v: "#141412", swatch: "#141412", tk: "settings.shadowBlack" },
+  { v: "#ffffff", swatch: "#ffffff", tk: "settings.shadowWhite" },
+  { v: "#8a8a86", swatch: "#8a8a86", tk: "settings.shadowGray" },
+  { v: MAIN_BORDER_NONE, tk: "settings.borderNone" },
+];
+
+function BorderSwatches({
+  value,
+  onChange,
+  t,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  t: (k: TKey) => string;
+}) {
+  return (
+    <div className="glow-picker" role="radiogroup" aria-label={t("settings.mainBorder")}>
+      {BORDER_PRESETS.map((p) => {
+        const on = value === p.v;
+        const none = p.v === MAIN_BORDER_NONE;
+        return (
+          <button
+            key={p.v}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            tabIndex={on ? 0 : -1}
+            title={t(p.tk)}
+            aria-label={t(p.tk)}
+            className={`glow-chip${none ? " none" : ""}${on ? " on" : ""}`}
+            style={p.swatch ? { background: p.swatch } : undefined}
             onClick={() => onChange(p.v)}
           />
         );
@@ -622,6 +666,19 @@ export function Settings({
               <ShadowSwatches
                 value={draft.shadowColor}
                 onChange={(v) => patch({ shadowColor: v })}
+                t={t}
+              />
+            ),
+          },
+          {
+            id: "mainBorder",
+            label: t("settings.mainBorder"),
+            hint: t("settings.mainBorderHint"),
+            kw: t("settings.kw.mainBorder"),
+            node: (
+              <BorderSwatches
+                value={draft.mainBorder}
+                onChange={(v) => patch({ mainBorder: v })}
                 t={t}
               />
             ),

@@ -573,7 +573,7 @@ export interface Source {
   peekOpacity(v: number): Promise<void>;
   /** 贴图换图后把存档指向新文件 */
   peekTrack(path: string, gid: number): Promise<void>;
-  /** 「蓝色边框」全局开关：后端存状态并广播 `peek:frame` 给所有贴图窗口 */
+  /** 「阴影」全局开关：后端存状态并广播 `peek:frame` 给所有贴图窗口 */
   peekSetFrame(on: boolean): Promise<void>;
   /** 文本进剪贴板（复制显示尺寸这种） */
   clipText(text: string): Promise<void>;
@@ -908,9 +908,15 @@ export interface Prefs {
   locale: string;
   /**
    * 窗口外阴影颜色（0.6.3）：`#RRGGBB` 自定义色；`""` = 跟随主题的 `--accent-a`。
-   * 主窗 / 贴图 / 灵感板三扇窗共用这一个值，设置页用预设色块改。
+   * 本次 起只作用于**贴图窗 / 灵感板** —— 主窗改成 1px 边框后不再有外阴影。
    */
   shadowColor: string;
+  /**
+   * 主界面那圈 1px 边框（本次）：`"accent"` = 跟随主题紫（默认）；
+   * `#RRGGBB` = 固定色；`"none"` = 不要边框（宽度归零，内容直接铺到窗口边）。
+   * 只作用于主窗 `.app-frame`，贴图窗 / 灵感板不读它。
+   */
+  mainBorder: string;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -934,6 +940,7 @@ export const DEFAULT_PREFS: Prefs = {
   trashRetentionDays: 7,
   locale: "system",
   shadowColor: "",
+  mainBorder: "accent",
 };
 
 /** 合法的阴影颜色：空串（跟随主题）或 `#RRGGBB`。别的值一律退回跟随主题。 */
@@ -947,6 +954,34 @@ export function applyShadowColor(v: unknown): void {
   const el = document.documentElement;
   if (hex) el.style.setProperty("--shadow-color", hex);
   else el.style.removeProperty("--shadow-color");
+}
+
+/* ---------------- 主界面边框（本次） ---------------- */
+
+/** 跟随主题紫（= CSS 令牌 --accent-a），与 FontManager 的 FRAME_GLOW_DEFAULT 同义 */
+export const MAIN_BORDER_DEFAULT = "accent";
+/** 不要边框：宽度归零（不是把颜色设透明，透明像素会被 DWM 填白） */
+export const MAIN_BORDER_NONE = "none";
+
+/** 合法值：accent / none / `#RRGGBB`；别的（脏数据、旧版本值）退回跟随主题。 */
+export function normalizeMainBorder(v: unknown): string {
+  if (typeof v !== "string") return MAIN_BORDER_DEFAULT;
+  if (v === MAIN_BORDER_DEFAULT || v === MAIN_BORDER_NONE) return v;
+  return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : MAIN_BORDER_DEFAULT;
+}
+
+/** 把主界面边框写到根元素：宽度与颜色两个变量一起管，避免"有颜色但宽度为 0"的半状态。 */
+export function applyMainBorder(v: unknown): void {
+  const val = normalizeMainBorder(v);
+  const el = document.documentElement;
+  if (val === MAIN_BORDER_NONE) {
+    el.style.setProperty("--frame-border-w-main", "0px");
+    el.style.removeProperty("--frame-border-main");
+    return;
+  }
+  el.style.setProperty("--frame-border-w-main", "1px");
+  if (val === MAIN_BORDER_DEFAULT) el.style.removeProperty("--frame-border-main");
+  else el.style.setProperty("--frame-border-main", val);
 }
 
 /* ---------------- 检查更新（0.1.35） ---------------- */
@@ -1031,6 +1066,7 @@ export function loadPrefs(): Prefs {
           : DEFAULT_PREFS.trashRetentionDays,
       locale: typeof p.locale === "string" && p.locale ? p.locale : "system",
       shadowColor: normalizeShadowColor(p.shadowColor),
+      mainBorder: normalizeMainBorder(p.mainBorder),
     };
   } catch {
     return { ...DEFAULT_PREFS };

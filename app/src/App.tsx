@@ -16,6 +16,7 @@ import { clearProgress, setProgress, useProgress } from "./lib/progressStore";
 import { useEvent } from "./lib/useEvent";
 import { UPDATE_RECHECK_TICK_MS, dueForUpdateCheck } from "./lib/updateGate";
 import {
+  applyMainBorder,
   applyShadowColor,
   fmtNum,
   fmtSize,
@@ -527,6 +528,12 @@ export default function App() {
   useEffect(() => {
     applyShadowColor(prefs.shadowColor);
   }, [prefs.shadowColor]);
+
+  /* 主界面边框（本次）：主窗阴影换成 1px 边框后，颜色/宽度由这条偏好决定。
+     只写根变量，`.app-frame` 是唯一消费方 —— 贴图窗 / 灵感板不受影响。 */
+  useEffect(() => {
+    applyMainBorder(prefs.mainBorder);
+  }, [prefs.mainBorder]);
 
   /* 托盘自绘菜单的三个入口（2026-11-22，最小监听）：
      · open://settings —— 托盘「打开设置」；

@@ -41,7 +41,7 @@ interface PeekBoot {
   i?: number;
   opacity?: number;
   theme?: "light" | "dark";
-  /** 「蓝色边框」的全局状态（后端持有，建窗时注入；**默认开**） */
+  /** 「阴影」的全局状态（后端持有，建窗时注入；**默认开**） */
   frame?: boolean;
   /** 置顶（后端存档里的值） */
   top?: boolean;
@@ -176,7 +176,7 @@ function bootData(): PeekBootData {
     i,
     opacity: Math.min(1, Math.max(0.15, op)),
     theme,
-    /* 蓝色边框：后端是唯一事实来源；boot 没给（浏览器预览 / 老壳）就按默认**开** */
+    /* 阴影：后端是唯一事实来源；boot 没给（浏览器预览 / 老壳）就按默认**开** */
     frame: b.frame !== false,
     perf: b.perf === true,
     top: b.top !== false,
@@ -288,7 +288,7 @@ export function Peek() {
     setFlashMsg(m);
     window.setTimeout(() => setFlashMsg(""), 2200);
   }, []);
-  /* 蓝色边框：**全局开关**，状态在后端（`PEEK_FRAME`），不是每个窗口各记一份。
+  /* 阴影：**全局开关**，状态在后端（`PEEK_FRAME`），不是每个窗口各记一份。
      为什么改（owner 2026-11-18 连报两次"关不掉"）：贴图是多窗口，前端各存 localStorage 时，
      关掉手上这张不影响已经贴着的其他张，新贴的还按默认值开 —— 看上去就是开关没生效。
      默认**开**（owner 2026-11-19：白底网页/文档上贴图需要一圈轮廓才看得出边界），

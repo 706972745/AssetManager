@@ -3,27 +3,27 @@
    特征：纸白底 / 1px 发丝线 / 无阴影面板 / 唯一蓝强调 / 侧栏 2px 蓝竖线 */
 
 .app-frame {
-  /* 3px 紫色外阴影（0.6.2）：和贴图窗 / 灵感板同一套做法。
-     `box-shadow` 画在边框盒**外**，而窗口本身没有像素 —— 所以外壳必须先往里缩 3px，
-     阴影才落在窗口内这圈边距里；不缩的话整圈阴影都在窗口外，被裁得一个像素都看不见
-     （贴图窗当初就踩过这个坑）。窗口是 `transparent(true) + shadow(false)`，没有系统黑投影。
+  /* 主界面边框（本次）：原来是 3px 紫色外阴影（阴影画在边框盒外，所以外壳先内缩 3px
+     给模糊让位）。现在按 owner 要求只留 1px 紫色边框：不再有 shadow，边距同时归零，
+     边框直接压在窗口最外一圈像素上 —— 窗口边缘永远是不透明色，也就没有"透明像素被
+     DWM 填白"那条缝（FontManager 2.7.6 同一处理）。
 
-     内缩必须用 `position:absolute + inset`，**不能用 margin**：`#root` 不是 BFC，
-     首个子元素的 margin-top 会和它折叠到 body 上 —— 结果是左右下各缩 3px、顶边贴死窗口，
-     看起来"只有顶部没有阴影"（owner 2026-11-24 报的就是这个）。 */
+     局部把 --frame-inset 归零：灯箱 / 设置 / 对话框 / 命令面板这些全窗 scrim 是
+     `.app-frame` 的后代，继承到这个 0 才能跟着铺满整窗，不会在四周留一圈桌面。
+     贴图窗 / 灵感板各有自己的 3px（不在这棵子树里），阴影照旧。 */
+  --frame-inset: 0px;
   position: absolute;
   inset: var(--frame-inset);
   display: flex;
   flex-direction: column;
   background: var(--canvas);
   /* 窗口自己（tauri transparent:true / shadow:false）不画任何东西，
-     圆角 + 1px 外描边全在这里：四角是透明的，桌面从 --qb-radius 的缺口透出来。
-     与 FontManager .app-frame 逐值一致（border .07 / radius 8 / overflow hidden）。 */
-  border: 1px solid rgba(var(--ink-rgb), 0.07);
+     圆角 + 边框全在这里：边框颜色默认主题紫，设置页可改成墨黑/纸白/中灰，
+     选「无边框」时宽度归零（内容直接铺到窗口边）。 */
+  border: var(--frame-border-w-main, 1px) solid var(--frame-border-main, var(--accent-a));
   border-radius: var(--qb-radius);
   overflow: hidden;
   isolation: isolate;
-  box-shadow: 0 0 3px 0 var(--shadow-color);
 }
 
 /* ---------------------------------------------------------------- 标题栏 */
@@ -2129,6 +2129,23 @@
 }
 .glow-chip.on {
   box-shadow: 0 0 0 2px var(--ui-panel), 0 0 0 3.5px var(--accent-a);
+}
+/* 「无边框」（本次，照 FontManager `.glow-chip.none`）：空心圆 + 一条斜线，
+   排在四个色块后面 —— 选中后宽度归零，不是把颜色设透明（透明边会被 DWM 填白）。 */
+.glow-chip.none {
+  position: relative;
+  background: transparent;
+}
+.glow-chip.none::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 11px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: rgba(var(--ink-rgb), 0.55);
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 /* 开关：形态照 FontManager `.pill-toggle`（34×19 胶囊 + 内阴影 + 白色渐变滑块，
@@ -4673,8 +4690,9 @@ body.peek-body #root {
   position: fixed;
   inset: var(--peek-glow);
   overflow: hidden;
-  /* 紫色 3px 外阴影（主题紫，深/浅两套自动跟随），和灵感板同一套做法。 */
-  box-shadow: 0 0 3px 0 var(--shadow-color);
+  /* 紫色 3px 外阴影**不再常驻**：它和 1px 描边一起受右键菜单「阴影」开关控制，
+     规则挪到下面的 `.peek-root.peek-framed`。关掉后窗口只剩图，四周这 3px 透明边
+     仍在（后端 PEEK_GLOW 决定窗口尺寸），但肉眼看不见。 */
   /* **必须全透明**：Ctrl+滚轮降不透明度时，透出来的应该是桌面，
      不是这层容器自己的底色（0.10.x 这里写的是 #0f0f11，owner 看到的就是"变黑"）。 */
   background: transparent;
@@ -4737,9 +4755,19 @@ body.peek-body #root {
   z-index: 40;
 }
 
-/* 蓝色边框（右键「✓ 蓝色边框」可关，默认开）。
+/* 贴图窗的「阴影」开关（右键菜单，默认开；2026-11-24 owner 定稿：这一项就是阴影，
+   关掉后**阴影和边框都不画**）。
+   打开时两层：3px 紫色外阴影（画在窗口内那圈透明边里，不吃图的像素）+ 下面那条
+   1px 描边。两层同色同源（`--shadow-color` 由设置页「窗口阴影颜色」写入），看上去
+   就是一圈紫边带一点外扩，所以统一叫「阴影」。
+   关掉时这里整组规则都不命中，窗口 = 纯图。 */
+.peek-root.peek-framed {
+  box-shadow: 0 0 3px 0 var(--shadow-color);
+}
+
+/* 1px 描边（右键「✓ 阴影」可关，默认开）。
    为什么需要它：截图贴到屏幕上之后，如果那块图和桌面颜色接近，**根本看不出边界**，
-   也不知道贴图有没有和截图对齐。一圈 1px 蓝线给个明确的轮廓。
+   也不知道贴图有没有和截图对齐。一圈 1px 紫线给个明确的轮廓。
 
    画法：`::after` 铺满窗口 + inset box-shadow，`pointer-events: none` —— 不挡拖动、
    不挡双击关窗、不参与布局。代价是贴图与截图 1:1 时会盖住最外 1 个像素，这是刻意的
@@ -5927,13 +5955,31 @@ body.board-body #root {
   background-image: radial-gradient(circle, var(--board-dot) 1px, transparent 1.6px);
   background-size: 48px 48px;
   background-position: 0 0;
-  /* 紫色 3px 外阴影，和贴图窗一致（主题紫 `--accent-a`，深/浅两套自动跟随）。 */
-  box-shadow: 0 0 3px 0 var(--shadow-color);
+  /* 紫色 3px 外阴影**不画在这里**（2026-11-24 owner 报「阴影不再最顶层，被里面的图层遮挡」）：
+     root 的 box-shadow 画在自己盒子外，但它压不过 root 内部的 fixed 图层 ——
+     `.board-top`（left/right:0、top:0）和 `.board-layers`（left:0、bottom:0）都铺到了窗口
+     最外圈，把上 / 左 / 下三条边的阴影盖住了（实测左边缘整条无紫）。
+     现在阴影改由下面的 `.board-root::after` 覆盖层来画，z-index 拉到内容之上。 */
   /* 平时就是普通箭头：这块画布的主操作是"点图 / 拖图 / 框选"，抓手光标会让人误以为
      整块板都能抓走（owner 2026-11-2x：悬停永远是抓手）。只有中键按住平移时才变 `grabbing`。 */
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
+}
+/* 板子的紫色外阴影（和贴图窗同一圈 3px、同一个 `--shadow-color`）。
+   为什么用 fixed 伪元素而不是 root 自己的 box-shadow：
+   · fixed 逃出 root 的 overflow:hidden，能画到 root 外那 3px 透明带里；
+   · z-index 高于一切板内图层（顶部条 10 / 图层面板 9 / 标注 12），
+     图片、便签、面板再怎么盖都盖不到它 —— 这正是 owner 要的"阴影永远在最顶层"；
+   · pointer-events:none，不吃鼠标，不影响拖图/框选/双击。 */
+.board-root::after {
+  content: "";
+  position: fixed;
+  inset: var(--frame-inset);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 999;
+  box-shadow: 0 0 3px 0 var(--shadow-color);
 }
 .board-root.panning {
   cursor: grabbing;
