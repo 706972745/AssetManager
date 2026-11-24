@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as RPointerEvent } from "react";
 import { onAppEvent, source } from "../data/source";
 import { loadPrefs } from "../types";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
@@ -36,13 +36,21 @@ interface PeekItem {
 
 interface PeekBoot {
   id?: string;
+  seq?: number;
   items?: PeekItem[];
   i?: number;
   opacity?: number;
   theme?: "light" | "dark";
   /** 「蓝色边框」的全局状态（后端持有，建窗时注入；**默认开**） */
   frame?: boolean;
+  /** 置顶（后端存档里的值） */
+  top?: boolean;
+  /** 贴图耗时埋点开关（后端 `AM_PEEK_PERF=1` 时注入） */
+  perf?: boolean;
 }
+
+/** 前端脚本开始执行的时间（模块求值那一刻），用于量「建窗 → 前端起来」这段 */
+const T_EVAL = Date.now();
 
 const ZOOM_STEP = 1.09; // 和果核看图同一个步长（实测每格 ×1.09）
 const OPACITY_STEP = 0.08;
@@ -98,13 +106,53 @@ function clampView(v: PeekView, rot: number, winW: number, winH: number): PeekVi
   };
 }
 
-function bootData(): {
+interface PeekBootData {
+  id: string;
   items: PeekItem[];
   i: number;
   opacity: number;
   theme: "light" | "dark";
   frame: boolean;
-} {
+  perf: boolean;
+  /** 置顶（存档里的值；右键菜单的 ✓ 跟着它走） */
+  top: boolean;
+  /** 后端每次换图 +1，用来丢掉重复的 boot */
+  seq: number;
+}
+
+type RawInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+/** 直接拿 Tauri 的 IPC 桥：换图（`am_peek_boot`）与埋点不走 `source` 那层接口 ——
+    它们只属于贴图窗，不值得把 `Source` 接口撑大。 */
+function rawInvoke(): RawInvoke | null {
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: { invoke: RawInvoke };
+    __TAURI__?: { core?: { invoke: RawInvoke } };
+  };
+  return w.__TAURI_INTERNALS__?.invoke ?? w.__TAURI__?.core?.invoke ?? null;
+}
+
+/** 后端推来的 boot（`peek:swap` / `am_peek_boot`）→ 组件内部形状（带默认值与校验） */
+function normalizeBoot(raw: PeekBoot | null | undefined): PeekBootData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const items = (raw.items ?? []).filter((x) => !!x?.src);
+  if (!items.length) return null;
+  const i = Math.max(0, Math.min(Number(raw.i ?? 0) || 0, items.length - 1));
+  const op = typeof raw.opacity === "number" ? raw.opacity : 1;
+  return {
+    id: raw.id ?? "-",
+    items,
+    i,
+    opacity: Math.min(1, Math.max(0.15, op)),
+    theme: raw.theme === "light" ? "light" : "dark",
+    frame: raw.frame !== false,
+    perf: raw.perf === true,
+    top: raw.top !== false,
+    seq: Number(raw.seq ?? 0) || 0,
+  };
+}
+
+function bootData(): PeekBootData {
   const b = (window as unknown as { __AM_PEEK__?: PeekBoot }).__AM_PEEK__ ?? {};
   const items = (b.items ?? []).filter((x) => !!x?.src);
   const i = Math.max(0, Math.min(Number(b.i ?? 0) || 0, Math.max(0, items.length - 1)));
@@ -123,21 +171,79 @@ function bootData(): {
             ? "dark"
             : "light";
   return {
+    id: b.id ?? "-",
     items,
     i,
     opacity: Math.min(1, Math.max(0.15, op)),
     theme,
     /* 蓝色边框：后端是唯一事实来源；boot 没给（浏览器预览 / 老壳）就按默认**开** */
     frame: b.frame !== false,
+    perf: b.perf === true,
+    top: b.top !== false,
+    seq: Number(b.seq ?? 0) || 0,
   };
 }
+
+/* ---------------- 复用窗的事件总线 ----------------
+
+   为什么**不**在 React 的 effect 里 `listen`：热备窗是**隐藏**的，WebView2 会把它的
+   渲染和副作用往后拖 —— 实测预热窗的 effect 直到被复用的那一刻才第一次跑。要是监听器
+   也等 effect，`peek:swap` 早就发完了（事件不重放）。所以：
+   · 监听器在**模块求值**时就装好（脚本一跑就装，比任何换图都早）；
+   · 装好后补拉一次 `am_peek_boot`，覆盖"事件比监听器先到"那一瞬；
+   · 组件挂载前收到的 boot 先存在 `pendingBoot`，挂载时补上。
+   这两条路 + `seq` 去重，既不会漏，也不会把同一张图解两次。 */
+let swapHandler: ((b: PeekBoot) => void) | null = null;
+let idleHandler: (() => void) | null = null;
+let pendingBoot: PeekBoot | null = null;
+let pendingIdle = false;
+
+function acceptBoot(raw: PeekBoot | null | undefined) {
+  if (!raw) return;
+  if (swapHandler) swapHandler(raw);
+  else pendingBoot = raw;
+}
+
+function installPeekBus(): void {
+  if (!(window as unknown as { __AM_PEEK__?: unknown }).__AM_PEEK__) return;
+  void import("@tauri-apps/api/event")
+    .then(({ listen }) =>
+      Promise.all([
+        listen<PeekBoot>("peek:swap", (e) => acceptBoot(e.payload)),
+        listen("peek:idle", () => (idleHandler ? idleHandler() : (pendingIdle = true))),
+      ]).then(() => {
+        /* 注册好之后再补拉：这段时间里后端可能已经换过图（事件落空） */
+        const inv = rawInvoke();
+        if (!inv) return;
+        void inv("am_peek_boot")
+          .then((b) => acceptBoot(b as PeekBoot))
+          .catch(() => {});
+      })
+    )
+    .catch(() => {});
+}
+
+installPeekBus();
 
 /** 16px 线性图标（只用一个，不值得为它引依赖） */
 export function Peek() {
   const t = useT();
-  const boot = useMemo(bootData, []);
+  /* boot 是**可替换的**：复用窗（用户撕掉的那扇 / 启动预热的空白窗）不重新加载页面，
+     后端把新图推过来（`peek:swap`）后这里整体换一份，所有视图状态跟着复位。 */
+  const [boot, setBoot] = useState<PeekBootData>(bootData);
+  /* 贴图耗时埋点：只把阶段名 + 客户端时间戳交给后端（它统一写文件、统一时钟）。
+     平时（`AM_PEEK_PERF` 没开）这里全是空转，一个 IPC 都不发。 */
+  const perfMark = useCallback(
+    (stage: string, at = Date.now()) => {
+      if (!boot.perf) return;
+      const inv = rawInvoke();
+      if (!inv) return;
+      void inv("am_peek_perf", { label: boot.id, stage, at }).catch(() => {});
+    },
+    [boot.perf, boot.id]
+  );
   const [idx, setIdx] = useState(boot.i);
-  const [pinned, setPinned] = useState(true); // 默认置顶（owner 要求）
+  const [pinned, setPinned] = useState(boot.top); // 默认置顶（owner 要求）
   const [err] = useState("");
   const [opac, setOpac] = useState(boot.opacity);
   /* 图内缩放（Shift+滚轮）：scale + 位移，`transform-origin: 0 0` 便于算锚点。
@@ -196,22 +302,111 @@ export function Peek() {
   /* 比例只校正一次：换图（←/→）会重新触发 onLoad，那时按新图再校一次是对的，
      但同一张图反复 load（缓存/重排）不能每次都改窗口，否则会和滚轮缩放抢 */
   const ratioFixed = useRef(false);
+  /* 有没有图可显示（复用窗在闲置状态是空的，这时候**不许**把窗口 show 出来） */
+  const hasItem = useRef(false);
+  hasItem.current = boot.items.length > 0;
+  /* "图已经在缓存里、onLoad 不会再触发"时的兜底定时器（换图后重新上弦） */
+  const readyTimer = useRef(0);
   const markReady = useCallback(() => {
-    if (shown.current) return;
+    if (shown.current || !hasItem.current) return;
     shown.current = true;
     // 双 rAF：等这一帧真的合成完，再让窗口显示
     requestAnimationFrame(() =>
-      requestAnimationFrame(() => void source.peekReady().catch(() => {}))
+      requestAnimationFrame(() => {
+        perfMark("fe_ready");
+        void source.peekReady().catch(() => {});
+      })
     );
+  }, [perfMark]);
+  const armReady = useCallback(
+    (ms = 450) => {
+      window.clearTimeout(readyTimer.current);
+      readyTimer.current = window.setTimeout(() => markReady(), ms);
+    },
+    [markReady]
+  );
+
+  /**
+   * 换一份 boot（复用窗收到后端推来的新图时走这里）。
+   *
+   * **所有视图状态都要复位**：新图的索引、旋转、镜像、图内缩放、不透明度、置顶、边框……
+   * 漏一个就会出现"新贴的图还带着上一张的缩放/旋转"。`shown` 也要复位 ——
+   * 下一次 `onLoad` 才轮到它重新 `am_peek_ready` 把窗露出来。
+   */
+  /* 收到过的最大 `seq`：`peek:swap` 和 mount 补拉可能各送一份同一张图 */
+  const appliedSeq = useRef(boot.seq);
+  const applyBoot = useCallback(
+    (raw: PeekBoot | null | undefined) => {
+      const b = normalizeBoot(raw);
+      if (!b) return;
+      if (b.seq && b.seq <= appliedSeq.current) return;
+      appliedSeq.current = b.seq;
+      shown.current = false;
+      ratioFixed.current = false;
+      pan.current = null;
+      setPanning(false);
+      setMenu(null);
+      setView(ORIGIN_VIEW);
+      setRot(0);
+      setFlip({ h: false, v: false });
+      setIdx(b.i);
+      setOpac(b.opacity);
+      setFrame(b.frame);
+      setPinned(b.top);
+      setBoot(b);
+      /* 同一张图再贴一次时浏览器不会重发 load 事件 —— 靠这个兜底把窗露出来 */
+      armReady();
+    },
+    [armReady]
+  );
+
+  /** 收进热备：把图放掉（`<img>` 卸载才会释放解码后的位图），等下一次换图 */
+  const goIdle = useCallback(() => {
+    shown.current = false;
+    ratioFixed.current = false;
+    window.clearTimeout(readyTimer.current);
+    setView(ORIGIN_VIEW);
+    setRot(0);
+    setFlip({ h: false, v: false });
+    setMenu(null);
+    setBoot((b) => ({ ...b, items: [], i: 0 }));
   }, []);
 
   const cur = boot.items[idx];
 
   /* 图可能已经在缓存里（onLoad 不会再触发），所以再挂一道兜底 */
   useEffect(() => {
-    const t = setTimeout(markReady, 400);
-    return () => clearTimeout(t);
-  }, [markReady]);
+    armReady(400);
+    return () => window.clearTimeout(readyTimer.current);
+  }, [armReady]);
+
+  /**
+   * 把总线接到组件状态上（监听器本身在模块求值时就装好了，见 `installPeekBus`）。
+   * 组件挂载前就到的 boot 存在 `pendingBoot`，这里补上。
+   */
+  useEffect(() => {
+    swapHandler = (b) => applyBoot(b);
+    idleHandler = () => goIdle();
+    if (pendingBoot) {
+      const b = pendingBoot;
+      pendingBoot = null;
+      applyBoot(b);
+    }
+    if (pendingIdle) {
+      pendingIdle = false;
+      goIdle();
+    }
+    return () => {
+      swapHandler = null;
+      idleHandler = null;
+    };
+  }, [applyBoot, goIdle]);
+
+  /* 埋点：脚本求值 / React 首次提交。中间那段是 bundle 解析 + 首帧渲染。 */
+  useEffect(() => {
+    perfMark("fe_eval", T_EVAL);
+    perfMark("fe_mount");
+  }, [perfMark]);
 
   /* 主题：贴图是独立 webview，不会自动继承主窗的 data-theme。
      以前这里没人设，于是浅色主题下贴图的右键菜单仍是深色（owner 2026-11-18 报的第 6 条）。
@@ -561,6 +756,7 @@ export function Peek() {
             setPanning(false);
           }}
           onLoad={(e) => {
+            perfMark("fe_load");
             /* **比例校正**（owner 2026-11-19：「长图转贴图被压扁了」）。
                窗口尺寸是后端按长边算的，只要实际比例和窗口比例差一点（DPI 取整、
                老存档里的 longEdge、手拖过窗口边），`object-fit` 就会把图拉变形。

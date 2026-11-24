@@ -130,8 +130,28 @@ impl ThumbStore {
         hex(&xxh3_128(raw.as_bytes()).to_be_bytes())
     }
 
+    /// 缓存 key 能不能拼进路径：只允许 `[A-Za-z0-9_-]`，且长度合理、不含 `..`。
+    ///
+    /// `key_for` 产出的是 32 位 hex（极端比例再加 `-s`），所以这条闸门不会误伤正常缓存；
+    /// 而 DB 里的 `thumb_key` / `thumb_lru.key` 是**不可信输入**（第三方工具改过的索引库）：
+    /// 带 `..` 能把 GC 的 `remove_file` 引到库外，含多字节 UTF-8 还会让字节切片 panic。
+    pub fn key_ok(key: &str) -> bool {
+        !key.is_empty()
+            && key.len() <= 64
+            && !key.contains("..")
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
+
     /// 两级分桶，避免单目录堆百万文件。
+    ///
+    /// 非法 key 一律当"缓存未命中"：返回一个固定占位路径（它不会存在），
+    /// 调用方的 `is_file()` 自然是 false，于是重新生成 —— 而不是拿 DB 里的字符串去拼路径。
     pub fn file_for(&self, key: &str) -> PathBuf {
+        if !Self::key_ok(key) {
+            return self.root.join("__invalid_key__");
+        }
         let a = &key[0..2.min(key.len())];
         let b = if key.len() >= 4 { &key[2..4] } else { "00" };
         self.root.join(a).join(b).join(format!("{}.{}", key, THUMB_EXT))
@@ -584,6 +604,22 @@ mod tests {
     fn jpeg_scaled_decode_survives_garbage() {
         assert!(decode_jpeg_scaled(b"not a jpeg at all", 256).is_none());
         assert!(decode_jpeg_scaled(&[], 256).is_none());
+    }
+
+    /// DB 里的 `thumb_key` 是不可信输入：非法 key 只能当"缓存未命中"，
+    /// 绝不能拼出 `..` 路径（GC 会 remove_file），也不能在多字节处切片 panic。
+    #[test]
+    fn file_for_rejects_bad_keys() {
+        let store = ThumbStore::new(std::env::temp_dir().join("am-thumb-key-test"));
+        let good = ThumbStore::key_for(&std::env::temp_dir().join("x.png"), 256);
+        assert!(ThumbStore::key_ok(&good));
+        assert!(store.file_for(&good).to_string_lossy().ends_with(".webp"));
+        for bad in ["", "..", "../../evil", "abc/def", "a\\b", "素材", "a.b"] {
+            assert!(!ThumbStore::key_ok(bad), "不该认这个 key：{bad}");
+            /* 占位路径：不会存在，调用方按缓存未命中重新生成 */
+            assert!(!store.file_for(bad).is_file());
+            assert_eq!(store.file_for(bad), store.root.join("__invalid_key__"));
+        }
     }
 
     /// 极端比例的图按**短边**出图：长截图 1080×11942 在 384 档要出 384×4246，

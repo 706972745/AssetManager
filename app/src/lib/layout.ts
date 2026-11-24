@@ -111,3 +111,80 @@ export function masonryLayout(
   }
   return { rects, height: Math.max(0, Math.max(...heights) - gap) };
 }
+
+/**
+ * 竖向分带索引（P1-6 滚动开销）：把 rects 按 `y` 切进 512px 高的桶，滚动时只扫桶里那几条。
+ *
+ * 为什么不用「按 y 排序 + 二分」：瀑布流的 y 不单调（最短列堆叠），能二分的是
+ * 「前缀最大下边缘」，但那要先排一次序 —— 每翻一页都 O(n log n)，10 万条时会比它取代的
+ * 全量 filter 更贵。分带只在**建布局时** O(n) 走一遍（每个 rect 只落进它跨到的 1–2 个桶），
+ * 而查询是 O(可见条数)，所以滚动期间（每 100px 一次）从 O(n) 降到 O(1)。
+ */
+export interface YIndex {
+  /** bins[b] = 与第 b 带（`[b*BIN_H, (b+1)*BIN_H)`）相交的 rects 下标 */
+  bins: number[][];
+  /** 查询去重用：同一张图跨两个桶时只算一次 */
+  seen: Int32Array;
+  stamp: number;
+}
+
+/** 带高：一个桶内一般只有「一屏十分之一」那么多格子，多扫几条不心疼 */
+const BIN_H = 512;
+
+export function buildYIndex(rects: Rect[]): YIndex {
+  const n = rects.length;
+  let maxEnd = 0;
+  for (let i = 0; i < n; i++) {
+    const e = rects[i].y + rects[i].h;
+    if (e > maxEnd) maxEnd = e;
+  }
+  const count = Math.max(1, Math.ceil(maxEnd / BIN_H) + 1);
+  const bins: number[][] = new Array(count);
+  for (let b = 0; b < count; b++) bins[b] = [];
+  for (let i = 0; i < n; i++) {
+    const r = rects[i];
+    const a = Math.max(0, Math.floor(r.y / BIN_H));
+    const z = Math.min(count - 1, Math.floor((r.y + r.h) / BIN_H));
+    for (let b = a; b <= z; b++) bins[b].push(i);
+  }
+  return { bins, seen: new Int32Array(n), stamp: 0 };
+}
+
+/** 可见窗口 `[top, bottom]` 里的 rects（结果与过去那趟 `rects.filter(...)` 完全相同）。
+ *  滚动每 100px 提交一次，全量 filter 在 10 万条时等于每次 10 万次比较。 */
+export function visibleRects(rects: Rect[], index: YIndex, top: number, bottom: number): Rect[] {
+  const out: Rect[] = [];
+  if (!rects.length) return out;
+  const stamp = ++index.stamp;
+  const b1 = Math.min(index.bins.length - 1, Math.floor(bottom / BIN_H));
+  for (let b = Math.max(0, Math.floor(top / BIN_H)); b <= b1; b++) {
+    const bin = index.bins[b];
+    for (let k = 0; k < bin.length; k++) {
+      const i = bin[k];
+      if (index.seen[i] === stamp) continue; // 跨桶的图只算一次
+      index.seen[i] = stamp;
+      const r = rects[i];
+      // 桶只保证"有交集"，上下边还要各判一次
+      if (r.y + r.h >= top && r.y <= bottom) out.push(r);
+    }
+  }
+  return out;
+}
+
+/** 滚动锚点用：`top` 处最上面那张（旧实现每次全量扫一遍找 `y` 最小的）。
+ *  从 top 所在的桶开始往上找第一个有候选的桶 —— 更靠后的桶里不可能有更小的 `y`
+ *  （其 `y` 若小于桶起点，它本身也会落在这个桶里），所以命中的第一桶就是答案。 */
+export function topVisibleRect(rects: Rect[], index: YIndex, top: number): Rect | null {
+  if (!rects.length) return null;
+  for (let b = Math.max(0, Math.floor(top / BIN_H)); b < index.bins.length; b++) {
+    const bin = index.bins[b];
+    let best: Rect | null = null;
+    for (let k = 0; k < bin.length; k++) {
+      const r = rects[bin[k]];
+      if (r.y + r.h < top) continue;
+      if (!best || r.y < best.y) best = r;
+    }
+    if (best) return best;
+  }
+  return null;
+}

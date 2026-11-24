@@ -16,6 +16,8 @@ import {
 import { createPortal } from "react-dom";
 import {
   ArrowUpDown,
+  ArrowUpRight,
+  BookOpen,
   Camera,
   Check,
   ChevronRight,
@@ -36,10 +38,14 @@ import {
   Image as ImageIcon,
   Info,
   Keyboard,
+  Languages,
   LayoutGrid,
+  MessageSquarePlus,
+  Minus,
   MoreHorizontal,
   Music,
   Plus,
+  Power,
   RefreshCw,
   Search,
   Sparkles,
@@ -211,6 +217,28 @@ const ICONS: Record<string, Glyph> = {
   ),
   link: ({ size, stroke, className }) => (
     <ExternalLink size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 设置页「通用」：语言（照 FontManager 的 Languages 13/1.5）
+     与翻译块两个外链按钮（BookOpen / MessageSquarePlus + ArrowUpRight） */
+  languages: ({ size, stroke, className }) => (
+    <Languages size={size} strokeWidth={stroke} className={className} />
+  ),
+  "book-open": ({ size, stroke, className }) => (
+    <BookOpen size={size} strokeWidth={stroke} className={className} />
+  ),
+  "message-plus": ({ size, stroke, className }) => (
+    <MessageSquarePlus size={size} strokeWidth={stroke} className={className} />
+  ),
+  "arrow-up-right": ({ size, stroke, className }) => (
+    <ArrowUpRight size={size} strokeWidth={stroke} className={className} />
+  ),
+  /* 系统：开机自启（电源）/ 启动时最小化（横线）。
+     「关闭到托盘」没有一眼能认的 lucide 形状，宁可不配也不硬凑。 */
+  power: ({ size, stroke, className }) => (
+    <Power size={size} strokeWidth={stroke} className={className} />
+  ),
+  minimize: ({ size, stroke, className }) => (
+    <Minus size={size} strokeWidth={stroke} className={className} />
   ),
 };
 

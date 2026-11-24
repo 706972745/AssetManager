@@ -55,10 +55,16 @@ interface RowDef {
   id: string;
   label: string;
   hint?: string;
+  /** 标签前的 lucide 图标名（走 `ui.tsx` 的 ICONS 映射；没有贴切的就不写） */
+  icon?: string;
   /** 搜索命中的额外关键词（标签本身也会匹配） */
   kw?: string;
+  /** hint 收进标签后的 ⓘ，不在标签下压一行灰字（语言行用） */
+  hintInline?: boolean;
   /** 整块内容（自己带标签与说明），不套「左标签右控件」那一行 */
   block?: boolean;
+  /** 原样渲染的块：不带 `.set-row`，所以不会被行发丝线切开（翻译块用） */
+  bare?: boolean;
   node: ReactNode;
 }
 
@@ -339,8 +345,14 @@ export function Settings({
   const groups = useMemo<
     { key: SettingsKey; tk: TKey; rows: RowDef[] }[]
   >(() => {
-    const seg = (value: number | string, options: { v: number | string; label: string }[], on: (v: any) => void) => (
-      <div className="seg">
+    /* 分段控件：`fill` = 撑满整行、各档等分（界面缩放那一排，FM `.scale-toggle`）。 */
+    const seg = (
+      value: number | string,
+      options: { v: number | string; label: string }[],
+      on: (v: any) => void,
+      fill = false
+    ) => (
+      <div className={`seg ${fill ? "seg-fill" : ""}`}>
         {options.map((o) => (
           <button
             key={String(o.v)}
@@ -375,7 +387,10 @@ export function Settings({
           {
             id: "language",
             label: t("lang.label"),
+            /* 语言行照 FontManager：图标 + 标签 + ⓘ，说明不再压成第二行灰字 */
+            icon: "languages",
             hint: t("settings.langHint"),
+            hintInline: true,
             kw: t("settings.kw.language"),
             node: (
               <LangSelect
@@ -389,34 +404,56 @@ export function Settings({
           },
           {
             /* 「没有你的语言？」那一块：翻译指南 + 申请添加语言。
-               这两个按钮真的能打开 GitHub —— 不做成不可点的装饰。 */
+               这两个按钮真的能打开 GitHub —— 不做成不可点的装饰。
+               `bare`：不进「左标签右控件」那行，也不吃 `.set-row + .set-row`
+               的整行发丝线 —— 虚线框自己就是分界（照 FontManager 的
+               `.settings-translate` 紧贴在语言行下面）。 */
             id: "language-missing",
             label: "",
-            block: true,
+            bare: true,
             kw: t("settings.kw.translate"),
             node: (
-              <div className="set-lang-miss">
-                <div className="set-lang-miss-title">{t("lang.missing")}</div>
-                <div className="set-lang-miss-actions">
+              <div className="set-translate">
+                <div className="set-translate-text">
+                  <div className="set-translate-title">
+                    {t("lang.missing")}
+                    <SetHint text={t("settings.translateHint")} />
+                  </div>
+                </div>
+                <div className="set-translate-actions">
                   <button
-                    className="btn btn-tiny"
+                    className="set-data-btn"
                     onClick={() =>
                       void source
                         .openUrl("https://github.com/706972745/AssetManager#readme")
                         .catch((e) => onToast(String(e), true))
                     }
                   >
+                    <Icon name="book-open" size={13} stroke={1.5} />
                     {t("lang.guide")}
+                    <Icon
+                      name="arrow-up-right"
+                      size={12}
+                      stroke={1.5}
+                      className="set-btn-arrow"
+                    />
                   </button>
                   <button
-                    className="btn btn-tiny"
+                    className="set-data-btn"
                     onClick={() =>
                       void source
                         .openUrl("https://github.com/706972745/AssetManager/issues/new")
                         .catch((e) => onToast(String(e), true))
                     }
                   >
+                    <Icon name="message-plus" size={13} stroke={1.5} />
                     {t("lang.request")}
+                    <Icon
+                      name="arrow-up-right"
+                      size={12}
+                      stroke={1.5}
+                      className="set-btn-arrow"
+                    />
                   </button>
                 </div>
               </div>
@@ -439,6 +476,7 @@ export function Settings({
           {
             id: "autostart",
             label: t("sys.autostart"),
+            icon: "power",
             hint: t("sys.autostartHint"),
             kw: t("settings.kw.autostart"),
             node: sw(!!autoStart, () => {
@@ -459,6 +497,7 @@ export function Settings({
           {
             id: "startMinimized",
             label: t("sys.startMinimized"),
+            icon: "minimize",
             hint: t("sys.startMinimizedHint"),
             kw: t("settings.kw.startMinimized"),
             node: sw(draft.startMinimized, () => patch({ startMinimized: !draft.startMinimized })),
@@ -484,6 +523,7 @@ export function Settings({
             id: "view",
             label: t("settings.defaultView"),
             hint: t("settings.defaultViewHint"),
+            icon: "grid",
             kw: t("settings.kw.view"),
             node: seg(draft.view, [
               { v: "grid", label: t("settings.viewGrid") },
@@ -560,6 +600,7 @@ export function Settings({
             id: "autotags",
             label: t("settings.autoTags"),
             hint: t("settings.autoTagsHint"),
+            icon: "tag",
             kw: t("settings.kw.autoTags"),
             node: (
               <button
@@ -576,6 +617,7 @@ export function Settings({
             id: "autotags-reset",
             label: t("settings.resetDenied"),
             hint: t("settings.resetDeniedHint"),
+            icon: "undo",
             kw: t("settings.kw.resetDenied"),
             node: (
               <button className="btn btn-tiny" onClick={onResetDenied}>
@@ -612,7 +654,7 @@ export function Settings({
                   patch({ uiScale: next });
                   /* 立刻应用并把后端算出的实际倍率显示出来（选"自动"时才知道是多少） */
                   void source.setUiScale(next).then(setScaleNow).catch(() => {});
-                })}
+                }, true)}
               </div>
             ),
           },
@@ -625,6 +667,7 @@ export function Settings({
           {
             id: "cache-size",
             label: t("settings.thumbCache"),
+            icon: "database",
             hint: stat
               ? t("settings.cacheStat", { count: stat.files.toLocaleString() })
               : t("settings.cacheCounting"),
@@ -738,6 +781,7 @@ export function Settings({
             id: "refs",
             label: t("settings.refs"),
             hint: t("settings.refsHint"),
+            icon: "link",
             kw: t("settings.kw.refs"),
             node: (
               <div className="set-inline">
@@ -796,6 +840,7 @@ export function Settings({
             id: "trash-retention",
             label: t("settings.trashRetention"),
             hint: t("settings.trashRetentionHint"),
+            icon: "trash",
             kw: t("settings.kw.trashRetention"),
             node: (
               <div className="set-num">
@@ -863,6 +908,7 @@ export function Settings({
           {
             id: "rebuild",
             label: t("settings.rebuild"),
+            icon: "refresh",
             hint: confirmRebuild
               ? t("settings.rebuildConfirmHint")
               : t("settings.rebuildHint"),
@@ -910,6 +956,7 @@ export function Settings({
           {
             id: "export",
             label: t("settings.exportUserdata"),
+            icon: "download",
             hint: libName
               ? t("settings.exportUserdataHintLib", { name: libName })
               : t("settings.exportUserdataHint"),
@@ -935,6 +982,7 @@ export function Settings({
           {
             id: "package",
             label: t("settings.exportPackage"),
+            icon: "download",
             hint: libName
               ? t("settings.exportPackageHintLib", { name: libName })
               : t("settings.exportPackageHint"),
@@ -971,6 +1019,7 @@ export function Settings({
           {
             id: "library-zip",
             label: t("settings.exportZip"),
+            icon: "download",
             hint: libName
               ? t("settings.exportZipHintLib", { name: libName })
               : t("settings.exportZipHint"),
@@ -1117,6 +1166,7 @@ export function Settings({
             id: "update-auto",
             label: t("settings.updateAuto"),
             hint: t("settings.updateAutoHint"),
+            icon: "refresh",
             kw: t("settings.kw.updateAuto"),
             node: (
               <button
@@ -1173,7 +1223,7 @@ export function Settings({
         <aside className="set-nav">
           <div className="set-nav-title">{t("settings.title")}</div>
           <div className="set-search">
-            <Icon name="search" size={13} stroke={1.7} className="set-search-icon" />
+            <Icon name="search" size={12} stroke={1.7} className="set-search-icon" />
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -1237,26 +1287,40 @@ export function Settings({
                  同 key 的兄弟节点会被 React 复用 —— 表现是「点快捷键，内容却是语言/系统，
                  还重复一遍」。0.3.30 装上去当天就被 owner 抓到，这里必须唯一。 */
               shown.map((g) => (
-                /* 设计稿 §3.6 / HTML 预览 set-sec2：分组标题提到卡片**外面**（11px 小标题 +
-                   下面一张发丝线卡），不再是"卡片头里塞一行大写小字"。 */
+                /* 一个分组 = 一张卡，标题进卡内做**卡头**（FontManager `.detail-heading`）：
+                   13/600 + 下边线，卡片无内距，行的左右 14px 与卡头对齐。 */
                 <div className="set-sec" key={`${g.key}:${g.tk}`}>
-                  <div className="set-sec-ttl">{t(g.tk)}</div>
                   <div className="set-card">
-                  {g.rows.map((r) =>
-                    r.block ? (
-                      <div className="set-row set-row-block" key={r.id}>
-                        {r.node}
-                      </div>
-                    ) : (
-                      <div className="set-row" key={r.id}>
-                        <div className="set-row-text">
-                          <div className="set-row-label">{r.label}</div>
-                          {r.hint && <div className="set-row-hint">{r.hint}</div>}
+                    <div className="set-card-head">{t(g.tk)}</div>
+                    {g.rows.map((r) =>
+                      r.bare ? (
+                        <div className="set-bare" key={r.id}>
+                          {r.node}
                         </div>
-                        <div className="set-row-ctl">{r.node}</div>
-                      </div>
-                    )
-                  )}
+                      ) : r.block ? (
+                        <div className="set-row set-row-block" key={r.id}>
+                          {r.node}
+                        </div>
+                      ) : (
+                        <div className="set-row" key={r.id}>
+                          <div className="set-row-text">
+                            <div className="set-row-label">
+                              {r.icon && (
+                                <span className="set-row-icon">
+                                  <Icon name={r.icon} size={13} stroke={1.5} />
+                                </span>
+                              )}
+                              {r.label}
+                              {r.hint && r.hintInline && <SetHint text={r.hint} />}
+                            </div>
+                            {r.hint && !r.hintInline && (
+                              <div className="set-row-hint">{r.hint}</div>
+                            )}
+                          </div>
+                          <div className="set-row-ctl">{r.node}</div>
+                        </div>
+                      )
+                    )}
                   </div>
                 </div>
               ))
@@ -1314,6 +1378,21 @@ export function Settings({
       </div>
     )}
     </>
+  );
+}
+
+/** 设置页专用的 ⓘ（照 FontManager `SettingHint`，132–138 行）。
+ *
+ *  说明文字收进悬停气泡：面板里一条设置占两行灰字，扫读时反而找不到设置项。
+ *  气泡本身不是自己画的 —— 全项目共用 `HoverHintHost`（HoverHint.tsx）那套
+ *  事件委托 + 边缘翻转，这里只负责提供一个可聚焦、带文案的锚点。
+ *  用 `.set-hint` 而不是 `.settings-hint`：设置页所有类名都是 `.set-*`，
+ *  不把 FontManager 的全局类引进这个项目。 */
+function SetHint({ text }: { text: string }) {
+  return (
+    <span className="set-hint" data-hint-text={text} role="img" aria-label={text} tabIndex={0}>
+      <Icon name="info" size={12} stroke={1.7} />
+    </span>
   );
 }
 

@@ -186,6 +186,27 @@
 .topbar-field::placeholder {
   color: var(--text-3);
 }
+/* 搜索框的 ×（方案 §4.6）：只在有词时出现，贴在输入框右沿。
+   有它时把输入框右内距撑开，否则长文件名会压到按钮底下（macOS 上是 ⌘F）。 */
+.topbar-search.has-clear .topbar-field {
+  padding-right: 30px;
+}
+.topbar-clear {
+  position: absolute;
+  right: 7px;
+  z-index: 4;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-3);
+  transition: background var(--t-quick), color var(--t-quick);
+}
+.topbar-clear:hover {
+  background: rgba(var(--ink-rgb), 0.08);
+  color: var(--text-1);
+}
 
 /* 顶栏按钮：36 高、1px 描边、4px 圆角（不铺蓝底，当前项只转主文字色）
    底色跟 FontManager 一致取 --e1（浅灰），白底按钮在白画布上会显得「浮起来」。 */
@@ -974,6 +995,26 @@
   color: var(--text-2);
   line-height: 1.5;
 }
+/* 筛选无结果时的两颗粒子按钮（清空筛选 / 清空搜索）：并排、留 8px。
+   用普通 `.btn`（e1 底 + 发丝线），不用实色强调底 —— 见 `filter-chips` 上的说明。 */
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+/* 两颗粒子按钮与 `filter-chips` 同一套语言（胶囊 / e2 底 / hover e3 / 文字 text-2→1），
+   不用 `.btn-accent` 的实色底：强调色全站只标「当前行」。 */
+.empty-actions .btn {
+  border-radius: var(--r-pill);
+  background: var(--e2);
+  color: var(--text-2);
+}
+.empty-actions .btn:hover {
+  background: var(--e3);
+  color: var(--text-1);
+}
 
 /* ---------------------------------------------------------------- 详情 */
 /* 与 FontManager 的 .detail 同构：可拖宽的右列、1px 左发丝线、2% 墨底、
@@ -1729,10 +1770,9 @@
   min-height: 0;
   border: 1px solid var(--ui-line);
   /* P0-6（2026-11-19）：照 FM `.settings-panel`（app.css:8556-8567）——
-     底板 `--e3`（深色 #242422，比卡片 `--e1` #1a1a18 亮一级，FM 就是"面板比卡片亮"）、
-     圆角 12px、环境阴影。
-     只动面板这一层：里面的 `.set-card` 等卡片底色**跟着预览换成 `--e1`**，
-     否则面板和卡片会糊成一片。
+     底板 `--e3`（深色 #242422）、圆角 12px、环境阴影。
+     卡片走 `--ui-panel`（深 #171715，比面板暗一级；浅色与面板同为 #ffffff，
+     只靠 1px 描边分层，见文件后段「浅色主题：设置面板里的卡片底色」）。
      阴影用 `--shadow-ambient`（FM 面板就是 ambient，而不是更实的 mass）。 */
   border-radius: 12px;
   background: var(--e3);
@@ -1744,17 +1784,18 @@
 /* 左列 */
 .set-nav {
   flex: none;
-  /* 左列 196（FontManager .settings-panel 的 grid 第一列） */
+  /* 左列 196（FontManager .settings-panel 的 grid 第一列）。
+     无背景色：直接透出面板底（FM `app.css:11127-11136` 那边就是透明），
+     以前那层 `rgba(ink,.015)` 会让左列比右侧灰一档，浅色下尤其明显。 */
   width: 196px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 16px 10px 14px;
-  border-right: 1px solid var(--hairline);
-  background: rgba(var(--ink-rgb), 0.015);
+  border-right: 1px solid rgba(var(--ink-rgb), 0.06);
 }
 .set-nav-title {
-  padding: 0 8px;
+  padding: 0 8px 4px;
   font-size: var(--fs-13);
   font-weight: 600;
   color: var(--text-1);
@@ -1773,11 +1814,12 @@
 }
 .set-search input {
   width: 100%;
-  height: 30px;
-  padding: 0 26px 0 28px;
-  border: 1px solid var(--hairline);
-  border-radius: 5px;
-  background: var(--ui-panel);
+  height: 28px;
+  padding: 0 24px 0 26px;
+  /* FM `.set-search`：底 e1、边 ui-line、圆角 6（app.css:11150-11153） */
+  border: 1px solid var(--ui-line);
+  border-radius: 6px;
+  background: var(--e1);
   font-size: var(--fs-11);
   color: var(--text-1);
   outline: none;
@@ -1790,11 +1832,11 @@
 .set-search-clear {
   position: absolute;
   right: 6px;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   display: grid;
   place-items: center;
-  border-radius: 3px;
+  border-radius: 50%;
   color: var(--text-3);
 }
 .set-search-clear:hover {
@@ -1911,43 +1953,83 @@
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
-/* 分组标题：提到卡片外面（设计稿 §3.6 / 预览 .set-sec2 .ttl）——
-   11px 小标题 + 下面一张发丝线卡，不再是大写字母卡头 */
-.set-sec-ttl {
-  font-size: var(--fs-11);
+/* 一个分组 = 一张卡，标题做成**卡头**（FontManager `.detail-heading`，app.css:11526-11534）：
+   13/600 + 下边线，卡片 `padding: 0`，所以卡头与行的左右内距都是 14px，
+   发丝线通到卡片两端。以前是「卡外 11px 小标题 + 卡内缩 13px 行」两层，两边对不齐。 */
+.set-card-head {
+  padding: 12px 14px;
+  font-size: var(--fs-13);
   font-weight: 600;
-  color: var(--text-2);
+  color: var(--text-1);
+  line-height: 1.3;
+  border-bottom: 1px solid var(--hairline);
 }
 .set-card {
   flex: none;
   border: 1px solid var(--hairline);
-  border-radius: 10px;
-  background: var(--e1);
+  border-radius: var(--r-8);
+  /* 深色 `--ui-panel` #171715（比面板 `--e3` #242422 暗一级）；
+     浅色 `--ui-panel` 与面板同为 #ffffff —— 层级只靠 1px 描边，不再换底。 */
+  background: var(--ui-panel);
   overflow: hidden;
 }
 .set-row {
   display: flex;
   align-items: center;
   gap: 16px;
-  min-height: 46px;
-  padding: 9px 13px;
+  padding: 10px 14px;
 }
+/* 行与行之间一条 5% 墨的发丝线；首行不画（卡片头已经有下边线）。
+   深浅两套都成立：深色是白 5%，浅色是墨 5%。 */
 .set-row + .set-row {
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid rgba(var(--ink-rgb), 0.05);
 }
 .set-row-text {
   flex: 1;
   min-width: 0;
 }
 .set-row-label {
-  font-size: var(--fs-13);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-14);
+  font-weight: 500;
   color: var(--text-1);
+}
+/* 标签前的 lucide 图标（13px / stroke 1.5，颜色随标签） */
+.set-row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+}
+/* 标签后的 ⓘ（照 FontManager `.settings-hint`，app.css:4193-4216）：
+   说明文字收进悬停气泡，不在标签下再压一行灰字。
+   `cursor: help` + tabIndex=0：它是说明入口，不是按钮；键盘也要能停在上面。 */
+.set-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  opacity: 0.55;
+  border-radius: 50%;
+  cursor: help;
+  transition: opacity var(--t-quick) var(--ease-std), color var(--t-quick) var(--ease-std);
+}
+.set-hint:hover,
+.set-hint:focus-visible {
+  opacity: 1;
+  color: var(--text-2);
+}
+.set-hint:focus-visible {
+  outline: var(--focus-ring-w) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: 4px;
 }
 .set-row-hint {
   margin-top: 2px;
-  font-size: var(--fs-10);
+  font-size: var(--fs-11);
   color: var(--text-3);
   line-height: 1.5;
 }
@@ -1970,32 +2052,46 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 分段控件 */
+/* 分段控件：只服务设置面板（全站仅 Settings.tsx 用 `.seg`，别处的分段是
+   `.tool-seg-btn`，互不牵连）。几何照 FontManager `.view-toggle` 的定版：
+   容器 30 高 / r6 / padding 3 / gap 2 / 底 e1 / 边 6% 墨；
+   按钮 11/500 / padding 0 10 / r4；选中 = 白底 + 1px 6% 墨 + 1px 投影。 */
 .seg {
   display: inline-flex;
   gap: 2px;
-  height: 28px;
-  padding: 2px;
-  border: 1px solid var(--hairline);
-  /* R8（`app.css:9580`）把分段控件统一到 4px 体系：0/4/8/12，原来是 5px */
-  border-radius: 4px;
+  height: 30px;
+  padding: 3px;
+  border: 1px solid rgba(var(--ink-rgb), 0.06);
+  border-radius: 6px;
   background: var(--e1);
 }
 .seg-btn {
-  min-width: 44px;
+  /* 未选中时也留 1px 透明边：选中加描边后按钮宽不变，切换时不抖 */
   padding: 0 10px;
-  border-radius: 3px;
+  border: 1px solid transparent;
+  border-radius: 4px;
   font-size: var(--fs-11);
-  color: var(--text-2);
-  transition: background var(--t-quick), color var(--t-quick);
+  font-weight: 500;
+  color: var(--text-3);
+  transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
 }
+/* hover 只提亮文字，不做底色（FM 同款） */
 .seg-btn:hover {
-  color: var(--text-1);
+  color: var(--text-2);
 }
 .seg-btn.on {
   background: var(--ui-panel);
+  border-color: rgba(var(--ink-rgb), 0.06);
   color: var(--text-1);
   box-shadow: 0 1px 2px rgba(20, 20, 18, 0.08);
+}
+/* 撑满整行变体（界面缩放那一排 6 档等分） */
+.seg-fill {
+  width: 100%;
+}
+.seg-fill .seg-btn {
+  flex: 1;
+  padding: 0 4px;
 }
 
 /* 开关：形态照 FontManager `.pill-toggle`（34×19 胶囊 + 内阴影 + 白色渐变滑块，
@@ -2096,7 +2192,7 @@
   align-items: center;
   gap: 10px;
   padding: 10px 18px 14px;
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid rgba(var(--ink-rgb), 0.06);
 }
 .set-dirty {
   flex: 1;
@@ -2125,11 +2221,11 @@
 }
 
 /* 整块内容（数据文件夹卡片）：不套「左标签右控件」，自己带标题。
-   单独加一条上边线 + 多一点内距，否则它和上面「导出用户数据」那一行糊成一片。 */
+   分界由 `.set-row + .set-row` 统一给，这里只管内距 —— 以前自己再画一条
+   上边线，非首行就会和兄弟规则叠成双线。 */
 .set-row-block {
   display: block;
   padding: 12px 14px 14px;
-  border-top: 1px solid var(--hairline);
 }
 
 /* ── 数据文件夹卡片（设置 → 缓存与索引）
@@ -2661,36 +2757,84 @@ body[data-dragging] .batch-bar * {
   color: var(--text-1);
 }
 
-/* 顶栏下面的「正在按标签筛选」条 */
-.filter-strip {
+/* 顶栏下面的「当前筛选」chips（方案 §4.2）——沿用设置面板新语言的胶囊：
+   `--r-pill` + 11px 字 + `--e2` 底 / hover `--e3` + 1px `--hairline` 边 + `--text-2` 字。
+   没有实色强调底：全站只有一个强调色，只用来标「当前行」。 */
+.filter-chips {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  height: 30px;
-  padding: 0 14px;
+  gap: 6px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--hairline);
-  background: var(--accent-soft);
+}
+.fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 4px 0 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--e2);
   color: var(--text-1);
   font-size: var(--fs-11);
+  line-height: 1;
+  max-width: 320px;
+  transition: background var(--t-quick), border-color var(--t-quick);
 }
-.filter-strip-label {
-  font-weight: 500;
+.fchip:hover {
+  background: var(--e3);
+  border-color: rgba(var(--ink-rgb), 0.06);
 }
-.filter-strip-kind {
-  padding: 1px 5px;
-  border: 1px dashed var(--ui-line, rgba(0, 0, 0, 0.18));
-  border-radius: var(--r-pill);
+/* 维度名（类型 / 标签 / 形状…）退一档，值用主文字色 —— 一行里先看值、再看它是什么 */
+.fchip-dim {
+  flex: none;
+  color: var(--text-2);
+}
+.fchip-val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+.fchip-x {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
   color: var(--text-3);
-  font-size: var(--fs-9);
+  transition: background var(--t-quick), color var(--t-quick);
 }
-.filter-strip .btn {
+.fchip-x:hover {
+  background: rgba(var(--ink-rgb), 0.08);
+  color: var(--text-1);
+}
+/* 「清空全部」推到最右：它是这一行的收尾动作，不该混在条件里 */
+.fchips-clear {
   margin-left: auto;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--e2);
+  color: var(--text-2);
+  font-size: var(--fs-11);
+  transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
+}
+.fchips-clear:hover {
+  background: var(--e3);
+  border-color: rgba(var(--ink-rgb), 0.06);
+  color: var(--text-1);
 }
 
 /* 集合来源提示（0.5.7）：点开分组 / 标签 / 快照时，列表可能来自当前库之外。
    一条低调的小字条说明"这批图属于哪个库"，比 toast 安静，也不会挡住网格。
-   照 filter-strip 的 30px 行高，但不用强调色底 —— 它不是筛选条件，是说明。 */
+   和顶栏工具行同一个节奏（28 高），但不用强调色底 —— 它不是筛选条件，是说明。 */
 .shelf-source {
   flex: none;
   display: flex;
@@ -9022,26 +9166,74 @@ body.am-dragging * {
   outline: var(--focus-ring-w) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
-/* 「没有你的语言？」那一块：虚线框 + 浅底，和真的能改东西的行区分开
-   （它只是两个外链，不是设置项） */
-.set-lang-miss {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px dashed var(--hairline);
-  border-radius: var(--r-4);
-  background: var(--e1);
-}
-.set-lang-miss-title {
-  margin-bottom: 8px;
-  font-size: var(--fs-11);
-  color: var(--text-3);
-}
-.set-lang-miss-actions {
+/* 「没有你的语言？」那一块（照 FontManager `.settings-translate`，5250–5291）：
+   虚线框 + 浅底，和真的能改东西的行区分开（它只是两个外链，不是设置项）。
+   与语言行**同级紧贴**：不套 `.set-row`，所以不会被 `.set-row + .set-row`
+   的整行发丝线切开 —— 虚线框本身就是分界。 */
+.set-translate {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  margin: 0 14px 12px;
+  padding: 12px 14px;
+  border: 1px dashed rgba(var(--ink-rgb), 0.12);
+  border-radius: var(--r-8);
+  background: rgba(var(--scrim-rgb), 0.08);
+}
+.set-translate-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.set-translate-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text-2);
+}
+.set-translate-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
-/* 界面缩放：标题 + 一句"当前多少"，下面一排档位（复用 .seg） */
+/* 外链按钮：28 高 / e2 底 / 发丝边。末尾 ↗ 默认半透明，hover 才实 ——
+   用户一眼知道「点了会去外面」而不是就地改设置。 */
+.set-data-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  font-size: var(--fs-11);
+  font-weight: 500;
+  color: var(--text-1);
+  background: var(--e2);
+  white-space: nowrap;
+  transition: background var(--t-quick) var(--ease-std), border-color var(--t-quick) var(--ease-std);
+}
+.set-data-btn > svg {
+  flex: none;
+}
+.set-data-btn:hover {
+  background: var(--e3);
+  border-color: rgba(var(--ink-rgb), 0.12);
+}
+.set-btn-arrow {
+  opacity: 0.5;
+  transition: opacity var(--t-quick) var(--ease-std);
+}
+.set-data-btn:hover .set-btn-arrow {
+  opacity: 1;
+}
+/* 界面缩放：标题 + 一句"当前多少"，下面一排档位（复用 .seg / .seg-fill）。
+   标题按「行标签」的度量（14/500），说明按行说明（--fs-11 / text-3），
+   否则这一块的字比上下行小一号、看着像另一套排版。 */
 .set-zoom {
   width: 100%;
   display: grid;
@@ -9053,12 +9245,14 @@ body.am-dragging * {
   gap: 2px;
 }
 .set-zoom-title {
-  font-size: var(--fs-11);
+  font-size: var(--fs-14);
+  font-weight: 500;
   color: var(--text-1);
 }
 .set-zoom-hint {
-  font-size: var(--fs-10);
+  font-size: var(--fs-11);
   color: var(--text-3);
+  line-height: 1.5;
 }
 
 /* ---- 语言选择器（0.3.30，照 FontManager 的外观）----
@@ -9154,16 +9348,12 @@ body.am-dragging * {
 }
 
 /* ============================================================================
-   浅色主题：设置面板里卡片的底色（P0-6 的收尾，2026-11-19）
-   `--e3`（面板）和 `--ui-panel`（卡片）在浅色下都是 #ffffff，卡片只剩 1px 发丝线
-   分界，看着像"没有卡片"。FontManager 的做法是卡片走 `--e1`（浅色 `#f2f2ee`），
-   比面板低一档，靠底色分层而不是靠描边 —— 这里跟它一致。
-   **只覆盖 `.set-card`**：`tokens.css` 里的 `--e3` / `--ui-panel` 别的地方也在用，
-   改令牌会连带动到别处的配色。
+   浅色主题：设置面板里的卡片底色（2026-11-23 撤掉「卡片换 --e1」那条）
+   `--e3`（面板）和 `--ui-panel`（卡片）在浅色下都是 #ffffff —— 这是 FontManager
+   2.3.0 的定版观感（app.css:11520）：卡底 = 面板底，只靠 1px `#e2e2dd` 描边分层。
+   以前这里把卡片压成 `--e1`（#f2f2ee），于是「白面板上浮一层灰卡」——
+   再加卡头下边线和行发丝线，浅色下会糊成三四层灰。
    ============================================================================ */
-html[data-theme="light"] .set-card {
-  background: var(--e1);
-}
 
 /* ---------------------------------------------------------------- 导出选库
    多库时「导出整个库（ZIP）」弹的小选择框（0.4.4）。

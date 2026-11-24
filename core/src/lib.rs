@@ -1548,11 +1548,28 @@ impl App {
             } else {
                 HashMap::new()
             };
+            /* 规则标签的计数**合并成一次扫表**（0.5.14）：原来每条规则一次全表
+               COUNT，条件又多在 size/width 这类无索引列上，10 条规则 = 10 次全扫。 */
+            let mut rules: Vec<(i64, reg::AutoRule)> = Vec::new();
             for t in &meta {
-                let mut n = counts.remove(&t.id).unwrap_or(0);
                 if let Some(rule) = t.rule.as_deref().and_then(reg::parse_rule) {
-                    n = if real { db::count_rule(c, &rule)? } else { 0 };
+                    if real {
+                        rules.push((t.id, rule));
+                    }
                 }
+            }
+            let rule_counts = if rules.is_empty() {
+                HashMap::new()
+            } else {
+                db::count_rules(c, &rules)?
+            };
+            for t in &meta {
+                let has_rule = t.rule.as_deref().and_then(reg::parse_rule).is_some();
+                let n = if has_rule {
+                    rule_counts.get(&t.id).copied().unwrap_or(0)
+                } else {
+                    counts.remove(&t.id).unwrap_or(0)
+                };
                 match at.get(&t.name).copied() {
                     Some(i) => out[i].count += n,
                     None => {

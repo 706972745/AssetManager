@@ -13,13 +13,17 @@ import {
   type Asset,
 } from "../types";
 import {
+  buildYIndex,
   gridLayout,
   masonryLayout,
   MAX_COLS_GRID,
   MAX_COLS_WATERFALL,
+  topVisibleRect,
+  visibleRects,
   type Rect,
 } from "../lib/layout";
 import { Icon } from "./ui";
+import { useT } from "../lib/i18n";
 
 export type ViewMode = "grid" | "waterfall";
 
@@ -51,6 +55,16 @@ interface Props {
   onPrefetch?: (ids: number[], px: number) => void;
   /** 空状态里的「导入文件…」（0.4.2）：把外部文件复制进当前文件夹 */
   onImport?: () => void;
+  /**
+   * 0 条的**原因**（方案 §4.1）：true = 当前有筛选 / 搜索词，只是没命中；
+   * false/缺省 = 这个位置本来就没有素材（才递「导入文件…」）。
+   * ⚠️ 不要把"当前目录"算进来 —— 空目录必须还能看到导入入口。
+   */
+  emptyFiltered?: boolean;
+  /** 「清空筛选」（类型 / 标签 / 颜色 / 评分 / 关键词一起清） */
+  onClearFilters?: () => void;
+  /** 「清空搜索」：只清关键词，保留其它筛选 */
+  onClearSearch?: () => void;
   onToast: (msg: string, err?: boolean) => void;
 }
 
@@ -68,6 +82,9 @@ export function AssetView({
   thumbSrc,
   onPrefetch,
   onImport,
+  emptyFiltered,
+  onClearFilters,
+  onClearSearch,
   onToast,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -291,6 +308,13 @@ export function AssetView({
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
 
+  /* P1-6：可见窗口 / 滚动锚点都要问「top 附近是哪几张」。
+     以前每次都 `rects.filter` 全量扫（10 万条 × 每滚 100px 一次），
+     现在每次布局只建一次竖向分带索引（O(n)），之后每次查询只扫可见的那几条。 */
+  const yIndex = useMemo(() => buildYIndex(layout.rects), [layout]);
+  const yIndexRef = useRef(yIndex);
+  yIndexRef.current = yIndex;
+
   /* 滚动锚点（T08）：切档位 / 切视图 / 拖窗口宽度会让所有格子重排。
      如果不记锚点，用户看着第 40 张、换一档就跳回第 1 张 —— 规格 §6.5 明确要求保住位置。
      锚点用「最上面那张完全可见的图 + 它相对视口顶部的偏移」，重排后把它放回同一个偏移。 */
@@ -301,16 +325,14 @@ export function AssetView({
     const el = scrollRef.current;
     if (!el) return;
     const top = el.scrollTop;
-    let best: Rect | null = null;
-    for (const r of layoutRef.current.rects) {
-      if (r.y + r.h < top) continue;
-      if (!best || r.y < best.y) best = r;
-    }
+    // 从 top 所在的带往上找第一张压着视口的图，不再是全量扫（旧实现在这里是最贵的一处 O(n)）
+    const best: Rect | null = topVisibleRect(layoutRef.current.rects, yIndexRef.current, top);
     if (best) anchor.current = { id: best.a.id, dy: best.y - top };
   };
 
-  /* 锚点每 120ms 采一次就够了：它是给"重排后回到原位"用的，
-     拉到 60Hz 每次扫几千个 rect 纯属浪费（这是滚动期间另一笔固定开销）。 */
+  /* 锚点每 120ms 采一次就够了：它是给"重排后回到原位"用的。
+     采样频率不变（滚动事件驱动 + 节流），但单次成本从 O(n) 全量扫降到只扫一个带
+     （见 captureAnchor / `lib/layout.ts` 的 YIndex）。 */
   const anchorAt = useRef(0);
   const maybeAnchor = () => {
     const now = performance.now();
@@ -337,8 +359,9 @@ export function AssetView({
   const visible = useMemo(() => {
     const top = scrollTop - 400;
     const bottom = scrollTop + vh + 400;
-    return layout.rects.filter((r) => r.y + r.h >= top && r.y <= bottom);
-  }, [layout, scrollTop, vh]);
+    // 同上：只扫可见段，不再每 100px 对全部 rects 做一次 filter
+    return visibleRects(layout.rects, yIndex, top, bottom);
+  }, [layout, yIndex, scrollTop, vh]);
 
   /* 预取：滚动停下 220 ms 后，把可视区**上下各一屏**的缩略图排进后台。
      为什么不是"渲染时就请求"：渲染只该关心看得见的东西；生成要几十到几百毫秒，
@@ -355,11 +378,8 @@ export function AssetView({
     const bottom = scrollTop + vh * 2.2;
     const px = THUMB_PX[sizeIndex] ?? 384;
     const t = window.setTimeout(() => {
-      const ids = layout.rects
-        .filter(
-          (r) =>
-            r.y + r.h >= top && r.y <= bottom && PREVIEWABLE_KINDS.has(r.a.kind)
-        )
+      const ids = visibleRects(layout.rects, yIndex, top, bottom)
+        .filter((r) => PREVIEWABLE_KINDS.has(r.a.kind))
         .map((r) => r.a.id);
       if (!ids.length) return;
       const sig = `${px}|${ids.length}|${ids[0]}|${ids[ids.length - 1]}`;
@@ -368,7 +388,7 @@ export function AssetView({
       prefetchRef.current?.(ids, px);
     }, 220);
     return () => window.clearTimeout(t);
-  }, [layout, scrollTop, vh, sizeIndex]);
+  }, [layout, yIndex, scrollTop, vh, sizeIndex]);
 
   /* 滚动节流的 ref 声明在上面（`committedTop` / `scrollRaf`），这里只放提交逻辑。 */
   const commitScroll = () => {
@@ -422,7 +442,12 @@ export function AssetView({
   return (
     <div className="viewport scroll-hot" ref={scrollRef} onScroll={onScroll} onMouseDown={onBlankDown}>
       {items.length === 0 ? (
-        <Empty onImport={onImport} />
+        <Empty
+          onImport={onImport}
+          filtered={emptyFiltered}
+          onClearFilters={onClearFilters}
+          onClearSearch={onClearSearch}
+        />
       ) : (
         <div
           className={`view-inner ${view === "waterfall" ? "wf" : ""}`}
@@ -479,21 +504,63 @@ export function AssetView({
   );
 }
 
-function Empty({ onImport }: { onImport?: () => void }) {
+/**
+ * 结果区空态（方案 §4.1）。两种语义**必须分开**：
+ *   - 有筛选 / 搜索词命中 0 条 → 「按当前筛选没有结果」+ 清空入口；
+ *     递「导入文件…」是错的：那是往当前目录复制文件，和"筛不到"毫无关系，
+ *     还会让用户以为"图丢了 / 没扫到"。
+ *   - 本来就没有素材 → 保留原来的「这里还没有素材」+「导入文件…」（0.4.2 owner 要求）。
+ * 文案全部走 i18n（以前是写死中文，en/de 用户看到的是中文）。
+ */
+function Empty({
+  onImport,
+  filtered,
+  onClearFilters,
+  onClearSearch,
+}: {
+  onImport?: () => void;
+  filtered?: boolean;
+  onClearFilters?: () => void;
+  onClearSearch?: () => void;
+}) {
+  const t = useT();
   return (
     <div className="empty-state">
       <div className="empty-inner">
         <span className="empty-tile">
-          <Icon name="image" size={26} stroke={1.5} />
+          <Icon name={filtered ? "funnel" : "image"} size={26} stroke={1.5} />
         </span>
-        <h2>这里还没有素材</h2>
-        <p>把文件夹加进库，或者换一个目录。AssetManager 只建索引，不会移动、复制你的原始文件。</p>
-        {/* 空目录最常见的下一步就是"我有图要放进来"，就地给一个按钮，
-            省得用户去翻右键菜单或命令面板 */}
-        {onImport && (
-          <button className="btn btn-accent" style={{ marginTop: 14 }} onClick={onImport}>
-            导入文件…
-          </button>
+        {filtered ? (
+          <>
+            <h2>{t("app.empty.filtered_title")}</h2>
+            <p>{t("app.empty.filtered_body")}</p>
+            {(onClearFilters || onClearSearch) && (
+              <div className="empty-actions">
+                {onClearFilters && (
+                  <button className="btn" onClick={onClearFilters}>
+                    {t("app.empty.clear_filter")}
+                  </button>
+                )}
+                {onClearSearch && (
+                  <button className="btn" onClick={onClearSearch}>
+                    {t("app.empty.clear_search")}
+                  </button>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <h2>{t("app.empty.no_assets_title")}</h2>
+            <p>{t("app.empty.no_assets_body")}</p>
+            {/* 空目录最常见的下一步就是"我有图要放进来"，就地给一个按钮，
+                省得用户去翻右键菜单或命令面板 */}
+            {onImport && (
+              <button className="btn btn-accent" style={{ marginTop: 14 }} onClick={onImport}>
+                {t("app.empty.import_files")}
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

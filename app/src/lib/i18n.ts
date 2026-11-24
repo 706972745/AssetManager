@@ -1,13 +1,9 @@
 import { useSyncExternalStore } from "react";
-import de from "../locales/de.json";
+/* 只有 en 是静态 import —— 它是**类型来源**（`Dict`）也是所有语言的兜底，
+   而且「跟随系统」解析成 en 时不必多发一次请求。其余 8 个语言包按需动态 import：
+   全静态时 9 份 JSON 一共 1.12 MB（min）/ 241 KB（gzip），占主 chunk gzip 的 56%，
+   而任何一次运行只会用到其中一份（P1-2）。 */
 import en from "../locales/en.json";
-import es from "../locales/es.json";
-import fr from "../locales/fr.json";
-import ja from "../locales/ja.json";
-import ptBR from "../locales/pt-BR.json";
-import ru from "../locales/ru.json";
-import zhCN from "../locales/zh-CN.json";
-import zhTW from "../locales/zh-TW.json";
 
 /**
  * 轻量 i18n —— **和 FontManager 同一套做法**（owner 2026-11-19：「可以用 fontmanager 的方法」）。
@@ -65,17 +61,27 @@ export const LOCALES: readonly LocaleInfo[] = [
   { code: "zh-TW", name: "繁體中文", english: "Chinese (Traditional)" },
 ];
 
-const DICTS: Record<LocaleCode, Partial<Dict>> = {
-  en,
-  de,
-  es,
-  fr,
-  "pt-BR": ptBR,
-  ru,
-  ja,
-  "zh-CN": zhCN,
-  "zh-TW": zhTW,
+/**
+ * 语言包加载器。`en` 不进表（静态在包里）。
+ * 写成一个字面量映射，Vite 才能把每个 JSON 拆成独立 chunk 并给出稳定的文件名 ——
+ * 用拼字符串（`import(`../locales/${code}.json`)`）会因为变量而无法静态分析。
+ */
+type JsonModule = { default: Partial<Dict> };
+const LOADERS: Record<Exclude<LocaleCode, "en">, () => Promise<JsonModule>> = {
+  de: () => import("../locales/de.json"),
+  es: () => import("../locales/es.json"),
+  fr: () => import("../locales/fr.json"),
+  "pt-BR": () => import("../locales/pt-BR.json"),
+  ru: () => import("../locales/ru.json"),
+  ja: () => import("../locales/ja.json"),
+  "zh-CN": () => import("../locales/zh-CN.json"),
+  "zh-TW": () => import("../locales/zh-TW.json"),
 };
+
+/** 已经拿到手的语言包（en 一开始就在） */
+const loaded = new Map<LocaleCode, Partial<Dict>>([["en", en]]);
+/** 正在加载的：同一种语言被并发请求时只发一次 import */
+const loading = new Map<LocaleCode, Promise<void>>();
 
 const FALLBACK: LocaleCode = "en";
 const STORAGE_KEY = "am.locale";
@@ -150,7 +156,10 @@ function readStoredPref(): LocalePref {
 
 let pref: LocalePref = readStoredPref();
 let resolved: LocaleCode = pref === "system" ? detectLocale() : pref;
-let dict: Partial<Dict> = DICTS[resolved];
+/* 还没加载到的语言先用 en 顶着：`t()` 永远返回字符串，不会出现 undefined / 空 key。
+   正常路径下 main.tsx 会在**第一次渲染之前** await prepareLocale()，
+   所以这条兜底只在语言包加载失败时才会被用户看到。 */
+let dict: Partial<Dict> = loaded.get(resolved) ?? en;
 let plurals = new Intl.PluralRules(resolved);
 
 let version = 0;
@@ -162,14 +171,59 @@ function stampDocument() {
   }
 }
 
+function notify() {
+  version++;
+  for (const listen of listeners) listen();
+}
+
+/** 按需加载某个语言包。失败不抛给调用方：调用方本来就有 en 兜底，
+ *  抛出去只会变成一条没人处理的 unhandled rejection。 */
+export function loadLocale(code: LocaleCode): Promise<void> {
+  if (loaded.has(code)) return Promise.resolve();
+  const inflight = loading.get(code);
+  if (inflight) return inflight;
+  const loader = code === "en" ? null : LOADERS[code as Exclude<LocaleCode, "en">];
+  if (!loader) return Promise.resolve();
+  const p = loader()
+    .then((mod) => {
+      loaded.set(code, mod.default ?? en);
+    })
+    .catch(() => {
+      /* 拉不到就继续用 en；下一次切到这门语言会再试一次 */
+    })
+    .finally(() => {
+      loading.delete(code);
+    })
+    .then(() => {
+      /* 加载完的正好是当前语言 → 换上去并通知重渲（否则界面停在 en 兜底上） */
+      if (resolved !== code) return;
+      dict = loaded.get(code) ?? en;
+      notify();
+    });
+  loading.set(code, p);
+  return p;
+}
+
 function apply(next: LocalePref) {
   pref = next;
   resolved = next === "system" ? detectLocale() : next;
-  dict = DICTS[resolved];
+  /* 只在**已经加载到内存**时才换 dict：
+     - 启动时（hydrateLocalePref）还没加载 → 保持 en，main.tsx 会 await prepareLocale；
+     - 用户手动切语言时目标语言还没拉到 → 界面暂时留在旧语言，等 chunk 到了再换，
+       这样不会闪一帧英文（0.3.30 修过的"闪一下"不复发）。 */
+  const ready = loaded.get(resolved);
+  if (ready) dict = ready;
   plurals = new Intl.PluralRules(resolved);
   stampDocument();
-  version++;
-  for (const listen of listeners) listen();
+  notify();
+  if (!ready) void loadLocale(resolved);
+}
+
+/** 启动时用：确保当前语言包已经在包里（最多等一次 chunk 读取）。
+ *  main.tsx 在 createRoot 之前 await 它 —— 否则首帧会先画一遍英文再跳成用户选的语言
+ *  （0.3.30 修过的"闪一下"）。失败就返回，界面用 en 兜底照常渲染。 */
+export function prepareLocale(): Promise<void> {
+  return loadLocale(resolved);
 }
 
 stampDocument();

@@ -3934,6 +3934,8 @@ fn crop_png_stack(c: &Ctx, rs: &[[i32; 4]]) -> Option<(Vec<u8>, i32, i32)> {
 /// std::sync::Mutex 不可重入，于是**整条 UI 线程死锁**：用户看到的就是
 /// "Ctrl+C / Ctrl+S 按了没反应"「点复制按钮没反应」（0.3.0 的真实 bug）。
 fn deliver_to(c: &mut Ctx, action: &str) {
+    /* 埋点：按下生效的时刻（与 `am_snip_finish` 里的 `snip_*` 同一时钟） */
+    crate::perf_tick("snip", "press");
     let sel = c.sel.unwrap_or([0, 0, c.w, c.h]);
     if sel[2] < 4 || sel[3] < 4 {
         return;

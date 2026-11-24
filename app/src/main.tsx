@@ -1,18 +1,29 @@
-import { StrictMode } from "react";
+import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./styles/tokens.css";
 import "./styles/app.css";
-import App from "./App";
-import { Peek } from "./components/Peek";
-import { Snip } from "./components/Snip";
-import { Board } from "./components/Board";
 import { installMomentumScroll } from "./lib/momentumScroll";
 import { installScrollHot } from "./lib/scrollHot";
 import { installPerfProbe } from "./lib/perf";
-import { hydrateLocalePref, isLocalePref } from "./lib/i18n";
+import { hydrateLocalePref, isLocalePref, prepareLocale } from "./lib/i18n";
 import { loadPrefs } from "./types";
+
+/* P1-2：四个窗口组件**按窗口懒加载**。
+   以前 index.html 一个入口静态 import 了 App / Peek / Snip / Board 四份代码：
+   贴图窗只是为了画一张图，也要解析整个主窗（含 9 份语言包）。现在各自一个 chunk，
+   贴图窗只付 Peek 的钱。不拆独立 html 入口是因为那要改 Rust 侧的窗口 URL 与构建配置。 */
+const App = lazy(() => import("./App"));
+const Peek = lazy(() =>
+  import("./components/Peek").then((m) => ({ default: m.Peek }))
+);
+const Snip = lazy(() =>
+  import("./components/Snip").then((m) => ({ default: m.Snip }))
+);
+const Board = lazy(() =>
+  import("./components/Board").then((m) => ({ default: m.Board }))
+);
 
 /* 同一个前端包跑三种窗口：主窗（App）、贴图（Peek）、截图覆盖层（Snip）。
    用**初始化脚本注入的全局变量**区分（Rust 侧 `initialization_script` 写 __AM_PEEK__）：
@@ -20,6 +31,11 @@ import { loadPrefs } from "./types";
 const isPeek = !!(window as unknown as { __AM_PEEK__?: unknown }).__AM_PEEK__;
 const isSnip = !!(window as unknown as { __AM_SNIP__?: unknown }).__AM_SNIP__;
 const isBoard = !!(window as unknown as { __AM_BOARD__?: unknown }).__AM_BOARD__;
+
+/* 主窗在下面的 boot 里要先 await 语言包，App 的 chunk 又是动态 import ——
+   不预取的话这两个请求是串行的。这里只是提前发起，模块表会复用同一个 promise，
+   `lazy(() => import("./App"))` 拿到的还是同一份。贴图 / 截图 / 板窗**不**预取。 */
+if (!isPeek && !isSnip && !isBoard) void import("./App").catch(() => {});
 
 /* 语言必须在**第一次渲染之前**定下来（0.3.30）：放进 App 的 effect 里做，
    首帧会先按浏览器语言画一遍、再跳成用户选的语言，屏幕上闪一下。
@@ -57,6 +73,18 @@ document.addEventListener(
   true,
 );
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>{isSnip ? <Snip /> : isBoard ? <Board /> : isPeek ? <Peek /> : <App />}</StrictMode>
-);
+/* 语言包改成动态 import 之后（P1-2），首次渲染前要先把**当前那一份**取回来，
+   否则首帧会把 en 兜底画出来再跳成用户选的语言。取不到（chunk 损坏等）就直接用 en，
+   界面不许因此空着。 */
+async function boot() {
+  await prepareLocale();
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <Suspense fallback={null}>
+        {isSnip ? <Snip /> : isBoard ? <Board /> : isPeek ? <Peek /> : <App />}
+      </Suspense>
+    </StrictMode>
+  );
+}
+
+void boot();

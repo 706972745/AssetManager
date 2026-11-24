@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "aux-windows",
+  "description": "附属窗口：截图覆盖层（snip）、贴图窗（peek-1 / peek-2 …）、灵感板（board-1 …）、启动闪屏（splash）、托盘菜单（tray-menu）。只给它们真正用到的两条 window 权限：拖拽（data-tauri-drag-region 与 Board 的 startDragging）和挪窗口（灵感板 Shift+滚轮 setPosition）。close / minimize / toggle-maximize 一律不下发——这些窗口的最小化、关闭、最大化全部走自定义命令（am_close / am_minimize / am_toggle_max / setup_window），不经过 ACL。",
+  "windows": ["snip", "peek", "peek-*", "board-*", "splash", "tray-menu"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position"
+  ]
+}

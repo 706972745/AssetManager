@@ -35,12 +35,38 @@ const LIMIT_TAG = 3;
 /** 防抖：一次 `am_list` 在几十万行的库上是 20–30ms，逐键发会明显卡顿 */
 const DEBOUNCE_MS = 130;
 
+/**
+ * 建议查询的**范围**：与主列表 `buildQuery` 同口径（当前目录 / 类型 / 标签 / 颜色 /
+ * 评分 / 分组 / 快照），只少了 `text / sort / cursor / limit`。
+ *
+ * 为什么选「跟随范围」而不是「点选时清范围」（方案 §4.3 的二选一）：
+ * ① 这条只多传几个 IPC 参数，改的是本文件 + Chrome 的一行；② 要走「点选时清范围」
+ * 就得从 TopBar 里回调 App 去 `setDir(null)` + 清 5 个筛选 + 弹 toast，再把
+ * 「已在整个素材库中搜索」这件事讲清楚 —— 改动面大，还会让「点一下搜索框里的字」
+ * 产生副作用（用户只是想补个词，却被搬到了全库）。① 的语义是 WYSIWYG：
+ * 下拉里看到的，点下去一定在主列表里，因为它和主列表跑的是同一组 WHERE。
+ *
+ * 不做「范围命中 0 条就自动放宽到全库」：方案 §5 明确禁止自动放宽
+ * （会让"筛选看起来没生效"），只保留用户显式操作这一条路。
+ */
+export type SuggestScope = {
+  dirId: number | null;
+  kinds: number[] | null;
+  tag: string | null;
+  color: string | null;
+  minRating: number | null;
+  collection: number | null;
+  snapshot: number | null;
+};
+
 /** 取建议。`enabled = false`（下拉没打开）时一次 IPC 都不发。 */
 export function useSuggest(
   source: Source,
   raw: string,
   tags: TagCount[],
   enabled: boolean,
+  /** 当前主列表的范围（不传 = 全库全目录，浏览器预览等无范围场景） */
+  scope?: SuggestScope,
 ): Suggest[] {
   const [items, setItems] = useState<Suggest[]>([]);
   /* 竞态：打字快的时候先发的请求可能后回来，把新结果盖成旧的 —— 序号对不上就丢掉 */
@@ -71,21 +97,23 @@ export function useSuggest(
           });
           n++;
         }
-        /* ② 图片：后端模糊匹配（文件名 / 标签都参与），只要前几条 */
+        /* ② 图片：后端模糊匹配（文件名 / 标签都参与），只要前几条。
+              范围与主列表一致 —— 否则下拉里会出现别的目录 / 别的库的图，
+              点一下在主列表里是 0 条（方案 P1-11）。 */
         try {
           const list = await source.list({
-            dirId: null,
+            dirId: scope?.dirId ?? null,
             recursive: true,
-            kinds: null,
+            kinds: scope?.kinds ?? null,
             text: q,
             sort: "name_asc",
             cursor: null,
             limit: LIMIT_ASSET,
-            tag: null,
-            color: null,
-            minRating: null,
-            collection: null,
-            snapshot: null,
+            tag: scope?.tag ?? null,
+            color: scope?.color ?? null,
+            minRating: scope?.minRating ?? null,
+            collection: scope?.collection ?? null,
+            snapshot: scope?.snapshot ?? null,
           });
           if (seq.current !== my) return;
           for (const a of list) {
@@ -104,7 +132,22 @@ export function useSuggest(
       })();
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [raw, enabled, source, tags]);
+    /* scope 逐个字段进依赖：对象本身每次渲染可能是新引用，比对象会让建议在
+       无关重渲时也重新发 IPC；只比字段则「筛选真的变了」才重查。 */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    raw,
+    enabled,
+    source,
+    tags,
+    scope?.dirId,
+    scope?.kinds,
+    scope?.tag,
+    scope?.color,
+    scope?.minRating,
+    scope?.collection,
+    scope?.snapshot,
+  ]);
 
   return items;
 }

@@ -7,7 +7,7 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { SearchSuggest, useSuggest } from "./SearchSuggest";
+import { SearchSuggest, useSuggest, type SuggestScope } from "./SearchSuggest";
 import { Check, FolderOpen, GripVertical, Sparkles, Star, Tag as TagIcon } from "lucide-react";
 import {
   badge,
@@ -116,12 +116,28 @@ const SORT_LABEL_KEY: Record<SortKey, TKey> = {
   rating_desc: "topbar.sort_rating",
 };
 
-export const KINDS: { key: string; labelKey: TKey; kinds: number[] | null }[] = [
+/**
+ * 类型段：**唯一**的 kindKey → 后端 kinds 映射（`App.tsx` 的查询直接从这张表派生，
+ * 以前两边各写一份，加一种类型要改两处 —— 方案 §4.7）。
+ *
+ * `countTag` 是后端自动标签里对应的那个名字（`core/src/autotag.rs::kind_tag`）。
+ * ⚠️ 3D 的后端标签叫 `kind:model`（KIND_MODEL），不是 `kind:3d` —— 照 UI 的 key 猜会一个都命中不了。
+ * 计数来自 `source.autoTags()`（跨库汇总，和侧栏「自动标签」同一份数字），所以它是
+ * **整个素材库**的条数，不是当前目录的条数；拿不到就不显示（别造 0）。
+ */
+export const KINDS: {
+  key: string;
+  labelKey: TKey;
+  kinds: number[] | null;
+  countTag?: string;
+}[] = [
   { key: "all", labelKey: "topbar.kind_all", kinds: null },
-  { key: "image", labelKey: "topbar.kind_image", kinds: [0] },
-  { key: "3d", labelKey: "topbar.kind_3d", kinds: [3] },
-  { key: "video", labelKey: "topbar.kind_video", kinds: [1] },
-  { key: "doc", labelKey: "topbar.kind_doc", kinds: [4] },
+  { key: "image", labelKey: "topbar.kind_image", kinds: [0], countTag: "kind:image" },
+  { key: "3d", labelKey: "topbar.kind_3d", kinds: [3], countTag: "kind:model" },
+  { key: "video", labelKey: "topbar.kind_video", kinds: [1], countTag: "kind:video" },
+  { key: "doc", labelKey: "topbar.kind_doc", kinds: [4], countTag: "kind:doc" },
+  { key: "audio", labelKey: "topbar.kind_audio", kinds: [2], countTag: "kind:audio" },
+  { key: "other", labelKey: "topbar.kind_other", kinds: [5], countTag: "kind:other" },
 ];
 
 const SIZE_LABEL_KEY: TKey[] = ["topbar.size_small", "topbar.size_medium", "topbar.size_large"];
@@ -172,6 +188,7 @@ function TopBarImpl({
   trashFormats,
   trashFormat,
   onTrashFormat,
+  suggestScope,
 }: {
   text: string;
   onText: (v: string) => void;
@@ -209,6 +226,8 @@ function TopBarImpl({
   trashFormats?: [string, number][];
   trashFormat?: string | null;
   onTrashFormat?: (ext: string | null) => void;
+  /** 搜索建议的范围 = 主列表当前的目录 / 筛选（方案 §4.3，见 `SearchSuggest` 里的说明） */
+  suggestScope?: SuggestScope;
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "sort" | "filter" | "color" } | null>(
@@ -240,9 +259,22 @@ function TopBarImpl({
      数据源见 `useSuggest`：图片走后端模糊查、标签本地过滤。 */
   const [sugOpen, setSugOpen] = useState(false);
   const [sugActive, setSugActive] = useState(-1);
-  const sugItems = useSuggest(source, text, tags, sugOpen && !trashMode);
+  const sugItems = useSuggest(source, text, tags, sugOpen && !trashMode, suggestScope);
 
   const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    /* Esc：**只在搜索框有内容且自身获得焦点时**清词（方案 §4.6）。
+       这里必须拦住冒泡：App 的全局 Esc 会把详情浮层 / 大图 / 多选一起收掉，
+       用户只是想清掉关键词，不该顺带把别的临时状态也关掉。
+       有词时只清词、不关面板（清空后建议列表本来就是空的）；没词时退回原来的
+       「关面板」，再按一次才轮到全局 Esc —— 全局那条的活一点没抢。 */
+    if (e.key === "Escape" && text && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      e.stopPropagation();
+      onText("");
+      setSugOpen(false);
+      setSugActive(-1);
+      return;
+    }
     /* 面板没内容时只处理 Esc（关面板），别把方向键吃掉 —— 输入框里左右移动光标是正常操作 */
     if (!sugItems.length) {
       if (e.key === "Escape") setSugOpen(false);
@@ -272,6 +304,12 @@ function TopBarImpl({
   };
 
   const kind = KINDS.find((k) => k.key === kindKey) ?? KINDS[0];
+  /* 漏斗指示灯 = **真的有没有筛选**（方案 P1-4）：
+     只认类型 / 标签（含形状、格式）/ 评分；目录是「我在哪」不算，颜色有自己那颗按钮。
+     回收站里只认格式（那是它唯一的维度）。 */
+  const filterOn = trashMode
+    ? !!trashFormat
+    : kindKey !== "all" || !!activeTag || rating !== null;
   /* 回收站的"最近修改"其实是"最近删除"（条目只有删除时间这一个时间戳），
      文案必须跟着换，否则用户以为在按原文件的修改时间排。 */
   const sortLabel =
@@ -294,6 +332,26 @@ function TopBarImpl({
   const autoOf = (ns: string) => autoTags.filter((t) => t.name.startsWith(`${ns}:`));
   const pickTag = (name: string) => onTag(activeTag === name ? null : name);
 
+  /* ---- 形状 / 格式 / 标签 三段共用一个 `tagFilter`，必须按命名空间分开判定 ----
+     （方案 §4.4：以前 `meta: activeTag ? "1"` 让只筛了 `fmt:jpg` 时「标签」行也显示 1，
+     点「全部形状」还会把手工标签一起清掉。）
+     「标签」行代表**除形状 / 格式之外**的所有标签（手工 + `place:`/`kind:`/`size:`）。
+     只认手工标签会留一个洞：筛了 `place:4k` 时三行都不亮，用户看不出条件挂在哪。 */
+  const isShapeTag = !!activeTag?.startsWith("orient:");
+  const isFmtTag = !!activeTag?.startsWith("fmt:");
+  const isPlainTag = !!activeTag && !isShapeTag && !isFmtTag;
+  /** 行尾 meta：显示**当前值**而不是 "1"（菜单宽 150–260，超长要省略） */
+  const short = (s: string, n = 12) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  const plainTagLabel = isPlainTag
+    ? short(isAutoTag(activeTag!) ? autoTagLabel(activeTag!) : activeTag!)
+    : undefined;
+  const shapeLabel = isShapeTag
+    ? short(ORIENT_LABEL[activeTag!.slice("orient:".length)] ?? activeTag!)
+    : undefined;
+  const fmtLabel = isFmtTag ? short(activeTag!.slice("fmt:".length).toUpperCase()) : undefined;
+  /** 类型行计数：来自自动标签（跨库汇总，与侧栏 kind:* 同一份数字）；没有就返回 undefined */
+  const kindCount = (tag?: string) => (tag ? autoTags.find((x) => x.name === tag)?.count : undefined);
+
   /* 二级面板每行前面的图标必须**每一行都有**（照 FontManager 的 `.filter-sub-name`）：
      只有部分行带图标时，同一列里的文字会左右错开 —— FontManager 2026-11-14 踩过。
      自动标签 = 魔棒（品牌色），手工标签 / 文件夹 = 中性灰线性图标。 */
@@ -309,6 +367,12 @@ function TopBarImpl({
     { label: t("topbar.type"), heading: true },
     ...KINDS.map((k) => ({
       label: t(k.labelKey),
+      /* 计数只给具体类型；「全部类型」不给 —— 那是跨库合计，当前目录下对不上，
+         宁可空着也不报一个假的"一共 N 条"（方案 §4.7 / §5） */
+      meta: (() => {
+        const n = kindCount(k.countTag);
+        return n === undefined ? undefined : String(n);
+      })(),
       on: kindKey === k.key,
       check: kindKey === k.key,
       onPick: () => onKind(k.key),
@@ -321,10 +385,19 @@ function TopBarImpl({
     { label: t("topbar.scope"), heading: true },
     {
       label: t("topbar.tags"),
-      meta: activeTag ? "1" : undefined,
-      on: !!activeTag,
+      meta: plainTagLabel,
+      on: isPlainTag,
       sub: [
-        { label: t("topbar.all_tags"), icon: ICO_TAG, on: !activeTag, check: !activeTag, onPick: () => onTag(null) },
+        {
+          label: t("topbar.all_tags"),
+          icon: ICO_TAG,
+          on: !isPlainTag,
+          check: !isPlainTag,
+          /* 只清自己命名空间：筛着 `fmt:png` 时点「全部标签」不该把格式也放掉 */
+          onPick: () => {
+            if (isPlainTag) onTag(null);
+          },
+        },
         ...tags.map((tag) => ({
           label: tag.name,
           /* 标签行的图标口径和 FontManager 一致：手工标签 = 标签图标（不再是色点） */
@@ -352,9 +425,12 @@ function TopBarImpl({
       ],
     },
     {
+      /* 「文件夹」不是筛选，是「我在哪」（方案 P1-4 / §4.2）：
+         启动就会选中第一个库根，如果算作筛选，漏斗指示灯从第一秒起常亮，
+         用户就再也没有"有没有筛选"的信号了。这里只如实显示当前目录名，不点亮。
+         （选中某个目录仍然会换视图 —— 那是 `onDir` 的事，和数据条件无关。） */
       label: t("topbar.folders"),
-      meta: dirNode ? "1" : undefined,
-      on: !!dirNode,
+      meta: dirNode ? short(dirNode.name) : undefined,
       sub: [
         { label: t("topbar.all_folders"), icon: ICO_DIR, on: !dirNode, check: !dirNode, onPick: () => onDir(null) },
         ...folders.map((d) => ({
@@ -369,10 +445,19 @@ function TopBarImpl({
     },
     {
       label: t("topbar.shape"),
-      meta: activeTag?.startsWith("orient:") ? "1" : undefined,
-      on: !!activeTag?.startsWith("orient:"),
+      meta: shapeLabel,
+      on: isShapeTag,
       sub: [
-        { label: t("topbar.all_shapes"), icon: ICO_AUTO, on: !activeTag?.startsWith("orient:"), check: !activeTag?.startsWith("orient:"), onPick: () => onTag(null) },
+        {
+          label: t("topbar.all_shapes"),
+          icon: ICO_AUTO,
+          on: !isShapeTag,
+          check: !isShapeTag,
+          /* 同样只清 `orient:*`：手工标签 / 格式必须留着（方案 §4.4 的验收点） */
+          onPick: () => {
+            if (isShapeTag) onTag(null);
+          },
+        },
         ...autoOf("orient").map((tag) => ({
           label: ORIENT_LABEL[tag.name.slice("orient:".length)] ?? tag.name,
           icon: ICO_AUTO,
@@ -400,10 +485,18 @@ function TopBarImpl({
     },
     {
       label: t("topbar.format"),
-      meta: activeTag?.startsWith("fmt:") ? "1" : undefined,
-      on: !!activeTag?.startsWith("fmt:"),
+      meta: fmtLabel,
+      on: isFmtTag,
       sub: [
-        { label: t("topbar.all_formats"), icon: ICO_AUTO, on: !activeTag?.startsWith("fmt:"), check: !activeTag?.startsWith("fmt:"), onPick: () => onTag(null) },
+        {
+          label: t("topbar.all_formats"),
+          icon: ICO_AUTO,
+          on: !isFmtTag,
+          check: !isFmtTag,
+          onPick: () => {
+            if (isFmtTag) onTag(null);
+          },
+        },
         ...autoOf("fmt").map((tag) => ({
           label: tag.name.slice("fmt:".length).toUpperCase(),
           icon: ICO_AUTO,
@@ -436,7 +529,7 @@ function TopBarImpl({
 
   return (
     <div className="topbar">
-      <div className="topbar-search">
+      <div className={`topbar-search ${text ? "has-clear" : ""}`}>
         <Icon name="search" size={13} stroke={1.7} className="tf-icon" />
         <BlinkCaretInput
           value={text}
@@ -455,6 +548,25 @@ function TopBarImpl({
           onBlur={() => setSugOpen(false)}
           onKeyDown={onSearchKey}
         />
+        {/* 有词才出现的 ×（方案 §4.6）：全选删除清空关键词的成本太高。
+            mousedown 里 preventDefault —— 否则输入框先失焦，自绘块光标消失、
+            建议面板也跟着收，看起来像"点了一下整块都关了"。 */}
+        {text && (
+          <button
+            type="button"
+            className="topbar-clear"
+            title={t("topbar.search_clear")}
+            aria-label={t("topbar.search_clear")}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              onText("");
+              setSugOpen(false);
+              setSugActive(-1);
+            }}
+          >
+            <Icon name="close" size={10} stroke={2} />
+          </button>
+        )}
         {sugOpen && (
           <SearchSuggest
             items={sugItems}
@@ -499,19 +611,11 @@ function TopBarImpl({
       )}
 
       <button
-        className={`ctl ctl-icon ${
-          trashMode
-            ? trashFormat
-              ? "on"
-              : ""
-            : kindKey !== "all" || dirNode || activeTag || rating !== null
-              ? "on"
-              : ""
-        }`}
+        className={`ctl ctl-icon ${filterOn ? "on" : ""}`}
         onClick={(e) => openMenu(e, "filter")}
         title={trashMode ? t("topbar.filter_trash") : t("topbar.filter_all")}
         aria-label={t("topbar.filter_by_type", { type: t(kind.labelKey) })}
-        aria-pressed={kindKey !== "all"}
+        aria-pressed={filterOn}
       >
         <Icon name="funnel" size={13} stroke={1.5} className="ctl-ico" />
       </button>

@@ -40,7 +40,7 @@ import {
   type TrashEntry,
 } from "./types";
 import { AssetView, THUMB_PX, type ViewMode } from "./components/Views";
-import { Detail, TitleBar, TopBar } from "./components/Chrome";
+import { Detail, KINDS, TitleBar, TopBar } from "./components/Chrome";
 import { HoverHintHost } from "./components/HoverHint";
 import { TrashDetail, TrashMultiDetail, TrashView } from "./components/TrashView";
 import { AboutView } from "./components/AboutView";
@@ -61,13 +61,13 @@ import { COLOR_LABEL, autoTagLabel, isAutoTag, loadDenied, saveDenied } from "./
 import { activeLocale, t, useT } from "./lib/i18n";
 import { useDialog } from "./components/Dialog";
 
-const KINDS_OF: Record<string, number[] | null> = {
-  all: null,
-  image: [0],
-  "3d": [3],
-  video: [1],
-  doc: [4],
-};
+/**
+ * 类型筛选 → 后端 `kinds` 数组。**从 `Chrome.KINDS` 派生**，不再另存一份
+ * （方案 §4.7：以前 `Chrome.tsx` 和这里各有一张 5 行的表，加一种类型要改两处）。
+ */
+const KINDS_OF: Record<string, number[] | null> = Object.fromEntries(
+  KINDS.map((k) => [k.key, k.kinds])
+);
 
 /** 阈值确认的口径（规格 §3.8）：移动 > 100 个或 > 2GB、删除 > 20 个，都要再问一次 */
 const CONFIRM_MOVE_COUNT = 100;
@@ -354,6 +354,12 @@ export default function App() {
   const lastPick = useRef<number | null>(null);
   const itemsRef = useRef<Asset[]>([]);
   itemsRef.current = items;
+  /** 列表**怎么变的**：给下面的标签增量回填用。
+   *  reset = 整份换掉（换库 / 换筛选 / 重新扫描）→ 全量对账；
+   *  append = 末尾追加一页 → 只补新增的 id；
+   *  patch = 只改字段（评分 / 注释 / 来源），id 集合不变 → 一个请求都不发。
+   *  默认 reset：首屏第一份列表必须全量拿标签。 */
+  const itemsMode = useRef<"reset" | "append" | "patch" | null>("reset");
   /** 上一次「复制原文件」的时刻（performance.now）：400ms 内的重复触发只算一次 */
   const lastCopyAt = useRef(0);
 
@@ -614,6 +620,7 @@ export default function App() {
         ratingFilter !== null ||
         !!debounced;
       if (reset && !dir && !scoped) {
+        itemsMode.current = "reset";
         setItems([]);
         setDone(true);
         return;
@@ -627,6 +634,9 @@ export default function App() {
            那条放宽路径在 0.4.24 之后其实仍然只查当前库，正是 owner 报的
            「截图库的分组在导入库里点开是空的」。 */
         if (my !== reqRef.current) return; // 丢弃过期响应
+        /* 告诉标签回填 effect：这次是整份换掉还是末尾追加（决定全量 / 增量）。
+           同一批渲染里既 reset 又 append 时按 reset 算（宁可多拉一页，不许漏补）。 */
+        itemsMode.current = reset || itemsMode.current === "reset" ? "reset" : "append";
         setItems((prev) => (reset ? rows : [...prev, ...rows]));
         setDone(rows.length < 200);
         if (rows.length) {
@@ -1079,18 +1089,91 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dir?.id, dir?.path]);
 
-  // 当前页的手工标签（详情面板 + 后面的批量操作都要用）
+  /** 已经拉过（或正在拉）标签的 id：增量回填的「游标」 */
+  const knownTagIds = useRef<Set<number>>(new Set());
+  /** 列表代数：reset 一次 +1，用过的在途回包直接丢弃，避免旧列表的标签覆盖新的 */
+  const tagEpoch = useRef(0);
+
+  /* 当前页的手工标签（详情面板 + 后面的批量操作都要用）。
+     P1-5（2026-11-24）：**只为本次新增的 id 拉标签**。旧写法依赖整个 `items`，
+     每翻一页都对「全部已加载」重拉一次，第 k 页发 ⌈200k/400⌉ 次 IPC，累计 O(n²)
+     （2 万条约 2500 次，10 万条约 6 万次）。现在一次翻页固定 1 次。
+     三种"列表变了但 id 空间/内容含义不同"的情况必须分开处理，漏一个就会「标签不显示」：
+       ① 库切换：走 loadPage(true)，itemsMode = "reset" → 清空已处理集合，全量重拉。
+          即便后端 id 是 (库号<<位 | 库内号) 的全局 id，也**不**赌 id 不复用；
+       ② 筛选 / 排序 / 搜索切换：同样走 reset。这里不复用旧标签，因为列表整体换掉后
+          残留条目的数量不可控（切来切去会越积越多），而全量只有一页（≤1 次 IPC）；
+       ③ 删除后重排：删除 → refreshKey++ → 重新拉第一页（reset，全量）。
+          若只是「删掉中间一条、其余不动」，那些补上来的 id 不在已处理集合里，
+          差集自然抓得到 —— 不需要为删除单独做一次全量。
+     `refreshKey` 变了但新列表还没回来时（此时 itemsMode = null）不要盲发请求：
+     老 items 马上被替换，等那一趟 reset 一起拉。 */
   useEffect(() => {
+    const mode = itemsMode.current;
+    itemsMode.current = null; // 一次列表变化只消费一次（StrictMode 下 effect 会跑两遍）
     const ids = items.map((a) => a.id);
+
     if (!ids.length) {
-      setTagMap(new Map());
+      knownTagIds.current = new Set();
+      tagEpoch.current++; // 让在途回包作废，别把上一份列表的标签塞回来
+      setTagMap((prev) => (prev.size ? new Map() : prev));
       return;
     }
+
+    if (mode === "reset") {
+      tagEpoch.current++;
+      knownTagIds.current = new Set();
+      /* 只保留还在列表里的条目：删掉已不存在的 id，正在看的那张不会瞬间掉标签。
+         没变化就返回原 map，避免无意义的重渲。 */
+      const alive = new Set(ids);
+      setTagMap((prev) => {
+        let dropped = false;
+        const next = new Map<number, string[]>();
+        for (const [id, tags] of prev) {
+          if (alive.has(id)) next.set(id, tags);
+          else dropped = true;
+        }
+        return dropped ? next : prev;
+      });
+    }
+
+    const fresh = mode === "reset" ? ids : ids.filter((id) => !knownTagIds.current.has(id));
+    if (!fresh.length) return; // 纯追加 0 条 / 只改了评分 —— 一个 IPC 都不发
+
+    /* 先记账再发请求：同一个 id 不重复拉。**失败的那一片把 id 从账上划掉**，
+       下次列表变化时重试（这里不能靠"回包里没有这个 id"判断失败 ——
+       没打过标签的素材后端本来就不返回，那样会把全部无标签素材当成失败重拉，又变回 O(n²)）。 */
+    for (const id of fresh) knownTagIds.current.add(id);
+    const epoch = tagEpoch.current;
     // 分片取：翻到几千项时一条 SQL 的占位符会顶到 SQLite 变量上限
     const chunks: number[][] = [];
-    for (let i = 0; i < ids.length; i += 400) chunks.push(ids.slice(i, i + 400));
-    void Promise.all(chunks.map((c) => source.assetTags(c).catch(() => [] as [number, string[]][])))
-      .then((parts) => setTagMap(new Map(parts.flat())))
+    for (let i = 0; i < fresh.length; i += 400) chunks.push(fresh.slice(i, i + 400));
+    void Promise.all(
+      chunks.map((c) =>
+        source.assetTags(c).then(
+          (rows) => ({ ok: true as const, rows }),
+          () => ({ ok: false as const, rows: [] as [number, string[]][] })
+        )
+      )
+    )
+      .then((parts) => {
+        if (epoch !== tagEpoch.current) return; // 列表已经整份换过，这批回包作废
+        /* 成功拿到回包的那些 id 是"权威结果"：**先删后填**。
+           后端只返回「确实有标签」的素材，所以「以前有标签、现在一个都没有」的条目
+           必须靠删除来处理，否则取消标签后详情面板还显示旧标签。 */
+        const answered = new Set<number>();
+        parts.forEach((p, i) => {
+          if (p.ok) for (const id of chunks[i]) answered.add(id);
+          else for (const id of chunks[i]) knownTagIds.current.delete(id); // 失败的下次再试
+        });
+        if (!answered.size) return;
+        setTagMap((prev) => {
+          const next = new Map(prev);
+          for (const id of answered) next.delete(id);
+          for (const [id, tags] of parts.flatMap((p) => p.rows)) next.set(id, tags);
+          return next;
+        });
+      })
       .catch(() => {});
   }, [items, refreshKey]);
 
@@ -2980,6 +3063,8 @@ export default function App() {
      不让界面显示旧值；写库失败就弹错误，绝不假装成功。 */
   const patchAsset = useCallback((ids: number[], patch: Partial<Asset>) => {
     const set = new Set(ids);
+    // id 集合不变 → 标签不用重拉（让增量回填直接短路）；但别盖掉还没消费的 reset
+    if (itemsMode.current !== "reset") itemsMode.current = "patch";
     setItems((prev) => prev.map((a) => (set.has(a.id) ? { ...a, ...patch } : a)));
     setSelected((cur) => (cur && set.has(cur.id) ? { ...cur, ...patch } : cur));
   }, []);
@@ -3364,6 +3449,9 @@ export default function App() {
      `items` 整个带过去，方向键在里面直接翻。 */
   const openPeek = useCallback(
     (a: Asset) => {
+      /* 埋点：按下的时刻（只在 AM_PEEK_PERF 联调时记）。放在 invoke **之后**发，
+         免得这条诊断 IPC 抢在贴图请求前面，把要测的数弄脏。 */
+      const tPress = Date.now();
       const list = items.length ? items : [a];
       const i = Math.max(0, list.findIndex((v) => v.id === a.id));
       // 记住上次缩放到的长边（同一个 origin，localStorage 两个窗口共用）
@@ -3375,6 +3463,16 @@ export default function App() {
           last
         )
         .catch((e) => toast(String(e), true));
+      if (localStorage.getItem("am.peek.perf") === "1") {
+        const inv = (
+          window as unknown as {
+            __TAURI_INTERNALS__?: { invoke: (c: string, a?: unknown) => Promise<unknown> };
+          }
+        ).__TAURI_INTERNALS__?.invoke;
+        if (inv) {
+          void inv("am_peek_perf", { label: "main", stage: "press", at: tPress }).catch(() => {});
+        }
+      }
     },
     [items, toast]
   );
@@ -3833,6 +3931,29 @@ export default function App() {
         setCmdkOpen(true);
         return;
       }
+      /* Ctrl/⌘ + F = 聚焦顶栏搜索框（方案 §4.6）。
+         必须排在「焦点在输入框就 return」之前 —— 否则焦点已经在别的输入框里时按 Ctrl+F
+         就没反应；也必须 preventDefault，不然 WebView2 会弹自己的原生查找条。
+         用类名而不是 ref：搜索框挂在 memo 过的 TopBar 里，把 ref 一路传下来会让
+         TopBar 的 props 多一个永远在变的字段。
+         浮层（命令面板 / 大图 / 两个输入弹层）开着时不抢焦点：它们本身就是模态的，
+         把光标搬到背后的搜索框只会让人以为"刚才那个框失效了"。 */
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "f" &&
+        !cmdkOpen &&
+        lightbox === null &&
+        !tagPrompt &&
+        !snapPrompt
+      ) {
+        const el = document.querySelector<HTMLInputElement>(".topbar-field");
+        if (el && !el.disabled) {
+          e.preventDefault();
+          el.focus();
+          el.select();
+        }
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) {
         if (e.key === "Escape") (e.target as HTMLElement).blur();
@@ -3956,7 +4077,7 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop, page, trashShown]);
+  }, [selected, items, lightbox, settingsOpen, shortcutsOpen, tools, ctx, selectedIds, openPeek, detailPop, page, trashShown, cmdkOpen, tagPrompt, snapPrompt]);
 
   /* Ctrl + 滚轮 = 缩略图大小（owner 2026-11-21）。
      顶栏那根滑杆（120 / 176 / 260）的另一种按法：手停在网格上就能调，不用去够滑杆。
@@ -4321,8 +4442,46 @@ export default function App() {
      列依赖，**漏一项不会报错**，只会让处理器永远拿着旧闭包（点了没反应 / 用上一批数据）。
      `useEvent` 两头都占：引用不变，调用时才读最新实现（见 `lib/useEvent.ts`）。
      所以下面都写成组件级常量，JSX 里只传名字，不再出现 `onXxx={() => …}`。 */
+  /* ---- 互斥筛选的清除规则（方案 §4.5）：**唯一实现**，侧栏与漏斗共用 ----
+   * 五者互斥：标签/形状/格式（共用 `tagFilter`）、颜色、评分、分组、快照。
+   * 选其中任意一项 → 清掉其余四项；类型、搜索词、目录不在这条规则里。
+   * 为什么必须互斥：它们全是后端 SQL 里的 AND（`core/src/db.rs:996-1117`），
+   * "红 + 客户稿"叠起来几乎必然是一个空列表，而用户无从知道是哪一项造成的。
+   *
+   * 「切目录 / 切标签 / 切分组 / 切快照 / 进回收站」各自清什么：
+   *   · 点目录（侧栏与漏斗**同一套**）→ 清 tag / coll / snap（离开集合视图），
+   *     **保留颜色与评分**（它们和目录是正常的 AND，换个目录继续筛同色是预期）；
+   *   · 点标签（含形状 / 格式）→ 只设 tagFilter，清 color / rating / coll / snap；
+   *   · 点颜色 → 只设 colorFilter，清 tag / rating / coll / snap；
+   *   · 点评分 → 只设 ratingFilter，清 tag / color / coll / snap；
+   *   · 点分组 → 只设 collFilter，清 tag / color / rating / snap；
+   *   · 点快照 → 只设 snapFilter，清 tag / color / rating / coll，并清 dir
+   *     （快照本身跨库，留着目录只会让侧栏高亮一个并不生效的位置）；
+   *   · 进回收站 → 一项都不清（只切页；回收站自己的格式筛是独立的 `trashFormat`）。
+   * `dir` 是"我在哪"、`kind/text` 是可与任意项 AND 的真条件，任何互斥分支都不动它们。 */
+  const clearExclusive = useEvent((keep: "tag" | "color" | "rating" | "coll" | "snap") => {
+    if (keep !== "tag") setTagFilter(null);
+    if (keep !== "color") setColorFilter(null);
+    if (keep !== "rating") setRatingFilter(null);
+    if (keep !== "coll") setCollFilter(null);
+    if (keep !== "snap") setSnapFilter(null);
+  });
+
+  /** 「清空全部筛选」（顶栏 chips / 空态共用）：只清**筛选**。
+   *  不动目录（我在哪），也不动分组 / 快照（那是视图，侧栏有自己的胶囊）。 */
+  const clearAllFilters = useEvent(() => {
+    setKindKey("all");
+    setTagFilter(null);
+    setColorFilter(null);
+    setRatingFilter(null);
+    setText("");
+  });
+  /** 只清关键词（搜索框 ×、空态「清空搜索」） */
+  const clearSearchText = useEvent(() => setText(""));
+
   const pickDir = useEvent((n: DirNode) => {
-    /* 点目录 = 切换视图：离开标签 / 分组 / 快照，否则两个筛选叠在一起会莫名其妙 0 结果 */
+    /* 点目录 = 切换视图：离开标签 / 分组 / 快照，否则两个筛选叠在一起会莫名其妙 0 结果。
+       颜色 / 评分保留 —— 它们和目录是同一个 WHERE 里的 AND，换目录继续筛是预期行为。 */
     setDir(n);
     setTagFilter(null);
     setCollFilter(null);
@@ -4359,8 +4518,9 @@ export default function App() {
     setSnapFilter(on ? null : row.id);
     if (!on) {
       setDir(null);
-      setTagFilter(null);
-      setCollFilter(null);
+      /* 统一规则（§4.5）：快照与标签/颜色/评分/分组互斥。以前只清 dir/tag/coll，
+         颜色和评分留着 → "点快照后结果比预期少"（P1-8）。 */
+      clearExclusive("snap");
       setPage("assets");
     }
   });
@@ -4380,10 +4540,10 @@ export default function App() {
        看着就像"点一下分组，文件库被切走了"（owner 2026-11-21 报的）。
        只有「当前库内 0 条」时 `loadPage` 才放宽到全部库并给一句提示。 */
     setCollFilter(id);
+    /* 侧栏与漏斗同一个语义：分组与标签/颜色/评分/快照互斥（§4.5） */
     if (id !== null) {
-      setTagFilter(null);
-      setColorFilter(null);
-      setRatingFilter(null);
+      clearExclusive("coll");
+      setPage("assets");
     }
   });
   const collCreate = useEvent((name: string) => void createCollInline(name));
@@ -4394,10 +4554,13 @@ export default function App() {
 
   const tagPick = useEvent((t: string | null) => {
     /* 点标签 = **在当前库里**看这个标签；再点一次取消（0.4.24）。
-       以前清目录 → 结果跨全库，侧栏还停在原库，看着像库被切走。 */
+       以前清目录 → 结果跨全库，侧栏还停在原库，看着像库被切走。
+       侧栏与漏斗**共用**这一套清除规则（§4.5）：以前侧栏点标签会留着颜色/评分，
+       漏斗点同一个标签却把它们清掉 —— 同一个动作两个结果（P1-8）。 */
     setTagFilter(t);
     if (t) {
-      setCollFilter(null);
+      clearExclusive("tag");
+      setPage("assets");
     }
   });
   const tagEditTag = useEvent((name: string) => openTagEdit("tag", name));
@@ -4413,19 +4576,16 @@ export default function App() {
 
   const pickColor = useEvent((c: string | null) => {
     setColorFilter(c);
-    if (c) {
-      setTagFilter(null);
-      setCollFilter(null);
-    }
+    /* 颜色与标签/评分/分组/快照互斥（§4.5）。以前还会和快照叠着，结果为空时看不出原因。 */
+    if (c) clearExclusive("color");
   });
   const pickTagTop = useEvent((n: string | null) => {
     setTagFilter(n);
     /* 颜色和标签都作用于同一批素材：选标签就把颜色放开，
-       否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表 */
+       否则"筛了红 + 筛了客户稿"会得到一个莫名其妙的空列表。
+       §4.5：侧栏与漏斗统一 —— 这里与 `tagPick` 是同一套清除规则。 */
     if (n) {
-      setColorFilter(null);
-      setRatingFilter(null);
-      setCollFilter(null);
+      clearExclusive("tag");
       /* 0.4.24：目录**保留**，和侧栏点标签同一个语义（当前库 AND 标签）。 */
       setPage("assets");
     }
@@ -4434,15 +4594,13 @@ export default function App() {
     setDir(n);
     setTagFilter(null);
     setCollFilter(null);
+    /* 与侧栏点目录完全一致（§4.5）：快照也要清，否则"点目录没反应"。 */
+    setSnapFilter(null);
     setPage("assets");
   });
   const pickRating = useEvent((n: number | null) => {
     setRatingFilter(n);
-    if (n !== null) {
-      setColorFilter(null);
-      setTagFilter(null);
-      setCollFilter(null);
-    }
+    if (n !== null) clearExclusive("rating");
   });
 
   /* 三块侧栏面板是**作为 ReactNode 传进 Tree 的**：不包 `useMemo` 的话，
@@ -4580,6 +4738,107 @@ export default function App() {
 
   const current = lightbox !== null ? items[lightbox] ?? null : null;
 
+  /* ---- 顶栏「当前筛选」chips（方案 §4.2）----
+     只列**真筛选**：类型 / 标签（含形状、格式）/ 颜色 / 评分 / 关键词。
+     分组 / 快照是**视图**（侧栏胶囊 + shelf-source 已经说清"我在看哪一撮"），
+     按 README 与 owner 2026-11-18 的决定不进筛选条；目录也不进 —— 它是"我在哪"，
+     不是"我在筛什么"，「清空全部」也不该把人从当前目录里赶走。 */
+  const ORIENT_CHIP: Record<string, string> = {
+    landscape: t("topbar.orient_landscape"),
+    portrait: t("topbar.orient_portrait"),
+    square: t("topbar.orient_square"),
+  };
+  const activeChips: {
+    key: string;
+    dim: string;
+    value: string;
+    title?: string;
+    onClear: () => void;
+  }[] = [];
+  const chipKind = KINDS.find((k) => k.key === kindKey);
+  if (kindKey !== "all" && chipKind) {
+    activeChips.push({
+      key: "kind",
+      dim: t("topbar.type"),
+      value: t(chipKind.labelKey),
+      onClear: () => setKindKey("all"),
+    });
+  }
+  if (tagFilter) {
+    /* 形状 / 格式 / 标签共用同一个 `tagFilter`，chip 的维度名按命名空间还原，
+       否则用户看到一个"标签：orient:landscape"会完全不知道它从哪来（§4.4）。 */
+    const isShape = tagFilter.startsWith("orient:");
+    const isFmt = tagFilter.startsWith("fmt:");
+    const value = isShape
+      ? (ORIENT_CHIP[tagFilter.slice("orient:".length)] ?? tagFilter)
+      : isFmt
+        ? tagFilter.slice("fmt:".length).toUpperCase()
+        : isAutoTag(tagFilter)
+          ? autoTagLabel(tagFilter)
+          : tagFilter;
+    activeChips.push({
+      key: "tag",
+      dim: isShape ? t("topbar.shape") : isFmt ? t("topbar.format") : t("topbar.tags"),
+      value,
+      onClear: () => setTagFilter(null),
+    });
+  }
+  if (colorFilter) {
+    const name = COLOR_LABEL[colorFilter] ?? colorFilter;
+    activeChips.push({
+      key: "color",
+      dim: t("app.filter.color"),
+      value: name,
+      title: t("app.filter.dominant_color", { color: name }),
+      onClear: () => setColorFilter(null),
+    });
+  }
+  if (ratingFilter !== null) {
+    activeChips.push({
+      key: "rating",
+      dim: t("topbar.rating"),
+      value: `${ratingFilter}★`,
+      title: t("app.filter.rating", { n: ratingFilter }),
+      onClear: () => setRatingFilter(null),
+    });
+  }
+  if (debounced) {
+    activeChips.push({
+      key: "text",
+      dim: t("app.filter.search"),
+      value: debounced.length > 24 ? `${debounced.slice(0, 23)}…` : debounced,
+      onClear: clearSearchText,
+    });
+  }
+
+  /** 空态判据（§4.1）：类型 / 标签 / 颜色 / 评分 / 关键词。
+   *  **不含目录** —— 空目录必须还能显示「导入文件…」（那是 0.4.2 的正确入口）。 */
+  const hasFilter =
+    kindKey !== "all" ||
+    tagFilter !== null ||
+    colorFilter !== null ||
+    ratingFilter !== null ||
+    !!debounced;
+  /** 除关键词以外的筛选：决定空态要不要给「清空筛选」这颗按钮 */
+  const hasStructuralFilter =
+    kindKey !== "all" || tagFilter !== null || colorFilter !== null || ratingFilter !== null;
+
+  /* 搜索建议的范围 = 主列表范围（§4.3）。memo 一个对象：TopBar 是 memo 的，
+     每次渲染新建对象会让它的 props 永远"变了"（虽然 useSuggest 只比字段，
+     但 memo 边界会整块重渲，没必要）。 */
+  const suggestScope = useMemo(
+    () => ({
+      dirId: dir?.id ?? null,
+      kinds: KINDS_OF[kindKey] ?? null,
+      tag: tagFilter,
+      color: colorFilter,
+      minRating: ratingFilter,
+      collection: collFilter,
+      snapshot: snapFilter,
+    }),
+    [dir?.id, kindKey, tagFilter, colorFilter, ratingFilter, collFilter, snapFilter]
+  );
+
   return (
     <div className="app-frame">
       <TitleBar
@@ -4645,35 +4904,31 @@ export default function App() {
             trashFormats={trashFormats}
             trashFormat={trashFormat}
             onTrashFormat={setTrashFormat}
+            suggestScope={suggestScope}
           />
 
-          {colorFilter && (
-            <div className="filter-strip">
-              <span className="ctl-color-dot" style={{ background: `var(--c-${colorFilter}, #8b8b86)` }} />
-              <span className="filter-strip-label">
-                {t("app.filter.dominant_color", {
-                  color: COLOR_LABEL[colorFilter] ?? colorFilter,
-                })}
-              </span>
-              <button className="btn btn-tiny" onClick={() => setColorFilter(null)}>
-                {t("app.filter.clear")}
-              </button>
-            </div>
-          )}
-
-          {/* 标签 / 分组 / 快照不再是"筛选条"（owner 2026-11-18）：
-              从侧栏点它们 = **切换视图**（标题栏写「标签：X」，再点一次取消），
-              真正的筛选只在漏斗面板里下。挂一条「清除筛选」的条子会让人以为
-              自己是在叠条件，而不是换了个地方看东西。 */}
-
-          {ratingFilter !== null && (
-            <div className="filter-strip">
-              <Icon name="star" size={12} stroke={1.5} />
-              <span className="filter-strip-label">
-                {t("app.filter.rating", { n: ratingFilter })}
-              </span>
-              <button className="btn btn-tiny" onClick={() => setRatingFilter(null)}>
-                {t("app.filter.clear")}
+          {/* 当前筛选 chips（方案 §4.2）：每一维一个胶囊，× 去掉单项，最右「清空全部」。
+              以前只有颜色和评分各占一整条 `filter-strip`，类型 / 标签 / 形状 / 格式 /
+              关键词全都没有可见标识 —— 筛出 0 条时用户无从知道是哪个条件造成的（P0-2）。
+              分组 / 快照**不进这里**（owner 2026-11-18：点它们是切换视图，不是叠条件）；
+              回收站页也不显示（那边的列表只按回收站格式筛，这些条件并不生效）。 */}
+          {page === "assets" && activeChips.length > 0 && (
+            <div className="filter-chips" role="toolbar" aria-label={t("app.filter.active")}>
+              {activeChips.map((c) => (
+                <span key={c.key} className="fchip" title={c.title}>
+                  <span className="fchip-dim">{c.dim}</span>
+                  <span className="fchip-val">{c.value}</span>
+                  <button
+                    className="fchip-x"
+                    aria-label={t("app.filter.remove_one", { name: `${c.dim} ${c.value}` })}
+                    onClick={c.onClear}
+                  >
+                    <Icon name="close" size={9} stroke={2} />
+                  </button>
+                </span>
+              ))}
+              <button className="fchips-clear" onClick={clearAllFilters}>
+                {t("app.filter.clear_all")}
               </button>
             </div>
           )}
@@ -4761,7 +5016,7 @@ export default function App() {
                 view={view}
                 sizeIndex={sizeIndex}
                 selectedIds={selectedIds}
-                resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}|${collFilter ?? ""}|${snapFilter ?? ""}`}
+                resetKey={`${dir?.id ?? "none"}|${kindKey}|${debounced}|${sort}|${refreshKey}|${tagFilter ?? ""}|${colorFilter ?? ""}|${ratingFilter ?? ""}|${collFilter ?? ""}|${snapFilter ?? ""}`}
                 onPick={pickOne}
                 onPickMany={pickMany}
                 onOpen={(a) => openLightbox(a)}
@@ -4770,6 +5025,11 @@ export default function App() {
                 thumbSrc={thumbSrc}
                 onPrefetch={onPrefetchThumbs}
                 onImport={() => void importInto(null)}
+                /* 空态要分清"这里本来没有"和"筛不到"（§4.1）：
+                   后者不递「导入文件…」，改成「清空筛选 / 清空搜索」。 */
+                emptyFiltered={hasFilter}
+                onClearFilters={hasStructuralFilter ? clearAllFilters : undefined}
+                onClearSearch={debounced ? clearSearchText : undefined}
                 onToast={(m, e) => toast(m, e)}
               />
             )}
@@ -4909,8 +5169,10 @@ export default function App() {
             if (selected) void removeTag(t, [selected.id]);
           }}
           onPickTag={(t) => {
-            /* 详情面板双击标签也是同一个语义：在当前库里看（0.4.24，不再清目录） */
-            setTagFilter(t);
+            /* 详情面板点标签也是同一个语义（§4.5）：走 `tagPick`，
+               这样它和其它两个入口的清除规则完全一致（以前这里是裸的 setTagFilter，
+               筛着颜色时点标签会叠成空列表 —— 第三个入口的特例）。 */
+            tagPick(t);
           }}
           onDenyAutoTag={denyAutoTag}
           onEditTag={(name) => openTagEdit("tag", name)}

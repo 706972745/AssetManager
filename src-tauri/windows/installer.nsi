@@ -554,7 +554,25 @@ Section WebView2
 SectionEnd
 
 Section Install
+  ; 装之前先验目录（盘符根 / 系统目录 / 用户目录根 → 拒绝；已有别人文件 → 确认）。
+  ; 必须在 SetOutPath 之前：SetOutPath 会把目录建出来，之后就分不清"原本就在"了。
+  Call am_check_install_dir
+
   SetOutPath $INSTDIR
+
+  ; 「$INSTDIR\data 与 $INSTDIR\cache 是本程序建的」的凭据，卸载时只认它（见 Section Uninstall）。
+  ; 只在两个目录都还不存在（= 绝不是别人的）或者 marker 已经在（= 我们以前的安装）时写，
+  ; 否则一律不写：用户自己就有一个 data\ 的目录，不能被我们认领。
+  IfFileExists "$INSTDIR\.am-data" am_marker_write
+  IfFileExists "$INSTDIR\data" am_marker_skip
+  IfFileExists "$INSTDIR\cache" am_marker_skip
+  am_marker_write:
+    ClearErrors
+    FileOpen $0 "$INSTDIR\.am-data" w
+    IfErrors am_marker_skip
+    FileWrite $0 "${BUNDLEID}$\r$\n"
+    FileClose $0
+  am_marker_skip:
 
   !ifmacrodef NSIS_HOOK_PREINSTALL
     !insertmacro NSIS_HOOK_PREINSTALL
@@ -859,8 +877,25 @@ Section Uninstall
     ; 连它们一起删，否则用户看到的是"勾了却没删"。
     ; 上面那次 `RMDir "$INSTDIR"` 因为 data / cache 还在而失败，这里删完再补一次。
     ; ⚠️ `screenshots\` 是**用户的素材**（内置截图库），任何情况下都不删。
-    RMDir /r "$INSTDIR\data"
-    RMDir /r "$INSTDIR\cache"
+    ;
+    ; ⚠️ `data` / `cache` 是**最常见**的子目录名：安装目录被选成 `D:\我的素材` 时，
+    ;    `RMDir /r "$INSTDIR\data"` 会删掉用户自己的 `D:\我的素材\data`。所以递归删之前
+    ;    必须先证明这两个目录是本程序建的：
+    ;      · `.am-data`：安装时写的 marker（0.5.14 起）；
+    ;      · 老版本没有 marker，退而看 `$INSTDIR\data\index.db` —— 索引库只可能是我们写的。
+    ;    两条都不成立 → 一个字都不删（只把 $INSTDIR 本身按"非空"留着）。
+    StrCpy $R5 0
+    IfFileExists "$INSTDIR\.am-data" am_purge_ours
+    IfFileExists "$INSTDIR\data\index.db" am_purge_ours
+    Goto am_purge_check_done
+    am_purge_ours:
+      StrCpy $R5 1
+    am_purge_check_done:
+    ${If} $R5 = 1
+      RMDir /r "$INSTDIR\data"
+      RMDir /r "$INSTDIR\cache"
+      Delete "$INSTDIR\.am-data"
+    ${EndIf}
     RMDir "$INSTDIR"
     ; 老版本（≤0.5.6）的两个位置：留着清一遍，免得升级后卸载留一地旧数据
     RmDir /r "$APPDATA\${BUNDLEID}"
@@ -878,6 +913,86 @@ Section Uninstall
     SetAutoClose true
   ${EndIf}
 SectionEnd
+
+; ── 安装目录校验（Section Install 的第一件事）─────────────────────────────
+; 为什么要有：`setup_check_dir`（Rust 侧 setup_ui.rs）只查「剩余空间够不够」，装到
+; `C:\`、`%WINDIR%`、`%USERPROFILE%` 都放行；而卸载侧会递归删 `$INSTDIR\data` /
+; `$INSTDIR\cache` —— data / cache 恰好是最常见的子目录名，选错目录就是删用户文件。
+; 这里挡三件事：盘符根、Windows 系统目录、用户目录根；再加一条「目录非空且不是
+; 我们的安装目录 → 原生确认」。
+; ⚠️ 只用 ASCII 字面量：本文件没有 BOM，`Unicode true` 下非 ASCII 会按 ANSI 代码页
+;    解析成乱码（同 .onInit 里那条 MessageBox 的注释）。
+Function am_check_install_dir
+  Push $R6
+  Push $R7
+  Push $R8
+  Push $R9
+
+  ; 归一化：去掉末尾反斜杠（`D:\foo\` → `D:\foo`），`C:\` 这种 3 字符的根保持原样
+  StrCpy $R6 $INSTDIR
+  am_dir_trim:
+    StrLen $R8 $R6
+    StrCmp $R8 3 am_dir_trimmed
+    StrCpy $R9 $R6 1 -1
+    StrCmp $R9 "\" 0 am_dir_trimmed
+    StrCpy $R6 $R6 -1
+    Goto am_dir_trim
+  am_dir_trimmed:
+
+  ; ① 盘符根，如 `C:\`
+  StrLen $R8 $R6
+  StrCmp $R8 3 0 am_dir_not_root
+  StrCpy $R9 $R6 1 -1
+  StrCmp $R9 ":" am_dir_reject_root
+  am_dir_not_root:
+
+  ; ② Windows / 系统目录
+  StrCmp $R6 $WINDIR am_dir_reject_system
+  StrCmp $R6 $SYSDIR am_dir_reject_system
+
+  ; ③ 用户目录根（%USERPROFILE%）
+  StrCmp $R6 $PROFILE am_dir_reject_profile
+
+  ; ④ 目录已存在且非空，里面又没有我们的 uninstall.exe → 确认
+  ;    （升级 / 重装时 uninstall.exe 一定在，所以不会打扰老用户）
+  FindFirst $R7 $R9 "$R6\*.*"
+  am_dir_scan:
+    StrCmp $R9 "" am_dir_scan_empty
+    StrCmp $R9 "." am_dir_scan_next
+    StrCmp $R9 ".." am_dir_scan_next
+    FindClose $R7
+    IfFileExists "$R6\uninstall.exe" am_dir_ok
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION "This folder is not empty and is not an AssetManager folder:$\r$\n$R6$\r$\n$\r$\nThe program files will be placed next to the existing files.$\r$\n$\r$\nInstall into this folder anyway?" IDYES am_dir_ok
+    Goto am_dir_abort
+  am_dir_scan_next:
+    FindNext $R7 $R9
+    Goto am_dir_scan
+  am_dir_scan_empty:
+    FindClose $R7
+    Goto am_dir_ok
+
+  am_dir_reject_root:
+    MessageBox MB_ICONSTOP "AssetManager cannot be installed into the root of a drive:$\r$\n$R6$\r$\n$\r$\nPlease pick a subfolder, for example $R6\AssetManager."
+    Goto am_dir_abort
+  am_dir_reject_system:
+    MessageBox MB_ICONSTOP "AssetManager cannot be installed into a Windows system folder:$\r$\n$R6$\r$\n$\r$\nPlease pick another folder."
+    Goto am_dir_abort
+  am_dir_reject_profile:
+    MessageBox MB_ICONSTOP "AssetManager cannot be installed directly into your user profile folder:$\r$\n$R6$\r$\n$\r$\nPlease pick a subfolder, for example $R6\AssetManager."
+    Goto am_dir_abort
+
+  am_dir_abort:
+    ; 调用点在 SetOutPath 之前，此时一个字节都还没写，直接非 0 退出即可。
+    ; 不能用 Abort：Section 里的 Abort 只是跳过本 Section，安装器照样报"成功"。
+    SetErrorLevel 1
+    Quit
+
+  am_dir_ok:
+  Pop $R9
+  Pop $R8
+  Pop $R7
+  Pop $R6
+FunctionEnd
 
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""

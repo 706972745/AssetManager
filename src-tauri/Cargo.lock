@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "am-core"
-version = "0.5.11"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "image",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "assetmanager"
-version = "0.5.11"
+version = "0.6.0"
 dependencies = [
  "am-core",
  "base64 0.22.1",
@@ -684,7 +684,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]

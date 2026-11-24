@@ -770,10 +770,23 @@ pub fn dir_children(c: &Connection, parent: Option<i64>) -> Res<Vec<DirNode>> {
 
 /// 目录重命名后修 path 前缀（一条 SQL，不碰 assets）。
 pub fn repath_subtree(c: &Connection, dir_id: i64, old_path: &str, new_path: &str) -> Res<usize> {
+    /* 前缀 LIKE **必须转义**：`_` / `%` 是通配符、`\` 是 ESCAPE 字符 ——
+       目录名 `素材_2024` 会把兄弟目录 `素材X2024` 一起改掉（口径同 `like_prefix`）。 */
+    let old_esc = old_path
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     c.execute(
         "UPDATE dirs SET path = ?1 || substr(path, length(?2) + 1)
-         WHERE path = ?2 OR path LIKE ?2 || '/%' OR path LIKE ?2 || '\\%'",
-        params![new_path, old_path],
+         WHERE path = ?2
+            OR path LIKE ?3 ESCAPE '\\'
+            OR path LIKE ?4 ESCAPE '\\'",
+        params![
+            new_path,
+            old_path,
+            format!("{old_esc}/%"),
+            format!("{old_esc}\\\\%")
+        ],
     )
     .map_err(e2s)?;
     let _ = dir_id;
@@ -1375,6 +1388,50 @@ pub fn count_rule(c: &Connection, r: &crate::reg::AutoRule) -> Res<i64> {
     );
     let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     c.query_row(&sql, refs.as_slice(), |r| r.get(0)).map_err(e2s)
+}
+
+/// 一批规则标签的命中数（侧栏用），**一次扫表算出全部**。
+///
+/// 原来每条规则单独 `count_rule`，条件多是 size/width 这类无索引列 —— 10 条规则
+/// 就是 10 次全表扫，而侧栏每次刷新（打标签 / 文件变化 / 切库）都跑一遍。
+/// 合并成一条 `SUM(CASE ...)`：条件仍然由 `push_rule_conditions` 生成，口径不变。
+/// 空规则（`is_empty`）按 0 返回，与 `count_rule` 一致。
+pub fn count_rules(
+    c: &Connection,
+    rules: &[(i64, crate::reg::AutoRule)],
+) -> Res<std::collections::HashMap<i64, i64>> {
+    let mut out: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let live: Vec<&(i64, crate::reg::AutoRule)> =
+        rules.iter().filter(|(_, r)| !r.is_empty()).collect();
+    for (id, r) in rules {
+        if r.is_empty() {
+            out.insert(*id, 0);
+        }
+    }
+    if live.is_empty() {
+        return Ok(out);
+    }
+    let mut cols: Vec<String> = Vec::with_capacity(live.len());
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    for (i, (_id, r)) in live.iter().enumerate() {
+        let mut where_sql = String::from(" a.missing = 0 ");
+        push_rule_conditions(&mut where_sql, &mut args, r);
+        cols.push(format!("SUM(CASE WHEN {where_sql} THEN 1 ELSE 0 END) AS r{i}"));
+    }
+    let sql = format!(
+        "SELECT {} FROM assets a JOIN dirs d ON d.id = a.dir_id",
+        cols.join(", ")
+    );
+    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let mut st = c.prepare(&sql).map_err(e2s)?;
+    let mut rows = st.query(refs.as_slice()).map_err(e2s)?;
+    if let Some(row) = rows.next().map_err(e2s)? {
+        for (i, (id, _)) in live.iter().enumerate() {
+            /* 没有行时 SUM 是 NULL（= 0）：空库不能把它当成"算不出来" */
+            out.insert(*id, row.get::<_, Option<i64>>(i).map_err(e2s)?.unwrap_or(0));
+        }
+    }
+    Ok(out)
 }
 
 /// 自动标签计数：0 的桶不出现（与历史行为一致 —— 侧栏不显示"0 张"的自动标签）。
@@ -2885,6 +2942,73 @@ mod tests {
         let rows = list_assets(&c, &q).unwrap();
         assert_eq!(rows.len(), 1, "只应命中 a_b 里的那张，不该串到 axb");
         assert_eq!(rows[0].id, 1);
+    }
+
+    /// 重命名目录时的前缀 LIKE 也要转义：`a_b` 不能连带改掉兄弟 `axb`。
+    #[test]
+    fn repath_subtree_escapes_like_wildcards() {
+        let d = tmp("repath");
+        let c = open(&d.join("repath.db")).unwrap();
+        for (id, path, name) in [
+            (1i64, "E:\\t\\a_b", "a_b"),
+            (2, "E:\\t\\axb", "axb"),
+            (3, "E:\\t\\a_b\\sub", "sub"),
+        ] {
+            c.execute(
+                "INSERT INTO dirs (id, path, name) VALUES (?1, ?2, ?3)",
+                params![id, path, name],
+            )
+            .unwrap();
+        }
+        /* 故意带上 `_`（LIKE 通配符）和反斜杠（ESCAPE 字符）：两个兄弟目录不能串 */
+        repath_subtree(&c, 1, "E:\\t\\a_b", "E:\\t\\a-c").unwrap();
+        let mut st = c.prepare("SELECT path FROM dirs ORDER BY id").unwrap();
+        let got: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            got,
+            vec!["E:\\t\\a-c", "E:\\t\\axb", "E:\\t\\a-c\\sub"],
+            "只改自己与自己的子树，兄弟目录必须原样"
+        );
+    }
+
+    /// 规则标签的批量计数必须与逐条 `count_rule` 完全一致（含空规则 = 0）。
+    #[test]
+    fn count_rules_matches_single_counts() {
+        let d = tmp("rulecount");
+        let c = open(&d.join("rules.db")).unwrap();
+        c.execute("INSERT INTO dirs (id, path, name) VALUES (1, 'E:\\t', 't')", [])
+            .unwrap();
+        for (id, size, w, h) in [(1i64, 50i64, 100i64, 100i64), (2, 5000, 4000, 3000), (3, 900_000, 8000, 6000)]
+        {
+            c.execute(
+                "INSERT INTO assets (id, dir_id, name, ext, kind, size, mtime, width, height, added_at)
+                 VALUES (?1, 1, ?2, 'png', 0, ?3, 1, ?4, ?5, 1)",
+                params![id, format!("{id}.png"), size, w, h],
+            )
+            .unwrap();
+        }
+        let rules = vec![
+            (
+                1i64,
+                crate::reg::AutoRule { size_min: 1000, ..Default::default() },
+            ),
+            (
+                2,
+                crate::reg::AutoRule { px_min: 5000, ..Default::default() },
+            ),
+            (3, crate::reg::AutoRule::default()),
+        ];
+        let got = count_rules(&c, &rules).unwrap();
+        for (id, r) in &rules {
+            assert_eq!(got[id], count_rule(&c, r).unwrap(), "规则 {id} 的计数必须一致");
+        }
+        assert_eq!(got[&1], 2);
+        assert_eq!(got[&2], 1);
+        assert_eq!(got[&3], 0);
     }
 
     /* ---------------- P3 T44 / T45：结构版本 与 崩溃恢复演练 ---------------- */

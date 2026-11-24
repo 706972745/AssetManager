@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗 + 截图覆盖层 + 所有无边框看图窗 + 灵感板窗。注意 `peek-*` / `board-*`：两者都是多开窗口（label 是 peek-1 / board-3…），只写单个名字匹配不上 —— 曾经因此拖不动窗口（拖拽要 core:window:allow-start-dragging）。`allow-set-position` 是灵感板「Shift+滚轮挪窗口」用的（读位置/读显示器本来就在 core:default 里）。",
-  "windows": ["main", "snip", "peek", "peek-*", "board-*"],
+  "description": "主窗（label=main）专用。安装/卸载界面（setup_ui.rs）也故意用 label=main，见 aux-windows.json 的说明。窗口按钮（最小化/关闭/最大化）走自定义命令 am_minimize/am_close/am_toggle_max，这里保留的 5 条是标题栏 data-tauri-drag-region 拖拽 + 双击最大化所需的官方权限。",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

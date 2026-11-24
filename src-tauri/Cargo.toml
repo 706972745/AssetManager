@@ -1,6 +1,6 @@
 [package]
 name = "assetmanager"
-version = "0.5.11"
+version = "0.6.0"
 description = "AssetManager · 百万级素材管理器"
 authors = ["AssetManager"]
 edition = "2021"
@@ -13,12 +13,19 @@ tauri-build = { version = "2", features = [] }
 [features]
 # 生产包必须带这个：否则 exe 会去连 devUrl（localhost:1430）而不是内嵌 dist
 custom-protocol = ["tauri/custom-protocol"]
+# 只有在**显式要求**时才把 WebView DevTools 编进包里：
+#   cargo tauri dev --features devtools
+# 默认不编。理由：DevTools 一开，任何能让用户把 JS 粘进控制台的人都能直接调全部
+# IPC（am_delete / am_open_path 全是任意路径）。以前 devtools 写死在 tauri 的
+# features 里，发布包同样带着它。`cargo build --release` 不会开这个 feature，
+# 所以发布包没有 DevTools；debug 构建里 tauri 自己按 cfg(debug_assertions) 打开。
+devtools = ["tauri/devtools"]
 
 [dependencies]
 # 托盘（「关闭到托盘」/ 托盘菜单）+ 从内置 PNG 造图标，都在这两个 feature 里。
 # `image-png` 必须开：托盘图标来自 `default_window_icon()`，关掉这个 feature
 # `TrayIconBuilder::icon` 收不到 `Image`。
-tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 am-core = { path = "../core" }

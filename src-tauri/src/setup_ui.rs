@@ -327,6 +327,12 @@ pub fn run_window(mut context: tauri::Context<tauri::Wry>) {
     let init_script = format!("window.__AM_SETUP_LANG__=\"{}\";", lang().code());
 
     let app = tauri::Builder::default()
+        /* ★ 这个 handler 是**安装/卸载界面能看到的全部 IPC** —— 一共 9 条 setup_*。
+           主程序那 180 多条 `am_*`（删除 / 移动 / 重建索引 / 任意路径打开）在这里
+           根本**没有注册**，所以「安装界面被注入也删不了用户的图」这条不是靠 ACL，
+           是靠进程边界 + 这份列表。改这个列表等于改安装器的攻击面，加任何一条 `am_*`
+           都要先想清楚：安装界面凭什么需要它？（守卫的另一半在主程序的
+           `ipc_guard.rs`，负责管主进程内的 6 类窗口。） */
         .invoke_handler(tauri::generate_handler![
             setup_env,
             setup_check_dir,
