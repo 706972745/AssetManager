@@ -952,6 +952,7 @@
   "board.layers_tip": "Ebenen-Panel (L): alle Bilder auf einen Blick; eines anklicken, um es nach vorn zu holen",
   "board.top_on_tip": "Immer im Vordergrund: klicken zum Ausschalten",
   "board.top_off_tip": "Immer im Vordergrund: Board über anderen Fenstern halten",
+  "board.min_tip": "Einklappen (Tag erneut öffnen holt sie zurück)",
   "board.close_tip": "Schließen (Esc)",
   "board.unit_image": " Bilder",
   "board.missing_count": " · {n} nicht gefunden",

@@ -633,6 +633,8 @@ export interface Source {
   /** 开一块灵感板：该标签下所有素材铺到无限画布上。返回张数（0 = 已有那块被聚焦） */
   boardOpen(tag: string, title?: string): Promise<number>;
   boardClose(): Promise<void>;
+  /** 收起这块板（`hide()`，不是关）：窗口和画布状态都留着，再从主窗开同一标签就回来 */
+  boardHide(): Promise<void>;
   /** 置顶开关（只作用于当前这块板子的窗口会话，不落盘）。返回后端认下的值 */
   boardTop(on: boolean): Promise<boolean>;
   /** 问后端当前窗口的真实置顶状态（前端不用本地默认值猜） */

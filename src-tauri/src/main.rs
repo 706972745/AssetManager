@@ -2511,16 +2511,17 @@ const PEEK_MIN_EDGE: f64 = 96.0;
 const PEEK_MAX_EDGE: f64 = 4096.0;
 /// 贴图窗口四周的透明边距（**CSS px**，逻辑单位；前端 `.peek-root` 的 `--peek-glow` 必须同值）。
 ///
-/// 曾经用来给「由边框向外的渐变蓝色阴影」腾地方（窗口外面没有像素可画，发光只能画在窗口里）。
-/// **现在是 0**：那圈透明边在"图就是贴纸"的场景里纯属浪费 —— 窗比图大一圈，
-/// 用户看到的就是"贴图外面套了个透明框"，比例也和缩略图对不上（owner 2026-11-21）。
-/// 想恢复外发光的话，这里和 `--peek-glow` 一起改回 8~10 即可，两边必须同值。
+/// 窗口外面没有像素可画，**向外**的阴影只能画在窗口里那圈透明边距上。
+/// **现在是 3**：图外面留 3 CSS px 透明边，`.peek-root` 的 `inset` + `box-shadow: 0 0 3px`
+/// 正好画在这圈边里 —— 视觉上是一圈 3px 紫色外阴影，又不会盖住图自己的像素。
 /// **必须和前端 `.peek-root { --peek-glow }` 的值一致**，不然图会偏、会缩。
-/// 20 → 10（0.2.2）：owner 说蓝边"太宽、太明显"，图外面那圈透明边跟着收窄。
-/// **10 → 0（0.4.24，owner 2026-11-21）**：「贴图会有一圈透明的，应该是打开时的比例才对」——
-/// 贴图窗现在**就是图的尺寸**，外框比例和缩略图逐像素一致，不再有透明边。
-/// 蓝边（`peek-framed::after`）仍然画在图的边缘（`inset: 0`），只是不再向外发光。
-const PEEK_GLOW: f64 = 0.0;
+/// 20 → 10（0.2.2）→ 0（0.4.24，owner 2026-11-21「贴图有一圈透明的」）→ **3（0.6.x，紫色阴影）**。
+///
+/// ⚠️ 只要它不是 0，所有几何换算都得按「窗口 = 图 + 2×glow、窗口原点 = 图原点 − glow」来：
+/// `place_peek_window` / `spawn_peek` 的尺寸 / `attach_peek_events` 里回写的 `place` /
+/// `am_peek_zoom` / `am_peek_ratio`。少算一处，图就会一点点偏出去。
+/// `PeekRecall::place` 里存的是**图**的 rect（不是窗口 rect），这样重启还原不会把边距一圈圈叠上去。
+const PEEK_GLOW: f64 = 3.0;
 const CLIP_HISTORY: usize = 10;
 
 /* ---------------- 贴图耗时埋点（默认关，`AM_PEEK_PERF=1` 才写） ----------------
@@ -2602,12 +2603,16 @@ struct PeekRecall {
     y: i32,
     /// 逻辑长边（DIP）
     long_edge: f64,
-    /// 精确几何 `[x, y, w, h]`（**物理像素**）。
+    /// 精确几何 `[x, y, w, h]`（**物理像素**，说的是「图」那一块，**不含** `PEEK_GLOW` 边距）。
     ///
     /// 只有「截图 → 贴图」这条路会填：owner 要求**贴图和截图一样大、落在同一个位置**，
     /// 所以不能再按长边等比缩放、也不能居中到鼠标那里。填了它就以它为准
     /// （`spawn_peek` 里 `set_size(Physical)` + `set_position(Physical)`），
     /// 拖动 / 缩放窗口时同步更新，重启后也能原地原尺寸回来。
+    ///
+    /// **口径固定成「图」而不是「窗口」**：窗口比图大 2×`PEEK_GLOW`，如果这里存窗口 rect，
+    /// 每次还原都会再加一圈边距（重启几次图就越来越小）。换算只发生在
+    /// `place_peek_window` 一处：窗口 = `w + 2g`、原点 = `x - g`。
     place: Option<[f64; 4]>,
     top: bool,
     opacity: f64,
@@ -3060,6 +3065,57 @@ fn peek_square_corners(win: &tauri::WebviewWindow) {
     }
 }
 
+/// 让窗口**永久**不进任务栏（也不进 Alt+Tab）。
+///
+/// 为什么不用 Tauri 的 `skip_taskbar(true)`：tao 那边它只是调一次
+/// `ITaskbarList::DeleteTab(hwnd)`（一次性删除），**不动 ex-style** —— 窗口每次
+/// show / 被激活，任务栏按钮就又冒出来了（实测板窗建好就在任务栏里，
+/// 贴图窗 show 之后同样会回来）。真正常驻的做法是 ex-style 上钉 `WS_EX_TOOLWINDOW`
+/// 并去掉 `WS_EX_APPWINDOW`：工具窗从来不会被加进任务栏。
+#[cfg(windows)]
+fn hide_from_taskbar(hwnd: isize) {
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const WS_EX_APPWINDOW: isize = 0x0004_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowLongW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn SetWindowPos(
+            hwnd: isize,
+            after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    unsafe {
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let want = (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+        if ex != want {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, want);
+            /* 改 ex-style 必须让系统重算一次非客户区，否则任务栏那边不一定收到通知 */
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
 /// 真正干活的那一半：只认 HWND，`WebviewWindow` / `Window` 都能喂进来。
 ///
 /// 为什么要把 HWND 单独拆出来：**DWM 的属性会被窗口几何变化冲掉**。
@@ -3067,6 +3123,9 @@ fn peek_square_corners(win: &tauri::WebviewWindow) {
 /// 做"原位原尺寸"，系统在重排窗口时把 `BORDER_COLOR=NONE` 重置回默认描边 ——
 /// 表现就是「右键菜单贴图没有蓝边，截图后中键贴图有蓝边」（owner 2026-11-19）。
 /// 所以凡是会改几何 / show 的地方，都要再刷一次这个属性。
+///
+/// 顺带在这里把「不进任务栏」也钉一遍（`hide_from_taskbar`）：任务栏按钮会在每次
+/// show / 激活时复活，和 DWM 描边是同一类"会被系统改回来"的东西，刷新时机完全重合。
 #[cfg(windows)]
 fn peek_square_corners_hwnd(hwnd: isize) {
     #[link(name = "dwmapi")]
@@ -3098,7 +3157,11 @@ fn peek_square_corners_hwnd(hwnd: isize) {
             std::mem::size_of::<u32>() as u32,
         );
     }
+    hide_from_taskbar(hwnd);
 }
+
+#[cfg(not(windows))]
+fn hide_from_taskbar(_hwnd: isize) {}
 
 #[cfg(not(windows))]
 fn peek_square_corners(_win: &tauri::WebviewWindow) {}
@@ -3186,6 +3249,9 @@ fn peek_into_spare(app: &AppHandle, label: &str) {
         }
         drop(g);
         perf_tick(label, "spare_busy");
+        /* 真关掉之前也要把 boot 缓存清掉：留着等于一张取不回来的图占着内存，
+           而且下次这扇窗被复用时会先拿到旧 boot（`am_peek_boot` 补拉那条路）。 */
+        peek_boot_forget(label);
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.close();
         }
@@ -3197,8 +3263,21 @@ fn peek_into_spare(app: &AppHandle, label: &str) {
     peek_boot_forget(label);
     if let Some(w) = app.get_webview_window(label) {
         /* 先让前端把图放掉（`<img>` 卸载才会释放解码后的位图），再藏。
-           顺序反了的话窗口里还留着上一张的解码结果，白占内存。 */
-        let _ = w.emit("peek:idle", ());
+           顺序反了的话窗口里还留着上一张的解码结果，白占内存。
+
+           ⚠️ 必须 `emit_to(指定窗口)`，**不能** `w.emit(...)`：Tauri 2 的
+           `Emitter::emit` 是「发给**所有** target」（默认实现走 `manager().emit()`），
+           哪怕你在某个 WebviewWindow 上调用也一样。用 `w.emit` 的后果是
+           「关掉一张贴图 → 其余所有贴图一起被清空」——0.6.0 被用户撞到的就是这个。 */
+        /* ⚠️ 只发给自己这个窗口的 label —— 见 `peek:idle` 的消费端（Peek.tsx）。
+           Tauri 2 的 `Emitter::emit` 是发给**所有** target；`emit_to(指定窗口)` 也挡不住
+           JS 侧用默认 `{kind:'Any'}` 注册的监听（`Any` 永远匹配）。所以载荷里带上 label、
+           前端自己过滤，是唯一可靠的口径。 */
+        let _ = app.emit_to(
+            tauri::EventTarget::webview_window(label),
+            "peek:idle",
+            serde_json::json!({ "label": label }),
+        );
         let _ = w.hide();
     }
 }
@@ -3268,6 +3347,9 @@ fn build_peek_window(
 fn attach_peek_events(win: &tauri::WebviewWindow, label: &str) {
     let lbl = label.to_string();
     let sc0 = win.scale_factor().unwrap_or(1.0);
+    /* 物理像素的发光边。`place` 存的是「图」的 rect，窗口 rect 比它大 2g ——
+       事件给的却是窗口几何，所以这里两头都要减/加 g，别搞反。 */
+    let g0 = (PEEK_GLOW * sc0).round();
     /* HWND 先取出来（`isize` 是 Copy），下面的事件闭包里还要用。
        DWM 的"不要圆角 / 不要描边"会被**任何一次几何变化**重置 ——
        拖动、缩放、摆回选区原位都会，所以事件里每次都要补一刀；
@@ -3285,10 +3367,11 @@ fn attach_peek_events(win: &tauri::WebviewWindow, label: &str) {
                 r.x = p.x;
                 r.y = p.y;
                 /* 精确几何也要跟着走：`place` 是"这次贴图摆在哪"的唯一事实，
-                   重启还原靠它，别只在建窗那一次算。 */
+                   重启还原靠它，别只在建窗那一次算。
+                   `place` 是**图** rect，窗口原点再往里让 g 才是图的左上角。 */
                 if let Some(q) = r.place.as_mut() {
-                    q[0] = p.x as f64;
-                    q[1] = p.y as f64;
+                    q[0] = p.x as f64 + g0;
+                    q[1] = p.y as f64 + g0;
                 }
             });
         }
@@ -3297,12 +3380,15 @@ fn attach_peek_events(win: &tauri::WebviewWindow, label: &str) {
                 peek_square_corners_hwnd(h);
             }
             if s.width > 0 && s.height > 0 {
-                let long = (s.width.max(s.height) as f64 / sc0).round();
+                /* `long_edge` 是**图**的逻辑长边（重启还原时 `peek_size_for` 拿它当图的尺寸），
+                   而事件给的是窗口——先扣掉两侧发光边再折回逻辑像素，否则每次重启图会长 6px。 */
+                let long = ((s.width.max(s.height) as f64 - 2.0 * g0) / sc0).round();
                 peek_touch(&lbl, |r| {
                     r.long_edge = long;
+                    /* 同上：扣掉两侧发光边才是图的尺寸。 */
                     if let Some(q) = r.place.as_mut() {
-                        q[2] = s.width as f64;
-                        q[3] = s.height as f64;
+                        q[2] = (s.width as f64 - 2.0 * g0).max(1.0);
+                        q[3] = (s.height as f64 - 2.0 * g0).max(1.0);
                     }
                 });
             }
@@ -3328,9 +3414,12 @@ fn place_peek_window(win: &tauri::WebviewWindow, rec: &PeekRecall, restore: bool
         let wy = (py - g).round() as i32;
         let _ = win.set_size(tauri::PhysicalSize::new(ww as u32, wh as u32));
         let _ = win.set_position(tauri::PhysicalPosition::new(wx, wy));
-        /* 存档里的 `place` 语义统一成**窗口 rect**（含发光边）——
-           拖动/缩放事件记的也是窗口 rect，恢复时直接照用，不会一次次把边距叠上去。 */
-        peek_touch(&rec.label, |r| r.place = Some([wx as f64, wy as f64, ww, wh]));
+        /* 存档里的 `place` 保持**图 rect**口径（窗口 rect 再内缩 g）——
+           拖动/缩放事件回写的也是图 rect，两边一致，重启时不会一次次把边距叠上去。
+           （0.6.x 起 `PEEK_GLOW` 非 0，这条口径是硬要求。） */
+        peek_touch(&rec.label, |r| {
+            r.place = Some([(wx as f64) + g, (wy as f64) + g, ww - 2.0 * g, wh - 2.0 * g])
+        });
     } else if restore {
         /* 存档里记的是**物理像素**（`Moved` 事件给的也是物理），
            而 `WindowBuilder::position()` 收的是**逻辑像素** —— 直接喂过去在高 DPI 上
@@ -3468,7 +3557,18 @@ async fn spawn_peek(
             place_peek_window(&win, &rec, false);
             peek_boot_store(&rec.label, boot.clone());
             perf_tick(&rec.label, "reuse_begin");
-            if win.emit("peek:swap", &boot).is_ok() {
+            /* ⚠️ `emit_to(指定窗口)`，不能 `win.emit(...)`：Tauri 2 的 `Emitter::emit`
+               发给**所有**窗口。用 `win.emit` 时「复用一扇热备窗换图」会把新图
+               广播给每一张贴图 —— 用户看到的就是「多贴几张之后，图全变成同一张」。
+               复用是 0.5.13 起的主路径（占全部贴图的绝大多数），这条错了等于贴图全乱。 */
+            if app
+                .emit_to(
+                    tauri::EventTarget::webview_window(&rec.label),
+                    "peek:swap",
+                    &boot,
+                )
+                .is_ok()
+            {
                 perf_tick(&rec.label, "reuse_emit");
                 peek_reuse_watchdog(app, &win, &item, &rec);
                 return Ok(());
@@ -4024,6 +4124,9 @@ fn spawn_board(
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
+                /* show / 聚焦之后系统会把 DWM 描边和任务栏按钮都"恢复"一遍 ——
+                   「收起」再从标签开回来走的正是这条路，所以这里必须补一刀。 */
+                peek_square_corners(&w);
                 return Ok(());
             }
         }
@@ -4052,8 +4155,17 @@ fn spawn_board(
     .inner_size(450.0, 325.0)
     .min_inner_size(100.0, 100.0)
     .decorations(false)
-    .transparent(false)
+    /* 和贴图窗同一套：真透明窗 + 关系统投影，紫色 3px 外发光由前端
+       （`html.board-body` 透明 + `.board-root { inset: 3px; box-shadow }`）画在那圈边距里。
+       窗口自己不画底色 —— 不透明窗连"窗外的阴影"都没有地方落。 */
+    .transparent(true)
+    .shadow(false)
     .resizable(true)
+    /* 板子是**随手看一眼**的工具窗：不进任务栏，也不能被 Win+↓ / 系统菜单缩进任务栏。
+       收起来走顶栏的最小化按钮（`am_board_hide` → hide() 到托盘），
+       再用同一个标签开板时 `spawn_board` 会 unminimize + show 把它拉回来。 */
+    .skip_taskbar(true)
+    .minimizable(false)
     /* 默认置顶：板子是"随手拖到一边对着主窗看参考"的工具，被主窗盖住就失去意义。
        用户可以在顶栏关掉（只作用于这次窗口会话，不落盘）。 */
     .always_on_top(true)
@@ -4147,6 +4259,23 @@ async fn am_board_open(
 #[tauri::command]
 async fn am_board_close(win: Window) -> Result<(), String> {
     win.close().map_err(|e| e.to_string())
+}
+
+/// 灵感板顶栏的「最小化」：**藏起来**，不是关掉。
+///
+/// 为什么不用系统最小化：板窗 `skip_taskbar(true)`，一旦缩进任务栏就找不回来了
+/// （任务栏没图标）。所以走 `hide()` —— 窗口还在、WebView 还在，画布状态一点不丢；
+/// 再用同一个标签开板时 `spawn_board` 的 `unminimize + show + set_focus` 会把它原样拉回来。
+///
+/// 只允许板窗调（`ipc_guard.rs` 的 BOARD 白名单）；这里再做一道 label 检查，
+/// 防止哪天白名单写宽了把主窗藏进虚空。
+#[tauri::command]
+fn am_board_hide(window: tauri::WebviewWindow) -> Result<(), String> {
+    let label = window.label().to_string();
+    if !label.starts_with("board") {
+        return Err(format!("{label} 不是灵感板窗口，不能隐藏"));
+    }
+    window.hide().map_err(|e| e.to_string())
 }
 
 /// 灵感板顶栏的置顶开关：把**这一块**板子钉在最前面 / 放开。
@@ -7378,8 +7507,22 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
        老路径留在后面，`AM_SNIP_WEBVIEW=1` 可以切回去对照。 */
     if std::env::var("AM_SNIP_WEBVIEW").map(|v| v == "1").unwrap_or(false) == false {
         /* **原生会话互斥**（0.4.24）：上一个原生会话没结束就不许再开新的。
-           见 `snip_native_busy` 的注释 —— 并发会话是"取消后遮罩残留"的根因。 */
+           见 `snip_native_busy` 的注释 —— 并发会话是"取消后遮罩残留"的根因。
+
+           0.6.1 起加**自愈**：这个标志只有会话线程正常收尾才会置回 false，
+           线程卡死 / 窗口被外部销毁时它会永远停在 true，之后每次 F1 都被自己挡回去
+           （表现就是"再也截不了图"）。所以拒绝之前先问一句"覆盖层还在吗" ——
+           不在就把标志复位、照常开新的。 */
+        if snip_native_busy().load(std::sync::atomic::Ordering::SeqCst) && !snip_native::alive() {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, "snip busy flag stale (no overlay) -> reset");
+            }
+            snip_native_busy().store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         if snip_native_busy().swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(d) = LOG_DIR.get() {
+                log_runtime(d, "snip start REJECT busy (overlay alive)");
+            }
             return Err("上一次截图还没结束".into());
         }
         /* 屏幕上的贴图窗口：原生层压暗时要**把它们跳过去**，保持 100% 亮度
@@ -7402,6 +7545,8 @@ async fn snip_begin(app: AppHandle) -> Result<(), String> {
         };
         let app2 = app.clone();
         std::thread::spawn(move || {
+            /* 放在线程第一行：这个线程怎么结束都要放开互斥（panic 也放） */
+            let _busy = SnipBusyGuard;
             let t0 = std::time::Instant::now();
             let theme = ui_theme();
             let out = snip_native::run(&shot, theme, &keep);
@@ -8568,6 +8713,19 @@ fn snip_native_busy() -> &'static AtomicBool {
     &B
 }
 
+/// 会话线程结束时**无论如何**都要放开 `snip_native_busy`。
+///
+/// 为什么要有这个：原来是在线程末尾手动 `store(false)`，只要中途 panic、
+/// 或者有一条 `?`/`return` 提前溜走，标志就永远停在 true —— 之后每次 F1 都回
+/// 「上一次截图还没结束」，用户只能说"F1 坏了"。`Drop` 在 unwind 时也会执行，
+/// 这样"忘记放开"这件事在类型层面就不成立了。
+struct SnipBusyGuard;
+impl Drop for SnipBusyGuard {
+    fn drop(&mut self) {
+        snip_native_busy().store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn dispatch_hotkey(app: &AppHandle, accel: &str) {
     if let Some(d) = LOG_DIR.get() {
         log_runtime(d, &format!("hotkey fired {accel}"));
@@ -9550,6 +9708,7 @@ fn main() {
             am_peek_boot,
             am_board_open,
             am_board_close,
+            am_board_hide,
             am_board_top,
             am_board_is_top,
             am_board_layout,

@@ -4,9 +4,9 @@
 
   1. **尺寸一致**：图片区域的宽高 == 选区宽高（物理像素，1:1，不缩放）；
   2. **位置一致**：图片区域左上角 == 选区左上角（落在截图那块地方，不居中到鼠标）；
-  3. **蓝色边框 + 向外渐变**：图片四周（窗口内那一圈透明边距里）有蓝光。
+  3. **蓝色边框 + 向外阴影**：图片四周（窗口内那一圈透明边距里）有紫色阴影。
 
-注意：窗口本身比图片大一圈（四周各 `PEEK_GLOW`=20 CSS px，用来画向外的渐变），
+注意：窗口本身比图片大一圈（四周各 `PEEK_GLOW`=3 CSS px，用来画向外的紫色阴影），
 所以比较的是**图片区域** = 窗口 rect 内缩 glow，不是窗口 rect。
 
 做法：
@@ -129,7 +129,7 @@ def main():
     time.sleep(0.9)  # 等首帧 + set_size/set_position 都生效
     x, y, w, h = rect_of(peek)
     sc = dpi_scale(peek)
-    g = round(20 * sc)          # 四周的发光边（物理；与后端 PEEK_GLOW / CSS --peek-glow 同值）
+    g = round(3 * sc)           # 四周的发光边（物理；与后端 PEEK_GLOW / CSS --peek-glow 同值）
     ix, iy, iw, ih = x + g, y + g, w - 2 * g, h - 2 * g
     dx, dy, dw, dh = ix - SEL[0], iy - SEL[1], iw - SEL[2], ih - SEL[3]
     print(f"窗口 rect = ({x}, {y}) {w}×{h}   DPI {sc:.2f} → 发光边 {g}px")
@@ -139,21 +139,23 @@ def main():
     im = grab(x, y, w, h)
     im.save(os.path.join(E.TMP, "peek-place.png"))
 
-    # 外圈光晕：在图片外侧 2~6px 那一圈里找蓝色（越高越靠外越淡）
+    # 外圈阴影：在图片外侧那圈透明边距的**正中**找紫色（PEEK_GLOW=3，物理 g 可能 3~4）
+    # 取 g//2 而不是固定像素 —— 阴影只有 3 CSS px 宽，落到边上就采样不到了。
+    mid = max(0, g // 2)
     px = im.convert("RGB").load()
     hits = 0
     for name, pts in {
-        "上": [(w // 2 + d, g - 4) for d in range(-6, 7)],
-        "下": [(w // 2 + d, h - g + 3) for d in range(-6, 7)],
-        "左": [(g - 4, h // 2 + d) for d in range(-6, 7)],
-        "右": [(w - g + 3, h // 2 + d) for d in range(-6, 7)],
+        "上": [(w // 2 + d, mid) for d in range(-6, 7)],
+        "下": [(w // 2 + d, h - 1 - mid) for d in range(-6, 7)],
+        "左": [(mid, h // 2 + d) for d in range(-6, 7)],
+        "右": [(w - 1 - mid, h // 2 + d) for d in range(-6, 7)],
     }.items():
         for (a, b) in pts:
             r, gg, bb = px[max(0, min(w - 1, a)), max(0, min(h - 1, b))]
             if bb > 110 and bb - r > 30 and bb - gg > 18:
                 hits += 1
                 break
-    print(f"向外渐变的蓝光：四条边里 {hits} 条命中")
+    print(f"向外阴影：四条边里 {hits} 条命中")
 
     ok_pos = abs(dx) <= TOL and abs(dy) <= TOL
     ok_size = abs(dw) <= TOL and abs(dh) <= TOL

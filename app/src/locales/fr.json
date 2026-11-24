@@ -952,6 +952,7 @@
   "board.layers_tip": "Panneau des calques (L) : toutes les images d'un coup d'œil ; cliquez pour la mettre au premier plan",
   "board.top_on_tip": "Toujours au-dessus : cliquez pour désactiver",
   "board.top_off_tip": "Toujours au-dessus : garder le tableau au-dessus des autres fenêtres",
+  "board.min_tip": "Réduire (rouvrir la même étiquette la ramène)",
   "board.close_tip": "Fermer (Esc)",
   "board.unit_image": " images",
   "board.missing_count": " · {n} introuvables",

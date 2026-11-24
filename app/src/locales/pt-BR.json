@@ -950,6 +950,7 @@
   "board.layers_tip": "Painel de camadas (L): todas as imagens de relance; clique em uma para trazê-la para a frente",
   "board.top_on_tip": "Sempre no topo: clique para desligar",
   "board.top_off_tip": "Sempre no topo: manter o mural acima das outras janelas",
+  "board.min_tip": "Recolher (reabrir a mesma etiqueta traz de volta)",
   "board.close_tip": "Fechar (Esc)",
   "board.unit_image": " imagens",
   "board.missing_count": " · {n} não encontradas",

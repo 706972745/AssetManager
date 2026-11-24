@@ -198,8 +198,30 @@ let idleHandler: (() => void) | null = null;
 let pendingBoot: PeekBoot | null = null;
 let pendingIdle = false;
 
+/* **这扇窗自己的 label**。
+   为什么必须过滤：Tauri 2 的事件是"广播"口径 —— 后端哪怕用 `emit_to(指定窗口)`，
+   JS 侧用默认 `{kind:'Any'}` 注册的监听也一律收到（`Any` 永远匹配，见 tauri
+   `manager/mod.rs` 的 `filter_target` / `match_any_or_filter`）。所以「关掉一张贴图 →
+   其余贴图全被清空」「换一张图 → 所有贴图都变成那张」就是这么来的：
+   `peek:idle` / `peek:swap` 被每一扇贴图窗都执行了一遍。
+   口径：载荷里带 label（`peek:idle`）或 boot.id（`peek:swap`），对不上就丢掉。
+   拿不到 label 时**不过滤**（宁可多执行一次，也不要因为拿不到而全哑）。 */
+const MY_LABEL: string =
+  (window as unknown as { __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } } })
+    .__TAURI_INTERNALS__?.metadata?.currentWindow?.label ||
+  (window as unknown as { __AM_PEEK__?: { id?: string } }).__AM_PEEK__?.id ||
+  "";
+
+/** 这条事件是不是发给我的 */
+function forMe(label: unknown): boolean {
+  if (!MY_LABEL) return true;
+  if (typeof label !== "string" || !label) return true;
+  return label === MY_LABEL;
+}
+
 function acceptBoot(raw: PeekBoot | null | undefined) {
   if (!raw) return;
+  if (!forMe(raw.id)) return; // 别人的换图事件，别跟着换
   if (swapHandler) swapHandler(raw);
   else pendingBoot = raw;
 }
@@ -210,7 +232,11 @@ function installPeekBus(): void {
     .then(({ listen }) =>
       Promise.all([
         listen<PeekBoot>("peek:swap", (e) => acceptBoot(e.payload)),
-        listen("peek:idle", () => (idleHandler ? idleHandler() : (pendingIdle = true))),
+        listen<{ label?: string } | null>("peek:idle", (e) => {
+          if (!forMe(e.payload?.label)) return; // 别人被收进热备，跟我无关
+          if (idleHandler) idleHandler();
+          else pendingIdle = true;
+        }),
       ]).then(() => {
         /* 注册好之后再补拉：这段时间里后端可能已经换过图（事件落空） */
         const inv = rawInvoke();
@@ -766,10 +792,9 @@ export function Peek() {
             const box = root.current?.getBoundingClientRect();
             if (!ratioFixed.current && box && img.naturalWidth && img.naturalHeight) {
               const want = img.naturalWidth / img.naturalHeight;
-              /* 拿**内容盒**比。0.4.24 起 `--peek-glow` 归零（窗就是图），
-                 但这里仍然按变量算，改回去时不用再动这段。 */
-              const glow = 0;
-              const got = (box.width - glow) / Math.max(1, box.height - glow);
+              /* `box` 就是**图的框**：`.peek-root` 用 `inset: var(--peek-glow)` 已经缩到图上了，
+                 不用再减边距（0.6.x 起 glow=3px，减了反而判错）。 */
+              const got = box.width / Math.max(1, box.height);
               if (Math.abs(want - got) / want > 0.02) {
                 ratioFixed.current = true;
                 void source.peekRatio(img.naturalWidth, img.naturalHeight).catch(() => {});

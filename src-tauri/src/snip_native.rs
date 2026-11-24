@@ -4510,6 +4510,17 @@ unsafe extern "system" fn wnd_proc(h: Hwnd, msg: u32, w: usize, l: isize) -> isi
                         c.ops.retain(|op| rest.iter().any(|&a| overlap4(a, op.bbox())));
                         c.redo.clear();
                     }
+                    /* ★ 最后一块也删掉 → **直接退出本次截图**。
+                       上面那段注释一直是这么写的（"等于取消这次框选"），但实现只把选区清成
+                       `None`、覆盖层和压暗层继续挂着。后果不是"少关一扇窗"这么简单：
+                       用户以为右键＝返回/退出了，再按 F1 就被互斥挡回
+                       「上一次截图还没结束」——他会直接判定"F1 坏了"（owner 2026-11-24 报的
+                       就是这个；runtime.log 里 `hotkey snip FAIL 上一次截图还没结束` 是它的指纹）。
+                       空手右键（没有选区）那条路本来就是直接 done=cancel，这里补齐成一致。 */
+                    if c.areas.is_empty() {
+                        c.done = Some(("cancel".into(), Vec::new(), [0.0; 4]));
+                        return 0;
+                    }
                     /* 还有块就让它当活动块：整条工具栏不会因为"刚删掉一块"闪没 */
                     c.sel = c.areas.last().copied();
                     c.open = None;
@@ -4698,6 +4709,21 @@ pub struct Delivered {
 /// 阻塞运行一次截图会话。返回 None = 用户取消。**必须在有自己的线程里调用**
 /// （这里会跑一条 Win32 消息循环）。
 ///
+/// 覆盖层窗口现在还在不在。
+///
+/// 用途是给主程序那道「上一次截图还没结束」的互斥做**自愈**：那个标志只在会话
+/// 线程正常收尾时才会置回 false。万一线程卡在消息循环里、或者窗口被外部销毁
+/// （任务管理器结束、DWM 重置、崩溃），标志会永远停在 true，之后每次 F1 都被自己
+/// 挡回去 —— 用户看到的就是「F1 坏了，再也截不了图」。窗口都不在了，就不该算
+/// "还在截图中"。
+pub fn alive() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+    }
+    unsafe { FindWindowW(cls().as_ptr(), std::ptr::null()) != 0 }
+}
+
 /// `theme` 是主窗的 `UI_THEME` 口径（0 未知 / 1 浅 / 2 深）。覆盖层必须跟主窗一个主题 ——
 /// 否则深色软件里按 F1 弹出一块白工具栏，看着像别人的软件。
 pub fn run(shot: &screen::Shot, theme: u8, keep: &[[i32; 4]]) -> Option<Delivered> {

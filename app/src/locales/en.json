@@ -966,6 +966,7 @@
   "board.layers_tip": "Layers panel (L): all images at a glance; click one to raise it",
   "board.top_on_tip": "Always on top: click to turn off",
   "board.top_off_tip": "Always on top: keep the board above other windows",
+  "board.min_tip": "Collapse (reopen the same tag to bring it back)",
   "board.close_tip": "Close (Esc)",
   "board.unit_image": " images",
   "board.missing_count": " · {n} not found",

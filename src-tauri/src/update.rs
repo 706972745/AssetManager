@@ -9,10 +9,13 @@
 //!      重定向落点也要在白名单内；
 //!   ③ 必须带 SHA-256（GitHub Asset 的 `digest`）。下完对不上 → 删掉，**绝不执行**；
 //!   ④ 安装前再算一次哈希（防「下载完到点安装之间被换掉」）；
-//!   ⑤ 只给「按用户安装」的 NSIS 版用。装成 MSI / 从文件夹直接跑的副本
-//!      一律退回「打开发布页」，静默 `/S` 在那种机器上会装出第二份；
+//!   ⑤ 只给「NSIS 装出来的」副本用（判据：exe 同目录有 `uninstall.exe`）。
+//!      装成 MSI / 装在 Program Files / 从文件夹直接跑的副本一律退回「打开发布页」，
+//!      静默 `/S` 在那种机器上会装出第二份；
 //!   ⑥ 安装交给一段临时 PowerShell：等本进程退出 → `/S` 静默装 → 拉起新版。
 //!      Windows 不允许覆盖正在运行的 exe，只能这么绕。
+//!      装的时候必须带 `/D=<当前 exe 所在目录>`：`/S` 不带 `/D` 时 NSIS 会装到
+//!      默认的 `%LOCALAPPDATA%\AssetManager`，「升完还是旧版、还多出一份」。
 //!
 //! 失败一律返回**能看懂的中文原因**：更新这条链上用户最需要的不是错误码，
 //! 而是「是网络断了、还是这一版没有安装包、还是我这台机器装法不支持」。
@@ -241,7 +244,9 @@ fn pick_setup(assets: &serde_json::Value) -> (String, String, String, u64) {
 /// 当前这份程序是哪种装法。静默升级只对 `PerUser` 放行。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InstallKind {
-    /// NSIS 按用户安装（默认落在 `%LOCALAPPDATA%\AssetManager`）
+    /// NSIS 装出来的副本（同目录有 `uninstall.exe`）。默认落在
+    /// `%LOCALAPPDATA%\AssetManager`，但用户可以改到任何目录（本机就在 `D:\AssetManager`），
+    /// 所以判据是「有没有卸载器」，不是「在不在默认目录」。
     PerUser,
     /// 装在 `Program Files` 下（MSI / 手动装成系统级）
     PerMachine,
@@ -280,26 +285,49 @@ fn looks_system_wide(dir: &std::path::Path) -> bool {
         })
 }
 
-/// 判定当前安装形态。
+/// 这个目录是不是 NSIS 装出来的：`installer.nsi` 的 Install Section 里有
+/// `WriteUninstaller "$INSTDIR\uninstall.exe"`，正经装过的目录一定带着它。
+/// 开发构建 / 手拷的绿色版没有。
+fn has_uninstaller(dir: &std::path::Path) -> bool {
+    dir.join("uninstall.exe").is_file()
+}
+
+fn is_default_install_dir(dir: &std::path::Path) -> bool {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|base| same_dir(&std::path::Path::new(&base).join("AssetManager"), dir))
+        .unwrap_or(false)
+}
+
+/// 纯判据：给定 exe 所在目录，判断这份副本能不能被静默升级。
 ///
-/// 判据是**当前 exe 所在目录**：Tauri 的 NSIS 安装器默认把 currentUser 版装到
-/// `%LOCALAPPDATA%\AssetManager`，静默 `/S` 会装回同一处；在那里就是可静默升级的。
-/// 开发构建（`src-tauri\target\...`）落在别处 → 判成 `Portable`，按钮退回「打开发布页」，
-/// 不会把开发机上的 exe 换成正式版。
-pub fn install_kind() -> InstallKind {
-    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    else {
+/// 顺序是有意的：
+///   ① `Program Files` 下 → `PerMachine`（静默 `/S` 需要提权，必然失败，**先判**，
+///      否则装在系统盘同目录也带 `uninstall.exe`，会被误判成可升级）；
+///   ② 有 `uninstall.exe` → `PerUser`，装到哪个盘都算（本机在 `D:\AssetManager`）；
+///   ③ 落在默认安装目录（老版本可能没写卸载器）→ 也当可升级，装回去还是同一处；
+///   ④ 其余 → `Portable`，不碰。
+pub fn install_kind_of(exe_dir: &std::path::Path) -> InstallKind {
+    if exe_dir.as_os_str().is_empty() {
         return InstallKind::Portable;
-    };
-    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-        if same_dir(&std::path::Path::new(&base).join("AssetManager"), &dir) {
-            return InstallKind::PerUser;
-        }
     }
-    if looks_system_wide(&dir) {
+    if looks_system_wide(exe_dir) {
         return InstallKind::PerMachine;
     }
+    if has_uninstaller(exe_dir) || is_default_install_dir(exe_dir) {
+        return InstallKind::PerUser;
+    }
     InstallKind::Portable
+}
+
+/// 判定当前安装形态（只负责取当前 exe 的目录，判据全在 [`install_kind_of`]）。
+pub fn install_kind() -> InstallKind {
+    match std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        Some(dir) => install_kind_of(&dir),
+        None => InstallKind::Portable,
+    }
 }
 
 /// 「装不了」的原因码（界面据此给不同文案）：`system` / `portable` / `no-asset` / `no-digest`
@@ -709,6 +737,42 @@ fn strip_verbatim(p: &std::path::Path) -> String {
     }
 }
 
+/// `/D=<目录>` 那一段；给不出来就返回 `None`（见 [`installer_args`]）。
+///
+/// NSIS 的 `/D=` 有三条硬约束：**必须是最后一个参数**、**不能带引号**、
+/// **只认绝对路径**。所以含空格 / 制表符 / 引号的路径无法安全表达 ——
+/// `"/D=C:\My App"` 里的引号会被 NSIS 拒收（它明确要求 `/D` 后不能有引号），
+/// 不加引号又会被 `Start-Process` 拆成两个参数。
+/// 这种情况**不传** `/D`：`installer.nsi` 的 `.onInit` 里有
+/// `RestorePreviousInstallLocation`，会读 `MANUPRODUCTKEY` 里上次写的 `$INSTDIR`
+/// 装回原处，结果一样（只是没法在这个函数里自证）。
+fn install_dir_arg(exe_dir: &std::path::Path) -> Option<String> {
+    if exe_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let raw = strip_verbatim(exe_dir);
+    let dir = raw.trim_end_matches(['\\', '/']);
+    if dir.is_empty() || dir.chars().any(|c| c.is_whitespace() || c == '"') {
+        return None;
+    }
+    // 只要 `X:\...`：UNC（`\\server\share`）与相对路径不传，交给安装器自己恢复
+    let b = dir.as_bytes();
+    if b.len() < 3 || b[1] != b':' || (b[2] != b'\\' && b[2] != b'/') {
+        return None;
+    }
+    Some(format!("/D={dir}"))
+}
+
+/// 传给安装包的完整参数：`/S`（静默）+ 能表达出来时的 `/D=<exe 目录>`。
+/// `/D` 一定在最后 —— NSIS 只认最后一个参数上的 `/D`，写前面等于没写。
+fn installer_args(exe_dir: &std::path::Path) -> Vec<String> {
+    let mut v = vec!["/S".to_string()];
+    if let Some(d) = install_dir_arg(exe_dir) {
+        v.push(d);
+    }
+    v
+}
+
 /// 生成安装脚本。
 ///
 /// 为什么不是「直接 spawn 安装器」：Windows 不允许覆盖正在运行的 exe，
@@ -725,6 +789,14 @@ fn ps1_script(
     log: &std::path::Path,
 ) -> String {
     let q = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
+    // 装回**同一个目录**：不给 /D 时 NSIS 会落到默认的 %LOCALAPPDATA%\AssetManager，
+    // 结果就是「旧版还在、另外多一份新版」。含空格给不出 /D 时退回注册表恢复。
+    let args = installer_args(exe.parent().unwrap_or(std::path::Path::new("")));
+    let args_ps = args
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
     let mut s = String::from("\u{feff}"); // UTF-8 BOM：PowerShell 5.1 才认得出中文路径
     s.push_str("$ErrorActionPreference = 'SilentlyContinue'\r\n");
     s.push_str(&format!("$log = {}\r\n", q(log)));
@@ -746,6 +818,7 @@ fn ps1_script(
     s.push_str("Start-Sleep -Milliseconds 800\r\n");
     // WebView2 子进程（msedgewebview2）可能比宿主多活几秒，还握着 exe 的句柄；
     // 不等它们退出，NSIS /S 会「覆盖失败、静默中止」，看起来像装好了其实没装。
+    s.push_str(&format!("$exe = {}\r\n", q(exe)));
     s.push_str(&format!("$exeName = (Split-Path -Leaf {})\r\n", q(exe)));
     s.push_str("$j = 0\r\n");
     s.push_str("for ($j = 0; $j -lt 120; $j++) {\r\n");
@@ -757,20 +830,33 @@ fn ps1_script(
     s.push_str("Note ('webview gone after ' + ($j * 250) + ' ms')\r\n");
     s.push_str("Start-Sleep -Milliseconds 500\r\n");
     s.push_str(&format!(
-        "$p = Start-Process -FilePath {} -ArgumentList '/S' -Wait -PassThru\r\n",
+        "$installArgs = @({args_ps})\r\n"
+    ));
+    s.push_str("Note ('install args = ' + ($installArgs -join ' '))\r\n");
+    s.push_str(&format!(
+        "$p = Start-Process -FilePath {} -ArgumentList $installArgs -Wait -PassThru\r\n",
         q(setup)
     ));
     s.push_str("Note ('install exit code = ' + $(if ($p) { $p.ExitCode } else { 'unknown' }))\r\n");
     s.push_str("Start-Sleep -Milliseconds 500\r\n");
-    // 装完核对版本：/S 失败时旧 exe 还在原位，光看「文件存在」会误判成功
-    s.push_str(&format!(
-        "$v = (Get-Item -LiteralPath {} -ErrorAction SilentlyContinue).VersionInfo.ProductVersion\r\n",
-        q(exe)
-    ));
+    // 装完核对版本：/S 失败时旧 exe 还在原位，光看「文件存在」会误判成功。
+    // 核对的是**原来那个 exe 路径**（$exe）—— 只有它变了才算升上去。
+    s.push_str("$v = (Get-Item -LiteralPath $exe -ErrorAction SilentlyContinue).VersionInfo.ProductVersion\r\n");
     s.push_str("if ($v) {\r\n");
-    s.push_str("  if ($want -and ($v -ne $want)) { Note ('WARN version after install = ' + $v + ', want ' + $want + ' (安装可能没生效)') }\r\n");
+    s.push_str("  if ($want -and ($v -ne $want)) { Note ('WARN version at original path = ' + $v + ', want ' + $want + ' (没升上去)') }\r\n");
     s.push_str("  else { Note ('version after install = ' + $v) }\r\n");
-    s.push_str("} else { Note 'WARN exe not found after install' }\r\n");
+    s.push_str("} else { Note ('WARN original exe missing after install: ' + $exe) }\r\n");
+    // 装错地方的铁证：默认按用户安装目录里冒出同一个 exe → /D 没生效。
+    // 只在两个路径不同的时候查，免得把「本来就在默认目录」误报成第二份。
+    s.push_str("$alt = Join-Path (Join-Path $env:LOCALAPPDATA 'AssetManager') $exeName\r\n");
+    s.push_str("if ($alt -ne $exe) {\r\n");
+    s.push_str("  $av = (Get-Item -LiteralPath $alt -ErrorAction SilentlyContinue).VersionInfo.ProductVersion\r\n");
+    /* 只有「那份副本偏偏也是刚装上的版本」才说明安装真的落错了地方。
+       机器上本来就可能躺着一份很久以前的旧副本（本机就有个 0.5.6），
+       拿"存在"当判据会在每次升级都误报一条 WARN。 */
+    s.push_str("  if ($av -and $want -and ($av -eq $want)) { Note ('WARN second copy detected: ' + $alt + ' version ' + $av + ' (安装没落回原目录)') }\r\n");
+    s.push_str("  elseif ($av) { Note ('note older copy at default dir: ' + $alt + ' version ' + $av + ' (与本次升级无关)') }\r\n");
+    s.push_str("}\r\n");
     s.push_str(&format!(
         "if (Test-Path -LiteralPath {p}) {{ Start-Process -FilePath {p}; Note 'relaunched' }}\r\n",
         p = q(exe)
@@ -822,7 +908,7 @@ pub fn install_setup(app: &AppHandle, path: &str, want_sha: &str, want_version: 
             InstallKind::PerMachine => {
                 "当前是装在 Program Files 下的系统级版本，静默升级会装出第二份，请到发布页手动下载".to_string()
             }
-            _ => "当前这份是从文件夹直接运行的副本，没有安装记录，请到发布页手动下载安装包".to_string(),
+            _ => "当前这份程序不在安装目录下（同目录没有 uninstall.exe），无法就地静默升级，请到发布页手动下载安装包".to_string(),
         });
     }
     // 执行前再算一次：下载完到点安装之间，文件可能被替换掉
@@ -914,5 +1000,76 @@ mod tests {
         assert_eq!(blocker(InstallKind::PerUser, "", "h"), "no-asset");
         assert_eq!(blocker(InstallKind::PerUser, "u", ""), "no-digest");
         assert_eq!(blocker(InstallKind::PerUser, "u", "h"), "");
+    }
+
+    /// 判据的核心：有 `uninstall.exe` 就算正经安装（装到哪个盘都一样），
+    /// 没有就是绿色版。本机装在 `D:\AssetManager` 正是靠这一条救回来的。
+    #[test]
+    fn install_kind_from_uninstaller() {
+        let dir = std::env::temp_dir().join(format!("am-upd-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        assert_eq!(install_kind_of(&dir), InstallKind::Portable);
+        std::fs::write(dir.join("uninstall.exe"), b"").expect("touch uninstall.exe");
+        assert_eq!(install_kind_of(&dir), InstallKind::PerUser);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `Program Files` 下的路径要判成 `PerMachine`（静默 `/S` 需要提权）。
+    /// 只测纯函数，不往系统盘写东西。
+    #[test]
+    fn install_kind_program_files_is_system() {
+        let Some(base) = std::env::var_os("ProgramFiles") else {
+            return;
+        };
+        let pf = std::path::Path::new(&base).join("AssetManager-does-not-exist");
+        assert!(looks_system_wide(&pf));
+        assert_eq!(install_kind_of(&pf), InstallKind::PerMachine);
+        assert!(!looks_system_wide(std::path::Path::new(r"C:\Nope\AssetManager")));
+    }
+
+    /// `/D=` 拼装：无空格 → `/S /D=<目录>` 且 `/D` 一定在最后；
+    /// 含空格 / 相对 / 空 / UNC → 只给 `/S`，让安装器从注册表恢复上次安装位置。
+    #[test]
+    fn installer_args_rules() {
+        let a = installer_args(std::path::Path::new(r"D:\AssetManager"));
+        assert_eq!(a, vec!["/S".to_string(), r"/D=D:\AssetManager".to_string()]);
+        assert_eq!(a.last().map(String::as_str), Some(r"/D=D:\AssetManager"));
+
+        assert_eq!(
+            installer_args(std::path::Path::new(r"C:\My App\AssetManager")),
+            vec!["/S".to_string()]
+        );
+        assert_eq!(installer_args(std::path::Path::new("")), vec!["/S".to_string()]);
+        assert_eq!(
+            installer_args(std::path::Path::new(r"AssetManager")),
+            vec!["/S".to_string()]
+        );
+        assert_eq!(
+            installer_args(std::path::Path::new(r"\\nas\share\AssetManager")),
+            vec!["/S".to_string()]
+        );
+        // 扩展长度前缀要剥掉，否则 NSIS 认不出这个绝对路径
+        assert_eq!(
+            installer_args(std::path::Path::new(r"\\?\D:\AssetManager")),
+            vec!["/S".to_string(), r"/D=D:\AssetManager".to_string()]
+        );
+    }
+
+    /// 生成的脚本必须带 `/D`，且版本核对落在**原来那个 exe** 上。
+    #[test]
+    fn ps1_script_installs_in_place() {
+        let s = ps1_script(
+            12345,
+            std::path::Path::new(r"C:\Temp\AssetManager_0.6.0_x64-setup.exe"),
+            std::path::Path::new(r"D:\AssetManager\AssetManager.exe"),
+            "0.6.0",
+            std::path::Path::new(r"C:\Temp\apply-update.log"),
+        );
+        assert!(s.contains(r"'/D=D:\AssetManager'"), "脚本要传 /D：{s}");
+        assert!(s.contains("-ArgumentList $installArgs"));
+        assert!(s.contains(r"$exe = 'D:\AssetManager\AssetManager.exe'"));
+        assert!(s.contains("Get-Item -LiteralPath $exe"));
+        assert!(s.contains("second copy detected"));
     }
 }

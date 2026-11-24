@@ -950,6 +950,7 @@
   "board.layers_tip": "圖層面板（L）：一眼看見所有圖片；點一下可移到最上層",
   "board.top_on_tip": "總是置頂：點一下關閉",
   "board.top_off_tip": "總是置頂：讓靈感板保持在其他視窗上方",
+  "board.min_tip": "收起（再從主窗開啟同一個標籤就回來）",
   "board.close_tip": "關閉（Esc）",
   "board.unit_image": " 張圖片",
   "board.missing_count": " · {n} 張找不到",

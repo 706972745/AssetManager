@@ -7,6 +7,7 @@ import {
   LayoutGrid,
   Layers,
   Maximize2,
+  Minimize2,
   Minus,
   Pin,
   PinOff,
@@ -3198,6 +3199,10 @@ export function Board() {
             ) : (
               <PinOff size={13} strokeWidth={1.8} />
             )}
+          </button>
+          {/* 收起（不是关）：hide() 到托盘，画布状态全留着；再从主窗点同一个标签就把这块板原样拉回来 */}
+          <button title={t("board.min_tip")} onClick={() => void source.boardHide()}>
+            <Minimize2 size={13} strokeWidth={1.8} />
           </button>
           <button title={t("board.close_tip")} onClick={() => void source.boardClose()}>
             <X size={13} strokeWidth={1.8} />

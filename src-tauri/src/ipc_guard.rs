@@ -111,6 +111,7 @@ const BOARD: &[&str] = &[
     "am_board_ann_update",
     "am_board_close",
     "am_board_group",
+    "am_board_hide",
     "am_board_is_top",
     "am_board_layout",
     "am_board_note_del",

@@ -952,6 +952,7 @@
   "board.layers_tip": "レイヤーパネル (L)：すべての画像を一覧。クリックで最前面へ",
   "board.top_on_tip": "常に最前面：クリックで解除",
   "board.top_off_tip": "常に最前面：ボードを他のウィンドウより前に保ちます",
+  "board.min_tip": "しまう（同じタグを開き直すと戻ります）",
   "board.close_tip": "閉じる (Esc)",
   "board.unit_image": " 枚",
   "board.missing_count": " · {n} 件見つかりません",

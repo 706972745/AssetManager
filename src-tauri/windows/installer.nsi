@@ -348,6 +348,9 @@ Function .onInit
       StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
     !endif
 
+    ; 自动升级（src-tauri/src/update.rs 的 ps1_script）正常会给 `/D=<原安装目录>`；
+    ; 但 `/D=` 不能带引号，路径含空格时那边会**不传** /D —— 这时就靠这里从
+    ; `${MANUPRODUCTKEY}` 恢复上次的 `$INSTDIR`，否则 `/S` 会装到默认目录、多出一份。
     Call RestorePreviousInstallLocation
   ${EndIf}
 

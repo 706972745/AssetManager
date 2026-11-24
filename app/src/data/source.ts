@@ -200,6 +200,7 @@ export const tauriSource: Source = {
   peekClose: () => invoke!<void>("am_peek_close"),
   boardOpen: (tag, title) => invoke!<number>("am_board_open", { tag, title: title ?? null }),
   boardClose: () => invoke!<void>("am_board_close"),
+  boardHide: () => invoke!<void>("am_board_hide"),
   boardTop: (on) => invoke!<boolean>("am_board_top", { on }),
   boardIsTop: () => invoke!<boolean>("am_board_is_top"),
   boardPaste: (tag) => invoke!<BoardPastedItem>("am_board_paste", { tag }),

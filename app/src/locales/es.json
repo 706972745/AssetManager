@@ -952,6 +952,7 @@
   "board.layers_tip": "Panel de capas (L): todas las imágenes de un vistazo; haz clic en una para traerla al frente",
   "board.top_on_tip": "Siempre visible: haz clic para desactivar",
   "board.top_off_tip": "Siempre visible: mantén el tablero sobre otras ventanas",
+  "board.min_tip": "Ocultar (vuelve al abrir la misma etiqueta)",
   "board.close_tip": "Cerrar (Esc)",
   "board.unit_image": " imágenes",
   "board.missing_count": " · {n} no encontradas",

@@ -966,6 +966,7 @@
   "board.layers_tip": "图层面板（L）：所有图片一览，点谁谁置顶",
   "board.top_on_tip": "已置顶：点一下取消",
   "board.top_off_tip": "置顶：让灵感板始终显示在其他窗口前面",
+  "board.min_tip": "收起（再从主窗打开同一个标签就回来）",
   "board.close_tip": "关闭（Esc）",
   "board.unit_image": " 张",
   "board.missing_count": " · {n} 张这次没找到",

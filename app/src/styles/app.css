@@ -4610,9 +4610,9 @@ body[data-dragging] .batch-bar * {
 /* ---------------- 无边框贴图窗口（0.9.0，照果核看图的无边框模式） ----------------
 
    窗口尺寸由后端按图片比例算好，这里只管"图正好铺满、外面什么都没有"。
-   **不做圆角、不留 padding**：窗口边缘 = 图片边缘，这样截图框选时不会带进来一圈
-   透明（果核看图为了放阴影留了 29px，截图时反而要手动避开）。
-   白图贴在白底网页上会"消失"，所以加一圈 inset 发丝线。 */
+   **不做圆角**；四周留 `--peek-glow`（3px）透明边，专门给图的紫色外阴影用 ——
+   窗口外面没有像素，阴影画不出去。窗口 = 图 + 2×3px，图本身仍然是 1:1。
+   白图贴在白底网页上会"消失"，所以加一圈 inset 发丝线（蓝色边框开关）。 */
 html.peek-body,
 body.peek-body {
   background: transparent !important;
@@ -4625,17 +4625,19 @@ body.peek-body #root {
 }
 
 .peek-root {
-  /* 四周的透明边距，曾经专门给「向外的蓝色渐变」用（窗口外没有像素，光晕只能画在窗口里）。
-     **0.4.24 起归零**（owner 2026-11-21「贴图会有一圈透明的，应该是打开时的比例才对」）：
-     窗就是图，比例和缩略图一致，外面不再套一圈透明。
+  /* 四周的透明边距：窗口外面没有像素，**向外**的阴影只能画进窗口里这圈边。
+     现在是 3px，`inset` 让 root 的边框盒往里缩这么多，`box-shadow` 的 3px 模糊正好落在这圈里 ——
+     真外阴影，而且不盖住图自己的任何一个像素。
      后端 `PEEK_GLOW` 必须同值 —— 改这里就得同步改 `main.rs`，否则图会偏、会缩。
-     20 → 10px（0.2.2）→ 0（0.4.24）。 */
-  --peek-glow: 0px;
-  padding: var(--peek-glow);
-  box-sizing: border-box;
+     20 → 10px（0.2.2）→ 0（0.4.24）→ 3（0.6.x，紫色阴影）。 */
+  --peek-glow: 3px;
+  /* 用 `inset` 而不是 `padding`：阴影画在**边框盒外**，padding 是往里算的，
+     那样 `inset: 0` 的 root 铺满整窗、阴影全在窗口外、一点都看不见。 */
   position: fixed;
-  inset: 0;
+  inset: var(--peek-glow);
   overflow: hidden;
+  /* 紫色 3px 外阴影（主题紫，深/浅两套自动跟随），和灵感板同一套做法。 */
+  box-shadow: 0 0 3px 0 var(--accent-a);
   /* **必须全透明**：Ctrl+滚轮降不透明度时，透出来的应该是桌面，
      不是这层容器自己的底色（0.10.x 这里写的是 #0f0f11，owner 看到的就是"变黑"）。 */
   background: transparent;
@@ -4708,15 +4710,15 @@ body.peek-body #root {
 .peek-framed::after {
   content: "";
   position: absolute;
-  /* 只圈住"图"那一块（`--peek-glow` 已经是 0，`inset: 0` 就是图的边缘） */
-  inset: var(--peek-glow);
+  /* 只圈住"图"那一块：root 已经用 `inset: var(--peek-glow)` 缩到图的框上了，
+     所以这里就是 `inset: 0`（再缩一次会跑到图里面去）。 */
+  inset: 0;
   pointer-events: none;
   /* **只有 1px 实线，没有任何外发光 / 投影**（owner 2026-11-23：「打开蓝色边框就有一圈阴影」）。
      以前是 1px 实边 + 2px/6px 两圈扩散：在深色桌面上几乎看不出来，贴到白底网页/文档上
-     就变成一圈明显的蓝雾，看上去像"贴图自带了投影"，而不是一条边界线。
-     而且贴图窗是"窗就是图"（`--peek-glow: 0`），任何向外的光只能画在窗口**里面**、
-     盖住图最外那几个像素 —— 越想"发光"越糊住内容，所以这里只留勾边这一层。
-     要做外发光必须先把外圈透明边（后端 `PEEK_GLOW`）加回来，那是另一件事，别顺手改。 */
+     就变成一圈明显的蓝雾，看上去像"贴图自带的投影"，而不是一条边界线。
+     现在向外的光由 `.peek-root` 的 3px 紫色阴影负责（画在窗口内的透明边里，不压图），
+     这里只留勾边这一层。 */
   box-shadow: inset 0 0 0 1px rgba(108, 63, 209, 0.8);
   z-index: 5;
 }
@@ -5864,7 +5866,9 @@ html[data-theme="light"] .snip-text {
 
 html.board-body,
 body.board-body {
-  background: #101013;
+  /* 和贴图窗同一套：窗口本身透明，底色 + 紫阴影全由 `.board-root` 画在往里 3px 那一圈里。
+     写死深色的话，`box-shadow` 没有"窗外"可落，只会被窗口裁掉。 */
+  background: transparent;
   overflow: hidden;
 }
 body.board-body #root {
@@ -5872,8 +5876,10 @@ body.board-body #root {
 }
 
 .board-root {
+  /* 四周留 3px = 紫色外阴影的落点（窗口外面没有像素）。板子的可视底面从这里开始。 */
   position: fixed;
-  inset: 0;
+  inset: 3px;
+  border-radius: 4px;
   overflow: hidden;
   /* 深灰底 + 极淡的**点阵**，让"没有边界"这件事看得见（PureRef 也是这么暗示的）。
      owner 2026-11-19：原来画的是网格线（两条 linear-gradient 交叉），改成点。
@@ -5884,7 +5890,11 @@ body.board-body #root {
   background-image: radial-gradient(circle, var(--board-dot) 1px, transparent 1.6px);
   background-size: 48px 48px;
   background-position: 0 0;
-  cursor: grab;
+  /* 紫色 3px 外阴影，和贴图窗一致（主题紫 `--accent-a`，深/浅两套自动跟随）。 */
+  box-shadow: 0 0 3px 0 var(--accent-a);
+  /* 平时就是普通箭头：这块画布的主操作是"点图 / 拖图 / 框选"，抓手光标会让人误以为
+     整块板都能抓走（owner 2026-11-2x：悬停永远是抓手）。只有中键按住平移时才变 `grabbing`。 */
+  cursor: default;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -5894,11 +5904,7 @@ body.board-body #root {
 .board-root.dragging-img {
   cursor: default;
 }
-/* 空白处平时就是抓手（提示"这里能拖动画布"，按中键拖）；按下变攥拳。
-   以前只有按下那一刻才变，站在画布上完全看不出这块能拖。 */
-.board-root {
-  cursor: grab;
-}
+/* 空白处也是普通箭头 —— 平移是**中键**的活（左键空白拖 = 框选，见 Board.tsx onDown）。 */
 .board-root.marquee {
   cursor: crosshair;
 }

@@ -499,6 +499,8 @@ export const mockSource: Source = {
     throw new Error(t("mock.board"));
   },
   async boardClose() {},
+  /* 浏览器预览没有真窗口：收起是空操作（顶栏按钮还能点，不会报错） */
+  async boardHide() {},
   /* 浏览器预览没有真窗口：置顶永远"成功"，让顶栏按钮的按下手感能演示 */
   async boardTop(on: boolean) {
     return on;
