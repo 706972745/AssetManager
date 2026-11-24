@@ -70,7 +70,7 @@ function ShadowSwatches({
   t: (k: TKey) => string;
 }) {
   return (
-    <div className="shadow-swatches" role="radiogroup" aria-label={t("settings.shadowColor")}>
+    <div className="glow-picker" role="radiogroup" aria-label={t("settings.shadowColor")}>
       {SHADOW_PRESETS.map((p) => {
         const on = p.v === "" ? !value : value.toLowerCase() === p.v.toLowerCase();
         return (
@@ -79,13 +79,13 @@ function ShadowSwatches({
             type="button"
             role="radio"
             aria-checked={on}
+            tabIndex={on ? 0 : -1}
             title={t(p.tk)}
-            className={`shadow-swatch${on ? " on" : ""}`}
+            aria-label={t(p.tk)}
+            className={on ? "glow-chip on" : "glow-chip"}
+            style={{ background: p.swatch }}
             onClick={() => onChange(p.v)}
-          >
-            <span className="shadow-swatch-dot" style={{ background: p.swatch }} />
-            <span>{t(p.tk)}</span>
-          </button>
+          />
         );
       })}
     </div>

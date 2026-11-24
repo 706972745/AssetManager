@@ -82,6 +82,10 @@
      在 <html> 上内联覆盖本变量。只声明一次即可 —— 自定义属性在**使用处**解析
      var(--accent-a)，所以浅/深主题切换时这圈阴影会自动跟着变。 */
   --shadow-color: var(--accent-a);
+  /* 窗口外壳往里缩的量（0.6.4）。全窗 scrim（设置/灯箱/对话框/命令面板/板窗）
+     都读它：fixed 元素会逃出 .app-frame 的 overflow:hidden，inset:0 会把外圈阴影
+     罩成灰色 —— FontManager 同一问题同一解法（见其 app.css:36-41）。 */
+  --frame-inset: 3px;
   --accent-soft: rgba(167, 139, 250, 0.14);
   /* 强调色第三、四档 + 渐变（FM 最终生效值 `app.css:8494-8495`）。
      已消费：`.switch.on` 用 `--accent-gradient`（对齐 FM `app.css:1379-1386` 的

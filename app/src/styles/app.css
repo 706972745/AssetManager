@@ -12,7 +12,7 @@
      首个子元素的 margin-top 会和它折叠到 body 上 —— 结果是左右下各缩 3px、顶边贴死窗口，
      看起来"只有顶部没有阴影"（owner 2026-11-24 报的就是这个）。 */
   position: absolute;
-  inset: 3px;
+  inset: var(--frame-inset);
   display: flex;
   flex-direction: column;
   background: var(--canvas);
@@ -1489,7 +1489,7 @@
 
 .lightbox {
   position: fixed;
-  inset: 0;
+  inset: var(--frame-inset);
   /* position:fixed 会逃出 .app-frame 的 overflow:hidden，遮罩自己也得跟着圆角，
      否则透明窗口的四角会被这层灰盖成直角。 */
   border-radius: var(--qb-radius);
@@ -1743,7 +1743,7 @@
    语言照 FontManager（0 圆角侧栏行 + 2px 蓝竖线、1px 发丝线卡片、全局滚动条）。 */
 .set-scrim {
   position: fixed;
-  inset: 0;
+  inset: var(--frame-inset);
   /* fixed 会逃出 .app-frame 的 overflow:hidden，遮罩自己也要带圆角 */
   border-radius: var(--qb-radius);
   background: var(--scrim);
@@ -2103,41 +2103,32 @@
   padding: 0 4px;
 }
 
-/* 窗口外阴影色预设（0.6.3）：主题紫 / 黑 / 白 / 灰四个色块。
-   不做色轮 —— owner 要的就是这四档，少一个自由输入就少一处脏值。 */
-.shadow-swatches {
-  display: inline-flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.shadow-swatch {
-  display: inline-flex;
+/* 窗口外阴影色预设（0.6.3，形态照 FontManager `.glow-chip`）：
+   四个 20px 圆点（主题紫 / 黑 / 白 / 灰），不写文字；选中态外圈强调色描边。 */
+.glow-picker {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid rgba(var(--ink-rgb), 0.08);
-  border-radius: 6px;
-  background: var(--e1);
-  color: var(--text-2);
-  font-size: var(--fs-11);
-  transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
+  gap: 10px;
 }
-.shadow-swatch:hover {
-  color: var(--text-1);
-}
-.shadow-swatch.on {
-  background: var(--ui-panel);
-  border-color: var(--ui-accent);
-  color: var(--text-1);
-}
-.shadow-swatch-dot {
-  width: 12px;
-  height: 12px;
+.glow-chip {
+  width: 20px;
+  height: 20px;
   flex: 0 0 auto;
+  padding: 0;
   border-radius: 50%;
-  /* 白/浅灰色块也要看得见边界，所以四档统一内描边 */
-  box-shadow: inset 0 0 0 1px rgba(var(--ink-rgb), 0.2);
+  border: 1px solid rgba(var(--ink-rgb), 0.22);
+  cursor: pointer;
+  transition: transform var(--t-quick) ease, box-shadow var(--t-quick) ease;
+}
+.glow-chip:hover {
+  transform: scale(1.12);
+}
+.glow-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow-soft);
+}
+.glow-chip.on {
+  box-shadow: 0 0 0 2px var(--ui-panel), 0 0 0 3.5px var(--accent-a);
 }
 
 /* 开关：形态照 FontManager `.pill-toggle`（34×19 胶囊 + 内阴影 + 白色渐变滑块，
@@ -2608,7 +2599,7 @@
    样式和这套界面不搭，而且会打断拖拽状态。 */
 .dlg-scrim {
   position: fixed;
-  inset: 0;
+  inset: var(--frame-inset);
   z-index: 130;
   border-radius: var(--qb-radius);
   background: var(--scrim);
@@ -3990,7 +3981,7 @@ body[data-dragging] .batch-bar * {
 /* ── 命令面板（T27）560×420，与 FontManager 同名面板同尺寸 ─────────────── */
 .cmdk-scrim {
   position: fixed;
-  inset: 0;
+  inset: var(--frame-inset);
   border-radius: var(--qb-radius);
   background: var(--scrim);
   display: flex;
@@ -6663,7 +6654,8 @@ body.board-body #root {
 }
 .board-miss {
   position: fixed;
-  inset: 0;
+  inset: var(--frame-inset);
+  border-radius: 4px;
   display: grid;
   place-items: center;
   background: #101013;
@@ -6674,7 +6666,7 @@ body.board-body #root {
 /* 空板 / 操作反馈（0.11.0）—— 板上没有 toast，就一条会自己消失的提示 */
 .board-empty {
   position: fixed;
-  inset: 30px 0 0;
+  inset: 30px var(--frame-inset) var(--frame-inset);
   display: flex;
   flex-direction: column;
   align-items: center;
