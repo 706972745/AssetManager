@@ -2512,6 +2512,38 @@
   background: var(--ui-menu);
   box-shadow: var(--shadow-mass);
 }
+/* 「加入分组 / 加入快照」的二级面板（2026-11-25 owner：悬停展开，不是点开）。
+   与主菜单同宽同字号，向左弹 6px；必须是 fixed —— 主菜单自己 overflow-y:auto，
+   绝对定位的子面板会被裁掉（和顶栏筛选的 `.menu.submenu` 同一个坑）。 */
+.ctx-menu.ctx-sub {
+  z-index: 121;
+  max-height: 320px;
+  transform: translate(-100%, -6px) translateX(-6px);
+  transform-origin: top right;
+  /* 入场照主菜单的观感（0.96 → 1 + 淡入）。**不能交给 motion**：
+     motion 会写内联 transform，把上面那条向左弹覆盖掉（2026-11-26 实测面板压到主菜单上）。 */
+  animation: ctx-sub-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes ctx-sub-in {
+  from {
+    opacity: 0;
+    /* 只缩放视觉，锚点仍是 CSS 里的 translate 那套（两者在动画期间会叠加，
+       所以 from 里把位移原样带上，结束帧回到 static 值） */
+    transform: translate(-100%, -6px) translateX(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-100%, -6px) translateX(-6px) scale(1);
+  }
+}
+.ctx-item.has-sub {
+  color: var(--text-1);
+}
+.ctx-arrow {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-3);
+}
 .ctx-item {
   display: flex;
   align-items: center;
@@ -8167,38 +8199,41 @@ html[data-theme="light"] .board-empty-hint kbd {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 40px 24px 32px;
+  /* FM：48px 32px（上下留白更大一圈，图标不贴顶） */
+  padding: 48px 32px;
   text-align: center;
 }
 .about-icon {
-  width: 72px;
-  height: 72px;
-  border-radius: var(--r-12);
-  /* 1px 描边底座（设计稿 §3.7）：图标浮在页面上有一个边界，不再像贴纸 */
-  border: 1px solid var(--hairline);
-  background: var(--e1);
-  padding: 3px;
-  /* 图标光晕（照 FM `.about-icon` 的 drop-shadow；颜色换 AM 的强调色光，深/浅主题各自取值）。
-     FM 用 28px，这里图标小一档，光斑跟着收 4px。 */
-  filter: drop-shadow(0 0 24px var(--accent-glow-soft));
+  /* 照 FontManager 生效值：96px **裸图**（无边框/无底色/无圆角/无内边距），
+     只靠两圈 drop-shadow 托起来。以前 AM 是 72px + 1px 描边的方块，
+     和 FM 并排看是"小一号还带个盒子"。 */
+  width: 96px;
+  height: 96px;
+  margin-bottom: 18px;
+  user-select: none;
+  filter: drop-shadow(0 0 28px var(--accent-glow-soft)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.25));
 }
 .about-name {
-  margin: 14px 0 6px;
-  font-size: var(--fs-28);
-  font-weight: 600;
+  /* FM：22px / 700 / -0.01em，没有外边距（间距由图标 margin-bottom 给） */
+  font-size: 22px;
+  font-weight: 700;
   letter-spacing: -0.01em;
+  line-height: 1.15;
   color: var(--text-1);
 }
 .about-version {
-  font-size: var(--fs-11);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
   letter-spacing: 0.04em;
   color: var(--text-3);
 }
 .about-desc {
+  /* FM 生效值：11px / 1.75 / 560（AM 的 --fs-11 是 12px，这里按 FM 的绝对字号写） */
   max-width: 560px;
   margin: 14px 0 0;
-  font-size: var(--fs-13);
-  line-height: 1.7;
+  font-size: 11px;
+  line-height: 1.75;
   color: var(--text-2);
 }
 .about-features {
@@ -8209,22 +8244,28 @@ html[data-theme="light"] .board-empty-hint kbd {
   gap: 8px;
 }
 .about-feature {
+  /* FM 生效值（2026-11-10 那次「功能一览不再是卡片」的覆盖）：只有图标 + 文字，
+     没有底色 / 描边 / 圆角 —— 这一页带底色的只留给真正能点的链接卡。 */
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-4);
-  background: var(--e1);
+  gap: 9px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 0;
+  background: none;
   text-align: left;
 }
 .about-feature-icon {
   display: grid;
   place-items: center;
-  color: var(--text-3);
+  /* FM 生效值：强调色 + 0.75 透明度（不是纯灰），整页「能关联到功能」的视觉落点 */
+  color: var(--ui-accent);
+  opacity: 0.75;
 }
 .about-feature-text {
-  font-size: var(--fs-11);
+  /* FM 生效值 11px（AM 的 --fs-11 = 12px，三列窄格会更挤） */
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--text-2);
 }
 .about-stack {
@@ -8236,11 +8277,13 @@ html[data-theme="light"] .board-empty-hint kbd {
   gap: 6px;
 }
 .about-chip {
-  padding: 3px 9px;
+  /* FM 生效值：4px 10px / 11px / 全圆角 / ink .08 描边 + 微渐变底 */
+  padding: 4px 10px;
   border-radius: var(--r-pill);
-  border: 1px solid var(--hairline);
-  font-size: var(--fs-10);
-  color: var(--text-3);
+  border: 1px solid rgba(var(--ink-rgb), 0.08);
+  background: linear-gradient(180deg, rgba(var(--ink-rgb), 0.05), rgba(var(--ink-rgb), 0.02));
+  font-size: 11px;
+  color: var(--text-2);
 }
 .about-section {
   width: min(600px, 100%);
@@ -8312,7 +8355,8 @@ html[data-theme="light"] .board-empty-hint kbd {
   grid-column: 1 / -1;
   /* 地址是「要照着敲」的信息 → 等宽 + 11px（FontManager 同款口径；10px 加等宽在小尺寸上连字）。
      颜色用次文字色而不是弱文字色：压在浅底上 3:1 的小字会糊成一条灰影。 */
-  font-size: var(--fs-11);
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8329,7 +8373,7 @@ html[data-theme="light"] .board-empty-hint kbd {
   width: min(640px, 100%);
   margin-top: 32px;
   padding-top: 26px;
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid var(--ui-line);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -8501,6 +8545,17 @@ html[data-theme="light"] .about-sponsor-card {
   flex: none;
   display: inline-flex;
   align-items: center;
+}
+/* 星级行（筛选 → 评分）：五颗星并排，比文字「N 星及以上」一眼看清。
+   空心的那几颗用 --text-3，实心的跟随行色（选中时是强调色）。 */
+.menu-stars {
+  gap: 2px;
+}
+.menu-stars svg {
+  flex: none;
+}
+.menu-item:not(.on) .menu-stars svg[fill="none"] {
+  color: var(--text-3);
 }
 .menu-ico-auto {
   color: var(--accent);
@@ -9797,4 +9852,76 @@ body.am-dragging * {
 /* 标注模式下的指针：画图工具一律十字（"落下就是画"），和平移/框选的手感分开 */
 .board-root.annotating {
   cursor: crosshair;
+}
+
+/* ===== 关于 · 照 FontManager 逐项对齐（2026-11-26） =====
+   只覆盖与 FM 生效值不一致的几处（FM src/app.css:2056–2245 / 8403–8564）：
+   功能区间距、chip 内高光、链接卡内距与底色、图标框圆角与底色、箭头 hover。
+   本段整体删掉即回滚到上一版，不动上面任何已有规则。 */
+.about-features {
+  /* FM：6px 18px / margin-top 22px（原 8px / 26px） */
+  margin-top: 22px;
+  gap: 6px 18px;
+}
+.about-feature-icon {
+  /* FM：inline-flex + 不收缩（原 grid 居中，视觉相同但盒模型不同） */
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.about-feature-text {
+  min-width: 0;
+}
+.about-chip {
+  /* FM：药丸顶部一道极淡内高光（AM 令牌为 transparent，仅结构对齐） */
+  box-shadow: inset 0 1px 0 var(--glass-top-highlight);
+}
+.about-section-title {
+  /* FM 用 --ui-accent；AM 的 --accent 是同一值的别名，这里按 FM 原样写 */
+  color: var(--ui-accent);
+}
+.about-links {
+  gap: 12px;
+}
+.about-link {
+  /* FM：16px 18px / 纯色 panel 底（原 14px 16px + --e1） */
+  padding: 16px 18px;
+  background: var(--ui-panel);
+  border-color: var(--ui-line);
+}
+.about-link:hover {
+  background: var(--ui-panel);
+}
+.about-link-icon {
+  /* FM 生效值（app.css:8452–8462）：40px 方块 / **10px** 圆角 / 强调色 10% 底 + 18% 描边。
+     这里原来写的是 8px 圆角 + 14% 选中态底，并排看图标框小一圈、底色重一档。 */
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ui-accent) 10%, transparent);
+}
+.about-link-label {
+  line-height: 1.35;
+}
+.about-link-arrow {
+  /* FM：只过渡颜色（不含 transform） */
+  transition: color var(--t-quick) var(--ease-std);
+}
+.about-link:hover .about-link-arrow {
+  /* FM：hover 点亮到次文字色 + 右上抬 1px（不是强调色） */
+  color: var(--text-2);
+  transform: translate(1px, -1px);
+}
+@media (max-width: 720px) {
+  .about-features {
+    /* FM：窄窗退两列 */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .about-features {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 640px) {
+  .about-links {
+    grid-template-columns: 1fr;
+  }
 }

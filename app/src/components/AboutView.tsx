@@ -1,34 +1,31 @@
 /**
- * 关于（**照 FontManager 的 AboutView 版式与动效**，owner 2026-11-17）。
+ * 关于（照 FontManager 的 AboutView 逐项对齐，owner 2026-11-26）。
  *
- * 结构：图标 → 名称 → 版本 + 许可 → 一句话说明 → 能力网格 → 技术栈 chips → 链接卡。
- * 动效（2026-11-22 照 FM 逐项搬，曲线直接用 `design/springs.ts` 的同一条）：
+ * 结构（与 FM 完全一致）：图标 → 名称 → 版本 + 许可 → 一句话说明 →
+ * 3 列能力网格（6 条，两行）→ 技术栈 chips → 分组小标题 → 两张链接卡 → 赞助区。
+ * 动效（与 FM 同一条曲线，来自 `design/springs.ts`）：
  *   · 整页淡入 + 上移 16px（spring）
- *   · 图标轻微缩放淡入、版本行延迟淡入
  *   · 功能格 8px 上移 + 40ms 交错（springSoft）
  *   · 链接卡 10px 上移 + 交错、hover 抬 1px、按下透明度 0.96
+ *   · 赞助区 10px 上移（delay 0.12）
+ * FM 里图标与版本行是静态的，这里也不加额外动画。
  * 颜色一律用 AM 令牌（强调色是 --ui-accent 紫，不是 FM 的蓝）。
  *
  * 链接（照 FontManager 两张卡的做法）：**本项目仓库** + **GitHub 主页**。
- * 两张卡图标必须不同 —— 都画 GitHub 字形会看着像重复（FontManager 那条注释同理）。
- * 插件仓库还没建，等建了再加第三张（用拼图图标）。
+ * 两张卡图标必须不同 —— 都画 GitHub 字形会看着像重复。
  *
- * 赞助区（2026-11-23）：链接卡下面「现在还早，刚好；」整块居中 —— 标题 / 三段正文 /
- * 一段弱化的声明 / 两张二维码（左支付宝、右微信）。二维码图是用户给的手机截图，
- * 已用 PIL 裁掉底部那行「…服务部 经营」、补白边后导出到 `assets/about/`。
+ * 赞助区：链接卡下面「现在还早，刚好；」整块居中 —— 标题 / 三段正文 /
+ * 一段弱化的声明 / 两张二维码（左支付宝、右微信）。
  */
 import { motion, useReducedMotion } from "motion/react";
 import {
   ArrowUpRight,
+  Command,
   FolderOpen,
-  Image as ImageIcon,
-  Search,
   ShieldCheck,
   Sparkles,
-  Star,
   Tags,
   UserRound,
-  Zap,
 } from "lucide-react";
 import { spring, springSnappy, springSoft, staggerDelay } from "../design/springs";
 import { useT, type TKey } from "../lib/i18n";
@@ -37,15 +34,13 @@ import { useT, type TKey } from "../lib/i18n";
 import qrAlipay from "../assets/about/sponsor-alipay.png";
 import qrWechat from "../assets/about/sponsor-wechat.png";
 
+/** 6 条能力：FM 的三列网格正好两行（不多不少，不留半行空位）。 */
 const FEATURES: { key: TKey; icon: React.ReactNode }[] = [
   { key: "about.featIndex", icon: <FolderOpen size={14} strokeWidth={1.5} /> },
-  { key: "about.featWarmup", icon: <Zap size={14} strokeWidth={1.5} /> },
   { key: "about.featTags", icon: <Tags size={14} strokeWidth={1.5} /> },
-  { key: "about.featRating", icon: <Star size={14} strokeWidth={1.5} /> },
-  { key: "about.featSnapshot", icon: <Sparkles size={14} strokeWidth={1.5} /> },
-  { key: "about.featBoard", icon: <ImageIcon size={14} strokeWidth={1.5} /> },
-  { key: "about.featPalette", icon: <Search size={14} strokeWidth={1.5} /> },
+  { key: "about.featPalette", icon: <Command size={14} strokeWidth={1.5} /> },
   { key: "about.featDrag", icon: <ArrowUpRight size={14} strokeWidth={1.5} /> },
+  { key: "about.featSnapshot", icon: <Sparkles size={14} strokeWidth={1.5} /> },
   { key: "about.featLocal", icon: <ShieldCheck size={14} strokeWidth={1.5} /> },
 ];
 
@@ -142,24 +137,11 @@ export function AboutView({ onOpenUrl }: { onOpenUrl: (url: string) => void }) {
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : spring}
     >
-      <motion.img
-        className="about-icon"
-        src="/icon.png"
-        alt=""
-        draggable={false}
-        initial={reduce ? false : { opacity: 0, scale: 0.92 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={reduce ? { duration: 0 } : { ...springSoft, delay: 0.04 }}
-      />
+      <img className="about-icon" src="/icon.png" alt="" draggable={false} />
       <h1 className="about-name">AssetManager</h1>
-      <motion.div
-        className="about-version tabular"
-        initial={reduce ? false : { opacity: 0, y: 4 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={reduce ? { duration: 0 } : { ...springSoft, delay: 0.08 }}
-      >
+      <div className="about-version tabular">
         {t("about.version", { version: __APP_VERSION__ })}
-      </motion.div>
+      </div>
       <p className="about-desc">{t("about.desc")}</p>
 
       <div className="about-features" aria-label={t("about.featuresAria")}>

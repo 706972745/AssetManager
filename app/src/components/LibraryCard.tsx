@@ -119,6 +119,7 @@ export function LibraryCard({
     setDataExporting(root);
     try {
       const p = await source.exportUserdata(root);
+      if (!p) return; // 用户在保存对话框里点了取消
       onToast(t("settings.toast.userdataExported"), false, p);
     } catch (e) {
       onToast(String(e), true);

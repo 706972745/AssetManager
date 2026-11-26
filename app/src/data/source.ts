@@ -136,8 +136,9 @@ export const tauriSource: Source = {
     invoke!<[number, number]>("am_cache_gc", { limit, target }),
   dataDir: () => invoke!<string>("am_data_dir"),
   rebuildIndex: () => invoke!<void>("am_rebuild_index"),
+  /** null = 用户在系统保存对话框里点了取消（2026-11-25：落点由用户选，不再写死在数据目录） */
   exportUserdata: (path) =>
-    invoke!<string>("am_export_userdata", { path: path ?? null }),
+    invoke!<string | null>("am_export_userdata", { path: path ?? null }),
   pickFolder: (title) => invoke!<string | null>("am_pick_folder", { title: title ?? null }),
   dataRoot: () => invoke!<DataRootInfo>("am_data_root"),
   probeDir: (dir) => invoke!<DirProbe>("am_probe_dir", { dir }),

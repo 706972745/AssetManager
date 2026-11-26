@@ -3844,12 +3844,23 @@ export default function App() {
             label:
               n > 1 ? t("app.menu.add_to_coll_n", { count: n }) : t("app.menu.add_to_coll"),
             icon: "folder-open",
-            /* 第二级菜单：菜单自己点完会关掉，所以延一帧再开新的，
-               否则刚设进去的 ctx 立刻被 onClose 清掉（表现为"点了没反应"） */
-            action: () => {
-              const ids2 = inSel ? [...selectedIds] : [a.id];
-              window.setTimeout(() => collPickMenu(ids2, x, y), 0);
-            },
+            /* 悬停直接展开分组列表（2026-11-25 owner：不要"先点一下才弹二级菜单"） */
+            sub: colls.length
+              ? colls.map((c) => ({
+                  label: c.name,
+                  icon: "folder-open",
+                  action: () => void addToColl(c.id, inSel ? [...selectedIds] : [a.id]),
+                }))
+              : [
+                  { kind: "heading" as const, label: t("app.empty.no_collections") },
+                  {
+                    label: t("app.empty.no_collections_hint"),
+                    icon: "plus",
+                    action: () => {},
+                  },
+                ],
+            /* 有子菜单时点击只负责展开，动作都在子项里 */
+            action: () => {},
           },
           /* 正在按某个分组筛选时，才给「从这个分组移除」—— 否则用户不知道往哪个组移除。
              多选时作用于整个选中集合。 */
@@ -3871,14 +3882,25 @@ export default function App() {
               ]
             : []),
           {
-            /* 快照（0.1.18）：只记清单、不搬文件，所以放在「加入分组」旁边 */
+            /* 快照（0.1.18）：只记清单、不搬文件，所以放在「加入分组」旁边。
+               2026-11-25 owner：悬停展开快照列表，末尾给一条「新建快照」走原来的弹层。 */
             label:
               n > 1 ? t("app.menu.add_to_snap_n", { count: n }) : t("app.menu.add_to_snap"),
             icon: "camera",
-            action: () => {
-              const ids2 = inSel ? [...selectedIds] : [a.id];
-              window.setTimeout(() => setSnapPrompt({ mode: "ids", ids: ids2 }), 0);
-            },
+            sub: [
+              ...snaps.map((s) => ({
+                label: s.name,
+                icon: "camera",
+                action: () => void addIdsToSnapshot(s.id, inSel ? [...selectedIds] : [a.id]),
+              })),
+              ...(snaps.length ? [{ kind: "separator" as const }] : []),
+              {
+                label: t("app.cmd.snap_new"),
+                icon: "plus",
+                action: () => setSnapPrompt({ mode: "ids", ids: inSel ? [...selectedIds] : [a.id] }),
+              },
+            ],
+            action: () => {},
           },
           {
             label: t("app.menu.reveal"),
@@ -4608,6 +4630,7 @@ export default function App() {
           try {
             /* 只导当前库：命令面板没有选库这一步，交给设置页做多库选择 */
             const p = await source.exportUserdata(dir?.path ?? null);
+            if (!p) return; // 用户在保存对话框里点了取消
             toast(t("app.toast.exported_userdata"), false, p);
           } catch (e) {
             toast(String(e), true);

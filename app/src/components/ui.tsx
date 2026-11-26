@@ -553,6 +553,11 @@ export interface MenuItem {
   meta?: string;
   /** 二级菜单项：命中后在菜单左侧展开一块 fixed 面板（照 FontManager 的 FilterSubTrigger） */
   sub?: MenuItem[];
+  /**
+   * 星级行（筛选 → 评分专用，2026-11-25 owner：评分二级菜单只留"几颗星"，不要「N 星及以上」文字）。
+   * 传 1–5 时这一行画 5 颗星（前 N 颗实心），点击走 `onPick`；`label` 可留空。
+   */
+  stars?: number;
 }
 
 /**
@@ -571,6 +576,8 @@ export function Menu({
   onClose,
   variant = "ctx",
   align = "left",
+  keepOnPick = false,
+  closeOnLeave = false,
 }: {
   x: number;
   y: number;
@@ -579,6 +586,16 @@ export function Menu({
   variant?: "ctx" | "pop";
   /** pop 形态下菜单盒贴哪条边：FontManager 的两个下拉都是 right:0（贴按钮右沿） */
   align?: "left" | "right";
+  /**
+   * 点选项之后**不关闭**（2026-11-25 owner：筛选菜单点一个就消失没法连续勾）。
+   * 筛选菜单打开它，排序 / 颜色 / 右键菜单保持默认（点完就收）。
+   */
+  keepOnPick?: boolean;
+  /**
+   * 指针离开「主菜单 + 二级面板」后自动收起（240ms 宽限，照 FontManager）。
+   * 只给筛选菜单用 —— 其它下拉离开就消失会很烦人。
+   */
+  closeOnLeave?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const subRef = useRef<HTMLDivElement>(null);
@@ -624,6 +641,24 @@ export function Menu({
     }, 240);
   };
 
+  /* 指针离开「主菜单 + 二级面板」→ 整个菜单收起（`closeOnLeave`，筛选菜单专用）。
+     同样 240ms 宽限：从入口行移到左侧子面板中间有 6px 空隙，不留宽限就是"刚移过去就没了"。 */
+  const allTimer = useRef<number | null>(null);
+  const cancelAll = () => {
+    if (allTimer.current !== null) {
+      window.clearTimeout(allTimer.current);
+      allTimer.current = null;
+    }
+  };
+  const closeAllSoon = () => {
+    if (!closeOnLeave) return;
+    cancelAll();
+    allTimer.current = window.setTimeout(() => {
+      if (!ref.current?.matches(":hover") && !subRef.current?.matches(":hover")) onClose();
+      allTimer.current = null;
+    }, 240);
+  };
+
   useEffect(() => {
     const h = (e: MouseEvent) => {
       const t = e.target as Node;
@@ -640,6 +675,7 @@ export function Menu({
       window.removeEventListener("mousedown", h);
       window.removeEventListener("keydown", k);
       keep();
+      cancelAll();
     };
   }, [onClose, sub]);
 
@@ -651,6 +687,35 @@ export function Menu({
           {it.label}
         </div>
       );
+    /* 星级行（评分筛选用）：只画星，不写「N 星及以上」。点击 = 设为 ≥N 星 */
+    if (it.stars) {
+      return (
+        <button
+          key={i}
+          className={`menu-item ${it.on ? "on" : ""}`}
+          role="menuitemradio"
+          aria-checked={it.on === true}
+          aria-label={String(it.stars)}
+          onClick={() => {
+            it.onPick?.();
+            if (!keepOnPick) onClose();
+          }}
+        >
+          <span className="menu-ico menu-stars" aria-hidden>
+            {[1, 2, 3, 4, 5].map((k) => (
+              <Star
+                key={k}
+                size={12}
+                strokeWidth={1.6}
+                fill={k <= (it.stars ?? 0) ? "currentColor" : "none"}
+              />
+            ))}
+          </span>
+          <span className="menu-label" />
+          {it.check && <Check size={inSub ? 12 : 13} strokeWidth={2} className="menu-check" aria-hidden />}
+        </button>
+      );
+    }
     return (
       <button
         key={i}
@@ -663,7 +728,8 @@ export function Menu({
             return;
           }
           it.onPick?.();
-          onClose();
+          /* 筛选菜单（keepOnPick）点完保持打开，直到指针离开或点外部 */
+          if (!keepOnPick) onClose();
         }}
         onMouseEnter={(e) => {
           if (!inSub && it.sub?.length) openSub(e.currentTarget, it.sub);
@@ -713,6 +779,9 @@ export function Menu({
           top: Math.max(8, Math.min(y, window.innerHeight - maxH - 8)),
           maxHeight: maxH,
         }}
+        /* 筛选菜单：指针离开整块（主菜单 + 二级面板）才收；点选不关（keepOnPick） */
+        onMouseEnter={cancelAll}
+        onMouseLeave={closeAllSoon}
       >
         {items.map((it, i) => renderRow(it, i))}
       </div>
@@ -724,8 +793,14 @@ export function Menu({
           /* 指针进面板 → 取消"稍后收起"的计时器；出去 → 重新计时。
              没有这两个的话，从入口行移到面板（中间隔 6px）的瞬间计时器就开始跑，
              到点发现面板上没指针就把面板收掉 —— 用户的手感是「刚移过去就没了」。 */
-          onMouseEnter={keep}
-          onMouseLeave={closeSubSoon}
+          onMouseEnter={() => {
+            keep();
+            cancelAll();
+          }}
+          onMouseLeave={() => {
+            closeSubSoon();
+            closeAllSoon();
+          }}
         >
           {sub.items.map((it, i) => renderRow(it, i, true))}
         </div>

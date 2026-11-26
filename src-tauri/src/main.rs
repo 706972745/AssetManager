@@ -1211,7 +1211,7 @@ fn local_stamp() -> String {
 async fn am_export_userdata(
     path: Option<String>,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let (data_dir, lib_id, label) = {
         let app = lock(&state);
         let lib_id = match path.as_deref() {
@@ -1225,20 +1225,30 @@ async fn am_export_userdata(
         let label = app.lib_label(lib_id).unwrap_or_else(|| "素材库".into());
         (app.data_dir.clone(), lib_id, label)
     };
+    let name = format!(
+        "{}-userdata-{}.D-AssetManager",
+        am_core::snapshot::safe_file_stem(&label),
+        local_stamp()
+    );
+    /* 落点一律由用户选（2026-11-25 owner：导出的东西全部改自定义位置）。
+       原来写死在 `data_dir`，用户根本不知道文件去哪了。取消 = 返回 None，不是错误。 */
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("导出用户数据（不含原图）")
+        .set_file_name(name)
+        .add_filter("AssetManager 用户数据", &["D-AssetManager"])
+        .save_file()
+        .await;
+    let Some(h) = picked else { return Ok(None) };
+    let target = h.path().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let app = open_app(&data_dir)?;
         let json = app.export_userdata(Some(lib_id))?;
-        let name = format!(
-            "{}-userdata-{}.D-AssetManager",
-            am_core::snapshot::safe_file_stem(&label),
-            local_stamp()
-        );
-        let target = app.data_dir.join(name);
         std::fs::write(&target, json).map_err(|e| format!("写文件失败：{e}"))?;
         Ok::<String, String>(target.to_string_lossy().to_string())
     })
     .await
     .map_err(|e| format!("导出任务异常：{e}"))?
+    .map(Some)
 }
 
 /// 原生文件夹选择器（T15）。`rfd` 走系统 IFileDialog，比让用户手打路径靠谱得多。

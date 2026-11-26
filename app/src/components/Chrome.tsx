@@ -323,6 +323,12 @@ function TopBarImpl({
     COLOR_LABEL_KEY[c] ? t(COLOR_LABEL_KEY[c]) : (COLOR_LABEL[c] ?? c);
 
   const openMenu = (e: React.MouseEvent<HTMLElement>, k: "sort" | "filter" | "color") => {
+    /* 再点同一个按钮 = 收起。筛选菜单改成「点一项不关」之后，
+       必须留一个显式的关法，否则用户只能靠点空白处。 */
+    if (menu?.kind === k) {
+      setMenu(null);
+      return;
+    }
     const r = e.currentTarget.getBoundingClientRect();
     /* 传**右沿**：三个下拉都照 FontManager 贴按钮右侧展开（`.sort-menu { right: 0 }`），
        菜单比按钮宽，所以它是向左伸出去的。以前传左沿 + 左对齐，跟 FontManager 不是一个方向。 */
@@ -388,16 +394,6 @@ function TopBarImpl({
       meta: plainTagLabel,
       on: isPlainTag,
       sub: [
-        {
-          label: t("topbar.all_tags"),
-          icon: ICO_TAG,
-          on: !isPlainTag,
-          check: !isPlainTag,
-          /* 只清自己命名空间：筛着 `fmt:png` 时点「全部标签」不该把格式也放掉 */
-          onPick: () => {
-            if (isPlainTag) onTag(null);
-          },
-        },
         ...tags.map((tag) => ({
           label: tag.name,
           /* 标签行的图标口径和 FontManager 一致：手工标签 = 标签图标（不再是色点） */
@@ -474,9 +470,11 @@ function TopBarImpl({
       on: rating !== null,
       sub: [
         { label: t("topbar.all_ratings"), icon: ICO_STAR, on: rating === null, check: rating === null, onPick: () => onRating(null) },
+        /* 只画星，不写「N 星及以上」（owner 2026-11-25）：五颗星一眼就是等级，
+           再点同一档取消；语义仍是「≥N 星」（后端 `minRating` 没变）。 */
         ...[5, 4, 3, 2, 1].map((n) => ({
-          label: t("topbar.rating_at_least", { n }),
-          icon: ICO_STAR,
+          label: "",
+          stars: n,
           on: rating === n,
           check: rating === n,
           onPick: () => onRating(rating === n ? null : n),
@@ -599,6 +597,8 @@ function TopBarImpl({
       {!trashMode && (
       <button
         className={`ctl ctl-icon ${color ? "on" : ""}`}
+        /* 阻止 window 的「点外部关闭」先跑：否则同一点击里菜单先关再开，按钮永远收不起来 */
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => openMenu(e, "color")}
         title={color ? t("topbar.filter_by_color", { color: colorLabel(color) }) : t("topbar.filter_by_dominant_color")}
         aria-label={t("topbar.filter_by_dominant_color")}
@@ -612,6 +612,7 @@ function TopBarImpl({
 
       <button
         className={`ctl ctl-icon ${filterOn ? "on" : ""}`}
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => openMenu(e, "filter")}
         title={trashMode ? t("topbar.filter_trash") : t("topbar.filter_all")}
         aria-label={t("topbar.filter_by_type", { type: t(kind.labelKey) })}
@@ -623,6 +624,7 @@ function TopBarImpl({
       <div className="topbar-right">
         <button
           className="ctl"
+          onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => openMenu(e, "sort")}
           title={t("topbar.sort_title", { sort: sortLabel })}
         >
@@ -662,6 +664,9 @@ function TopBarImpl({
           y={menu.y}
           variant="pop"
           align="right"
+          /* 筛选菜单：点一项不关（要连续勾选），指针离开菜单+二级面板或点外部才收 */
+          keepOnPick={menu.kind === "filter"}
+          closeOnLeave={menu.kind === "filter"}
           onClose={() => setMenu(null)}
           items={
             menu.kind === "sort"

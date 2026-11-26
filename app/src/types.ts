@@ -556,9 +556,10 @@ export interface Source {
   dataDir(): Promise<string>;
   /** 重建索引：清索引 + 全量重扫所有库根（进度走 scan://progress） */
   rebuildIndex(): Promise<void>;
-  /** 导出**这一个库**的用户数据：`<库名>-userdata-<时间戳>.D-AssetManager`，返回落盘路径。
+  /** 导出**这一个库**的用户数据：`<库名>-userdata-<时间戳>.D-AssetManager`，返回落盘路径
+   *  （用户在系统保存对话框里点了取消则返回 null）。
    *  `path` 不传 = 当前库。 */
-  exportUserdata(path?: string | null): Promise<string>;
+  exportUserdata(path?: string | null): Promise<string | null>;
   /** 原生文件夹选择器；取消返回 null */
   pickFolder(title?: string): Promise<string | null>;
   /** 数据文件夹（索引 + 缩略图缓存）放哪：默认目录 / 自定义目录清单 */

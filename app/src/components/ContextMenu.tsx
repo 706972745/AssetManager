@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "motion/react";
+import { ChevronRight } from "lucide-react";
 import { Icon } from "./ui";
 import { springSnappy } from "../design/springs";
 
@@ -21,6 +22,11 @@ export type CtxItem =
       danger?: boolean;
       disabled?: boolean;
       action: () => void;
+      /**
+       * 二级菜单（2026-11-25 owner：「加入分组 / 加入快照」要**悬停**展开，不是点开）。
+       * 命中后主菜单左侧弹一块固定面板；子项点击执行自己的 action 并收掉整张菜单。
+       */
+      sub?: CtxItem[];
     }
   | { kind: "separator" }
   | { kind: "heading"; label: string }
@@ -84,6 +90,10 @@ function CtxInfoRow({ item }: { item: Extract<CtxItem, { kind: "info" }> }) {
 
 export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  const subRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const subTimer = useRef<number | null>(null);
+  const [sub, setSub] = useState<{ items: CtxItem[]; left: number; top: number } | null>(null);
   const [pos, setPos] = useState({ x: state.x, y: state.y });
 
   /* 贴边翻转：菜单不能被窗口右缘/下缘切掉。
@@ -111,7 +121,8 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
 
   useEffect(() => {
     const outside = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      const t = e.target as Node;
+      if (!ref.current?.contains(t) && !subRef.current?.contains(t)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -151,7 +162,30 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
     it.action();
   };
 
-  const rows: ReactNode = state.items.map((it, i) => {
+  /* 二级面板（「加入分组 / 加入快照」）：悬停即开，240ms 宽限后才收 —— 与顶栏筛选同一套手感 */
+  const keepSub = () => {
+    if (subTimer.current !== null) {
+      window.clearTimeout(subTimer.current);
+      subTimer.current = null;
+    }
+  };
+  const openSub = (el: HTMLElement, items: CtxItem[]) => {
+    keepSub();
+    triggerRef.current = el;
+    const r = el.getBoundingClientRect();
+    /* 面板固定 208 宽、向左弹（-100% - 6px）；贴窗口左缘时留 220px 给它
+       （208 + 2×6 间隙），否则面板左沿会压在窗口边上 */
+    setSub({ items, left: Math.max(220, r.left), top: r.top });
+  };
+  const closeSubSoon = () => {
+    keepSub();
+    subTimer.current = window.setTimeout(() => {
+      if (!triggerRef.current?.matches(":hover") && !subRef.current?.matches(":hover")) setSub(null);
+      subTimer.current = null;
+    }, 240);
+  };
+
+  const renderRow = (it: CtxItem, i: number, inSub = false): ReactNode => {
     if (it.kind === "separator") return <div className="ctx-sep" key={`s-${i}`} />;
     if (it.kind === "heading")
       return (
@@ -160,15 +194,29 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
         </div>
       );
     if (it.kind === "info") return <CtxInfoRow key={`f-${i}`} item={it} />;
+    const hasSub = !!(it.sub && it.sub.length);
     return (
       <button
         key={`i-${i}`}
-        className={`ctx-item ${it.danger ? "danger" : ""}`}
+        className={`ctx-item ${it.danger ? "danger" : ""} ${hasSub ? "has-sub" : ""}`}
         role="menuitem"
+        aria-haspopup={hasSub || undefined}
         disabled={it.disabled}
         onClick={(e) => {
           e.stopPropagation();
+          /* 有子菜单：点击只负责展开/收起，不执行动作（动作在子项里） */
+          if (hasSub && !inSub) {
+            if (sub) setSub(null);
+            else openSub(e.currentTarget, it.sub!);
+            return;
+          }
           pick(it);
+        }}
+        onMouseEnter={(e) => {
+          if (hasSub && !inSub) openSub(e.currentTarget, it.sub!);
+        }}
+        onMouseLeave={() => {
+          if (hasSub && !inSub) closeSubSoon();
         }}
       >
         {it.icon ? (
@@ -180,24 +228,44 @@ export function ContextMenu({ state, onClose }: { state: CtxState; onClose: () =
         )}
         <span className="ctx-label">{it.label}</span>
         {it.shortcut && <span className="ctx-kbd mono">{it.shortcut}</span>}
+        {hasSub && !inSub && (
+          <ChevronRight size={12} strokeWidth={1.6} className="ctx-arrow" aria-hidden />
+        )}
       </button>
     );
-  });
+  };
 
   return createPortal(
-    <motion.div
-      className="ctx-menu scroll-hot"
-      ref={ref}
-      style={{ left: pos.x, top: pos.y }}
-      role="menu"
-      /* 入场与 FontManager .ctx-menu 逐值一致：从左上角 0.96 弹出 4px，
-         弹簧收口（用户对两个软件的手感要求是同一种）。 */
-      initial={{ opacity: 0, scale: 0.96, y: -4 }}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      transition={springSnappy}
-    >
-      {rows}
-    </motion.div>,
+    <>
+      <motion.div
+        className="ctx-menu scroll-hot"
+        ref={ref}
+        style={{ left: pos.x, top: pos.y }}
+        role="menu"
+        /* 入场与 FontManager .ctx-menu 逐值一致：从左上角 0.96 弹出 4px，
+           弹簧收口（用户对两个软件的手感要求是同一种）。 */
+        initial={{ opacity: 0, scale: 0.96, y: -4 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        transition={springSnappy}
+      >
+        {state.items.map((it, i) => renderRow(it, i))}
+      </motion.div>
+      {sub && (
+        /* **不能是 motion.div**（2026-11-26 实测）：motion 会把 transform 写成内联
+           `translateX(0) scale(1)`，直接盖掉 CSS 里那条「向左弹 -100%」——二级面板
+           于是压在主菜单上往右伸。入场动效交给 `.ctx-sub` 的 CSS keyframes。 */
+        <div
+          ref={subRef}
+          className="ctx-menu ctx-sub scroll-hot"
+          style={{ left: sub.left, top: sub.top }}
+          role="menu"
+          onMouseEnter={keepSub}
+          onMouseLeave={closeSubSoon}
+        >
+          {sub.items.map((it, i) => renderRow(it, i, true))}
+        </div>
+      )}
+    </>,
     document.body
   );
 }
